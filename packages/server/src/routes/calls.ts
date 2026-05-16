@@ -10,7 +10,7 @@ import { runCall } from '../call-runner.js'
 
 function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean }): string {
 	const dataKeys = config.data ? Object.keys(config.data).sort() : []
-	const payload = JSON.stringify({ apiKeyId, goal: config.goal, voice: config.voice, context: config.context, dataKeys, tools: config.tools, results: config.results, aiDisclosure: config.aiDisclosure })
+	const payload = JSON.stringify({ apiKeyId, goal: config.goal, context: config.context, dataKeys, tools: config.tools, results: config.results, aiDisclosure: config.aiDisclosure })
 	return createHash('sha256').update(payload).digest('hex')
 }
 

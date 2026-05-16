@@ -1,5 +1,5 @@
 import { ApiError } from './errors.js'
-import type { ApiAgent, ApiCall, CreateCallResponse, MimicOptions, ToolSchema, Voice } from './types.js'
+import type { ApiCall, CreateCallResponse, MimicOptions, ToolSchema, Voice } from './types.js'
 
 const SDK_VERSION = '0.1.0'
 const MAX_RETRIES = 2
@@ -52,31 +52,22 @@ export class MimicClient {
 		extract?: Record<string, string>
 		ambience?: boolean
 		idempotencyKey?: string
-	}): Promise<{ agent: ApiAgent; call: CreateCallResponse }> {
-		const agent = await this.request<ApiAgent>('/api/v1/agents', {
+	}): Promise<{ call: CreateCallResponse }> {
+		const call = await this.request<CreateCallResponse>('/api/v1/calls', {
 			method: 'POST',
 			body: JSON.stringify({
-				name: params.goal.slice(0, 80) || 'voice agent',
+				to: params.to,
 				goal: params.goal,
 				voice: params.voice ?? 'female',
 				context: params.context ?? {},
 				tools: params.tools ?? [],
-				results: params.extract ?? {},
+				extract: params.extract ?? {},
 				ambience: params.ambience,
-			}),
-		})
-
-		const call = await this.request<CreateCallResponse>('/api/v1/calls', {
-			method: 'POST',
-			body: JSON.stringify({
-				agentId: agent.id,
-				to: params.to,
-				context: params.context ?? {},
 				idempotencyKey: params.idempotencyKey,
 			}),
 		})
 
-		return { agent, call }
+		return { call }
 	}
 
 	async getCall(id: string): Promise<ApiCall> {

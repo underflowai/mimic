@@ -88,7 +88,9 @@ export class Mimic {
 	 * const result = await call.result
 	 * ```
 	 */
-	call<T extends Record<string, unknown> = Record<string, never>>(options: CallOptions<T>): MimicCall<T> {
+	call<T extends Record<string, unknown> = Record<string, unknown>>(
+		options: CallOptions,
+	): MimicCall<T> {
 		return new MimicCall<T>({
 			client: this.client,
 			options,

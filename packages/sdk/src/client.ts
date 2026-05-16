@@ -1,5 +1,31 @@
 import { ApiError } from './errors.js'
+import { ZodObject, type ZodType } from 'zod'
+
 import type { ApiCall, CreateCallResponse, MimicOptions, ToolSchema, Voice } from './types.js'
+
+function serializeExtractSchema(schema?: ZodObject<Record<string, ZodType>>): Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> | undefined {
+	if (!schema || !(schema instanceof ZodObject)) return undefined
+	const shape = schema.shape as Record<string, ZodType>
+	const result: Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> = {}
+	for (const [key, field] of Object.entries(shape)) {
+		const description = field.description ?? key
+		const nullable = field.isNullable()
+		const optional = field.isOptional()
+		const typeName = getZodBaseType(field)
+		result[key] = { type: typeName, description, ...(nullable && { nullable }), ...(optional && { optional }) }
+	}
+	return result
+}
+
+function getZodBaseType(field: ZodType): string {
+	// Walk through nullable/optional wrappers to find the base type
+	const def = (field as { _def?: { typeName?: string; innerType?: ZodType } })._def
+	if (!def) return 'string'
+	if (def.typeName === 'ZodNullable' && def.innerType) return getZodBaseType(def.innerType)
+	if (def.typeName === 'ZodOptional' && def.innerType) return getZodBaseType(def.innerType)
+	const name = def.typeName?.replace('Zod', '').toLowerCase()
+	return name ?? 'string'
+}
 
 const SDK_VERSION = '0.1.0'
 const MAX_RETRIES = 2
@@ -52,7 +78,7 @@ export class MimicClient {
 		recipient?: { firstName: string; lastName?: string; email?: string }
 		aiDisclosure?: boolean
 		tools?: ToolSchema[]
-		extract?: Record<string, string>
+		extract?: ZodObject<Record<string, ZodType>>
 		ambience?: boolean
 		idempotencyKey?: string
 	}): Promise<{ call: CreateCallResponse }> {
@@ -67,7 +93,7 @@ export class MimicClient {
 				recipient: params.recipient,
 				aiDisclosure: params.aiDisclosure,
 				tools: params.tools ?? [],
-				extract: params.extract ?? {},
+				extract: serializeExtractSchema(params.extract),
 				ambience: params.ambience,
 				idempotencyKey: params.idempotencyKey,
 			}),

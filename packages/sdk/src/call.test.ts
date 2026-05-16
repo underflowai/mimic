@@ -208,7 +208,10 @@ describe('Typed extract and discriminated result', () => {
 		const call = mimic.call<{ confirmed: boolean; notes: string }>({
 			to: '+15551234567',
 			goal: 'Confirm appointment',
-			extract: { confirmed: 'whether confirmed', notes: 'any notes' },
+			extract: z.object({
+				confirmed: z.boolean().describe('whether confirmed'),
+				notes: z.string().describe('any notes'),
+			}),
 		})
 
 		await waitForSocket(ws)

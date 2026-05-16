@@ -97,19 +97,26 @@ export interface ToolSchema {
  * Options for making a voice call via {@link Mimic.call}.
  *
  * @typeParam T - Shape of the structured data to extract from the call.
- *   Keys must match the `extract` descriptions. Defaults to `{}`.
+ *   Inferred from the `extract` Zod schema. Defaults to `{}`.
  *
  * @example
  * ```typescript
- * const call = mimic.call<{ confirmed: boolean }>({
+ * import { z } from 'zod'
+ *
+ * const call = mimic.call({
  *   to: '+15551234567',
  *   goal: 'Confirm the appointment',
- *   extract: { confirmed: 'whether the appointment was confirmed' },
+ *   extract: z.object({
+ *     confirmed: z.boolean().describe('whether confirmed'),
+ *     notes: z.string().describe('any notes'),
+ *   }),
  *   tools: { checkCalendar },
  * })
+ * // result.data.confirmed → boolean
+ * // result.data.notes → string
  * ```
  */
-export interface CallOptions<T extends Record<string, unknown> = Record<string, never>> {
+export interface CallOptions {
 	/** Phone number to call (E.164 format, e.g. `'+15551234567'`). */
 	to: string
 	/** What the agent should accomplish on the call. */
@@ -154,10 +161,19 @@ export interface CallOptions<T extends Record<string, unknown> = Record<string, 
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
 	/**
-	 * What to extract from the call. Keys must match the type parameter `T`.
-	 * Values are plain-English descriptions of what to extract.
+	 * What to extract from the call. Pass a Zod object schema — types
+	 * are enforced at extraction time and flow into `result.data`.
+	 * Use `.describe()` on each field to tell the agent what to extract.
+	 *
+	 * @example
+	 * ```typescript
+	 * extract: z.object({
+	 *   confirmed: z.boolean().describe('whether confirmed'),
+	 *   notes: z.string().nullable().describe('any notes'),
+	 * })
+	 * ```
 	 */
-	extract?: { [K in keyof T]: string }
+	extract?: import('zod').ZodObject<Record<string, import('zod').ZodType>>
 	/** Maximum time to wait for the call to complete, in milliseconds. Defaults to 5 minutes. */
 	timeoutMs?: number
 	/** Polling interval when WebSocket is unavailable, in milliseconds. Defaults to 2 seconds. */

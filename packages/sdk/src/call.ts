@@ -70,9 +70,9 @@ function suggestToolName(name: string, available: string[]): string | null {
 }
 
 /** @internal */
-export interface MimicCallInit<T extends Record<string, unknown>> {
+export interface MimicCallInit {
 	client: MimicClient
-	options: CallOptions<T>
+	options: CallOptions
 	WebSocketImpl?: WebSocketConstructor | null
 }
 
@@ -80,7 +80,7 @@ export interface MimicCallInit<T extends Record<string, unknown>> {
  * A live voice call. Stream events in real-time via `for await` or
  * `.on()`, and get the final result from `.result`.
  *
- * @typeParam T - Shape of the extracted data. Inferred from `CallOptions<T>`.
+ * @typeParam T - Shape of the extracted data. Inferred from `CallOptions`.
  *
  * @example
  * ```typescript
@@ -106,7 +106,7 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 
 	private callId: string | null = null
 	private readonly client: MimicClient
-	private readonly options: CallOptions<T>
+	private readonly options: CallOptions
 	private readonly tools: Record<string, ToolInput>
 	private readonly WebSocketImpl: WebSocketConstructor | undefined
 	private readonly eventBuffer: CallEvent[] = []
@@ -120,7 +120,7 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 	private activeWs: WebSocket | null = null
 	private cancelled = false
 
-	constructor(init: MimicCallInit<T>) {
+	constructor(init: MimicCallInit) {
 		this.client = init.client
 		this.options = init.options
 		this.tools = init.options.tools ?? {}
@@ -192,7 +192,7 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 				recipient: this.options.recipient,
 				aiDisclosure: this.options.aiDisclosure,
 				tools: toolSchemas,
-				extract: this.options.extract as Record<string, string> | undefined,
+				extract: this.options.extract,
 				ambience: this.options.ambience,
 				idempotencyKey: this.options.idempotencyKey,
 			})

@@ -61,6 +61,11 @@ function describeZodField(key: string, field: ZodType): string {
  */
 export function introspectTools(tools: Record<string, ToolInput>): ToolSchema[] {
 	return Object.entries(tools).map(([name, t]) => {
+		const mcpMeta = (t as { _mcpMeta?: { paramDescriptions: Record<string, string> } })._mcpMeta
+		if (mcpMeta) {
+			return { name, description: t.description, parameters: mcpMeta.paramDescriptions }
+		}
+
 		const parameters: Record<string, string> = {}
 		if (t.schema instanceof ZodObject) {
 			const shape = t.schema.shape as Record<string, ZodType>

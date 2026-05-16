@@ -42,6 +42,13 @@ if (result.status === 'completed') {
 
 Your functions run locally in your process. Your secrets and APIs never leave your machine.
 
+Or connect to an MCP server and skip the wrapping entirely:
+
+```typescript
+const tools = await mimic.mcp('http://localhost:3000/mcp')
+mimic.call({ to: '+15551234567', goal: 'Book an appointment', tools })
+```
+
 ## How it works
 
 ```
@@ -70,9 +77,25 @@ The SDK opens a WebSocket to the server. The server dials the phone number via S
 npm install @mimic/sdk zod
 ```
 
-### Define tools
+### Connect to an MCP server (zero wrapping)
 
-Zod is the single source of truth. Types flow into your handler automatically.
+If you already have tools exposed via MCP, just point Mimic at your server:
+
+```typescript
+const tools = await mimic.mcp('http://localhost:3000/mcp')
+
+mimic.call({
+  to: '+15551234567',
+  goal: 'Book an appointment',
+  tools,
+})
+```
+
+Tool names, descriptions, and parameter schemas are discovered automatically. No `tool()` wrappers, no Zod schemas, no code to write.
+
+### Define custom tools
+
+For functions that aren't behind an MCP server, use `tool()` with Zod:
 
 ```typescript
 import { z } from 'zod'

@@ -1,7 +1,8 @@
 import { MimicCall } from './call.js'
 import { MimicClient } from './client.js'
 import { MimicError } from './errors.js'
-import type { CallOptions, MimicOptions } from './types.js'
+import type { McpConnectionOptions } from './mcp.js'
+import type { CallOptions, MimicOptions, ToolInput } from './types.js'
 
 /**
  * The Mimic client. Create one with your API key, then make calls.
@@ -88,6 +89,21 @@ export class Mimic {
 	 * const result = await call.result
 	 * ```
 	 */
+	/**
+	 * Connect to an MCP server and discover its tools. Returns a tools
+	 * record that can be passed directly to `.call()`.
+	 *
+	 * @example
+	 * ```typescript
+	 * const tools = await mimic.mcp('http://localhost:3000/mcp')
+	 * mimic.call({ to: '...', goal: '...', tools })
+	 * ```
+	 */
+	async mcp(url: string, options?: McpConnectionOptions): Promise<Record<string, ToolInput>> {
+		const { connectMcp } = await import('./mcp.js')
+		return connectMcp(url, options)
+	}
+
 	call<T extends Record<string, unknown> = Record<string, unknown>>(
 		options: CallOptions,
 	): MimicCall<T> {
@@ -103,6 +119,8 @@ export class Mimic {
 
 export { MimicCall } from './call.js'
 export { ApiError, CallFailedError, CallTimeoutError, MimicError } from './errors.js'
+export { connectMcp } from './mcp.js'
+export type { McpConnectionOptions } from './mcp.js'
 export { introspectTools, tool } from './tools.js'
 export type {
 	CallEvent,

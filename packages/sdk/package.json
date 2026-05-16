@@ -15,7 +15,10 @@
 			}
 		}
 	},
-	"files": ["build/", "README.md"],
+	"files": [
+		"build/",
+		"README.md"
+	],
 	"engines": {
 		"node": ">=22.0.0"
 	},
@@ -37,5 +40,8 @@
 		"tsx": "^4.21.0",
 		"typescript": "^5.8.3",
 		"zod": "^3.25.0"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.29.0"
 	}
 }

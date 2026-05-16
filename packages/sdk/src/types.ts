@@ -28,19 +28,27 @@ export type Voice = 'female' | 'male'
 // ── Tool types ────────────────────────────────────────────────────────
 
 /**
- * A tool function the voice agent can invoke during a call.
- *
- * Can be a plain function (name and parameters are introspected
- * automatically). Attach optional metadata to guide the agent:
- *
- * - `.description` — what the tool does
- * - `.params` — parameter descriptions (e.g. `{ date: 'The date to check in YYYY-MM-DD format' }`)
+ * A structured tool definition created by {@link tool}. The Zod schema
+ * provides parameter names, types, and descriptions — and the `run`
+ * handler's input type is inferred from the schema automatically.
+ */
+export interface MimicTool {
+	/** @internal Marker so the SDK can distinguish structured tools from plain functions. */
+	__mimicTool: true
+	description: string
+	/** Zod schema for the tool's parameters. */
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	schema: import('zod').ZodType<any>
+	/** Execute the tool. Input is validated and typed by the schema. */
+	run: (input: unknown) => Promise<string> | string
+}
+
+/**
+ * A tool the agent can use — either a structured {@link MimicTool} (from
+ * the `tool()` helper) or a plain function (introspected at runtime).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type ToolFunction = ((...args: any[]) => any) & {
-	description?: string
-	params?: Record<string, string>
-}
+export type ToolInput = MimicTool | (((...args: any[]) => any) & { description?: string; params?: Record<string, string> })
 
 /** Wire format for tool definitions sent to the API. */
 export interface ToolSchema {
@@ -57,8 +65,8 @@ export interface CallOptions {
 	to: string
 	/** What the agent should accomplish on the call. */
 	goal: string
-	/** Tools the agent can use. Keys are tool names, values are functions. */
-	tools?: Record<string, ToolFunction>
+	/** Tools the agent can use. Keys are tool names, values are {@link MimicTool}s or plain functions. */
+	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
 	voice?: Voice
 	/** Key-value context the agent can reference (e.g. company info, caller details). */

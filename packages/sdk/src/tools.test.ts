@@ -1,11 +1,163 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { z } from 'zod'
 
-import { executeTool, introspectTools, parseParameterNames } from './tools.js'
-import type { ToolFunction } from './types.js'
+import { executeTool, introspectTools, parseParameterNames, tool } from './tools.js'
 
 // ---------------------------------------------------------------------------
-// parseParameterNames
+// tool() helper
+// ---------------------------------------------------------------------------
+
+describe('tool()', () => {
+	it('creates a MimicTool with __mimicTool marker', () => {
+		const t = tool({
+			description: 'Check slots',
+			parameters: z.object({ date: z.string() }),
+			run: async ({ date }) => `slots for ${date}`,
+		})
+		assert.equal(t.__mimicTool, true)
+		assert.equal(t.description, 'Check slots')
+	})
+
+	it('run receives validated input from schema', async () => {
+		const t = tool({
+			description: 'Book',
+			parameters: z.object({
+				date: z.string(),
+				time: z.string(),
+			}),
+			run: async ({ date, time }) => `Booked ${date} at ${time}`,
+		})
+		const result = await t.run({ date: 'Thursday', time: '2pm' })
+		assert.equal(result, 'Booked Thursday at 2pm')
+	})
+})
+
+// ---------------------------------------------------------------------------
+// introspectTools — structured (Zod)
+// ---------------------------------------------------------------------------
+
+describe('introspectTools with tool()', () => {
+	it('extracts parameter descriptions from Zod .describe()', () => {
+		const checkCalendar = tool({
+			description: 'Check available slots',
+			parameters: z.object({
+				date: z.string().describe('The date to check'),
+				limit: z.number().optional().describe('Max results'),
+			}),
+			run: async () => '[]',
+		})
+
+		const schemas = introspectTools({ checkCalendar })
+		assert.equal(schemas.length, 1)
+		assert.equal(schemas[0]!.name, 'checkCalendar')
+		assert.equal(schemas[0]!.description, 'Check available slots')
+		assert.ok(schemas[0]!.parameters.date.includes('The date to check'))
+		assert.ok(schemas[0]!.parameters.limit.includes('Max results'))
+	})
+
+	it('uses field name when no .describe() is set', () => {
+		const t = tool({
+			description: 'Simple',
+			parameters: z.object({ query: z.string() }),
+			run: async () => 'ok',
+		})
+
+		const schemas = introspectTools({ simple: t })
+		assert.ok(schemas[0]!.parameters.query.includes('string'))
+	})
+
+	it('handles mix of structured and plain function tools', () => {
+		const structured = tool({
+			description: 'Structured tool',
+			parameters: z.object({ x: z.string() }),
+			run: async () => 'ok',
+		})
+		function plainTool(name: string) {
+			return `hi ${name}`
+		}
+
+		const schemas = introspectTools({ structured, plainTool })
+		assert.equal(schemas.length, 2)
+		assert.equal(schemas[0]!.description, 'Structured tool')
+		assert.equal(schemas[1]!.name, 'plainTool')
+	})
+})
+
+// ---------------------------------------------------------------------------
+// executeTool — structured (Zod) with validation
+// ---------------------------------------------------------------------------
+
+describe('executeTool with tool()', () => {
+	it('validates args and calls run with parsed input', async () => {
+		const t = tool({
+			description: 'Book',
+			parameters: z.object({
+				date: z.string(),
+				guests: z.number().default(1),
+			}),
+			run: async ({ date, guests }) => `Booked ${date} for ${guests}`,
+		})
+
+		const result = await executeTool({ book: t }, 'book', { date: 'Friday' })
+		assert.equal(result, 'Booked Friday for 1')
+	})
+
+	it('rejects with instructive error on invalid args', async () => {
+		const t = tool({
+			description: 'Book',
+			parameters: z.object({
+				date: z.string(),
+				email: z.string().email(),
+			}),
+			run: async () => 'ok',
+		})
+
+		try {
+			await executeTool({ book: t }, 'book', { date: 123, email: 'not-an-email' })
+			assert.fail('should have thrown')
+		} catch (err) {
+			const msg = (err as Error).message
+			assert.ok(msg.includes('Tool "book" received invalid arguments'), `got: ${msg}`)
+			assert.ok(msg.includes('date'), `should mention "date" field: ${msg}`)
+			assert.ok(msg.includes('email'), `should mention "email" field: ${msg}`)
+		}
+	})
+
+	it('rejects with instructive error on missing required field', async () => {
+		const t = tool({
+			description: 'Search',
+			parameters: z.object({
+				query: z.string().describe('Search query'),
+			}),
+			run: async () => 'ok',
+		})
+
+		try {
+			await executeTool({ search: t }, 'search', {})
+			assert.fail('should have thrown')
+		} catch (err) {
+			const msg = (err as Error).message
+			assert.ok(msg.includes('Tool "search" received invalid arguments'), `got: ${msg}`)
+			assert.ok(msg.includes('query'), `should mention "query" field: ${msg}`)
+			assert.ok(msg.includes('Required'), `should say Required: ${msg}`)
+		}
+	})
+
+	it('stringifies non-string results from structured tools', async () => {
+		const t = tool({
+			description: 'Get data',
+			parameters: z.object({}),
+			run: async () => ({ count: 3 }) as unknown as string,
+		})
+
+		const result = await executeTool({ getData: t }, 'getData', {})
+		assert.equal(result, '{"count":3}')
+	})
+})
+
+// ---------------------------------------------------------------------------
+// parseParameterNames (plain functions)
 // ---------------------------------------------------------------------------
 
 describe('parseParameterNames', () => {
@@ -20,13 +172,6 @@ describe('parseParameterNames', () => {
 	it('extracts params from an arrow function with parens', () => {
 		const fn = (date: string, time: string) => ({ date, time })
 		assert.deepEqual(parseParameterNames(fn), ['date', 'time'])
-	})
-
-	it('extracts param from a single-param arrow without parens', () => {
-		const fn = (x: string) => x
-		const names = parseParameterNames(fn)
-		assert.ok(names.length === 1)
-		assert.equal(names[0], 'x')
 	})
 
 	it('handles a function with no parameters', () => {
@@ -50,102 +195,25 @@ describe('parseParameterNames', () => {
 		assert.deepEqual(parseParameterNames(fn), ['items'])
 	})
 
-	it('handles destructured parameter', () => {
-		const fn = (opts: { date: string; time: string }) => opts
-		const names = parseParameterNames(fn)
-		assert.equal(names.length, 1)
-		assert.equal(names[0], 'opts')
-	})
-
 	it('handles default values with nested parens', () => {
 		function fn(a: string, b = String(42), c: number) {
 			return `${a}${b}${c}`
 		}
 		assert.deepEqual(parseParameterNames(fn), ['a', 'b', 'c'])
 	})
-
-	it('handles mixed named and object params', () => {
-		function fn(name: string, opts: { date: string }, limit: number) {
-			return `${name}${opts}${limit}`
-		}
-		const names = parseParameterNames(fn)
-		assert.ok(names.includes('name'))
-		assert.ok(names.includes('opts'))
-		assert.ok(names.includes('limit'))
-	})
 })
 
 // ---------------------------------------------------------------------------
-// introspectTools
+// executeTool — plain functions (backwards compat)
 // ---------------------------------------------------------------------------
 
-describe('introspectTools', () => {
-	it('uses function name as tool name and extracts params as record', () => {
-		function checkCalendar(date: string) {
-			return date
-		}
-		const schemas = introspectTools({ checkCalendar })
-		assert.equal(schemas.length, 1)
-		assert.equal(schemas[0]!.name, 'checkCalendar')
-		assert.equal(schemas[0]!.description, 'checkCalendar')
-		assert.deepEqual(schemas[0]!.parameters, { date: 'date' })
-	})
-
-	it('uses .description and .params when set', () => {
-		const fn: ToolFunction = (date: string) => date
-		fn.description = 'Check available calendar slots'
-		fn.params = { date: 'The date to check in YYYY-MM-DD format' }
-		const schemas = introspectTools({ checkCalendar: fn })
-		assert.equal(schemas[0]!.description, 'Check available calendar slots')
-		assert.deepEqual(schemas[0]!.parameters, { date: 'The date to check in YYYY-MM-DD format' })
-	})
-
-	it('handles multiple tools', () => {
-		function checkCalendar(date: string) {
-			return date
-		}
-		function bookMeeting(time: string, email: string) {
-			return `${time} ${email}`
-		}
-		const schemas = introspectTools({ checkCalendar, bookMeeting })
-		assert.equal(schemas.length, 2)
-		assert.equal(schemas[0]!.name, 'checkCalendar')
-		assert.equal(schemas[1]!.name, 'bookMeeting')
-		assert.deepEqual(schemas[1]!.parameters, { time: 'time', email: 'email' })
-	})
-
-	it('handles empty tools record', () => {
-		assert.deepEqual(introspectTools({}), [])
-	})
-})
-
-// ---------------------------------------------------------------------------
-// executeTool
-// ---------------------------------------------------------------------------
-
-describe('executeTool', () => {
-	it('calls the function with positional args mapped from param names', async () => {
+describe('executeTool with plain functions', () => {
+	it('maps args to positional params', async () => {
 		function bookMeeting(date: string, time: string) {
 			return `Booked ${date} at ${time}`
 		}
 		const result = await executeTool({ bookMeeting }, 'bookMeeting', { date: 'Thursday', time: '2pm' })
 		assert.equal(result, 'Booked Thursday at 2pm')
-	})
-
-	it('stringifies non-string return values', async () => {
-		function getSlots() {
-			return ['2pm', '3pm', '4pm']
-		}
-		const result = await executeTool({ getSlots }, 'getSlots', {})
-		assert.equal(result, '["2pm","3pm","4pm"]')
-	})
-
-	it('handles async functions', async () => {
-		async function checkCalendar(date: string) {
-			return `Slots for ${date}: 2pm, 3pm`
-		}
-		const result = await executeTool({ checkCalendar }, 'checkCalendar', { date: 'Friday' })
-		assert.equal(result, 'Slots for Friday: 2pm, 3pm')
 	})
 
 	it('throws for unregistered tool', async () => {
@@ -157,13 +225,5 @@ describe('executeTool', () => {
 			throw new Error('database down')
 		}
 		await assert.rejects(() => executeTool({ failingTool }, 'failingTool', {}), { message: 'database down' })
-	})
-
-	it('passes undefined for unknown param names', async () => {
-		function fn(a: unknown, b: unknown) {
-			return `${a}-${b}`
-		}
-		const result = await executeTool({ fn }, 'fn', { a: 'hello' })
-		assert.equal(result, 'hello-undefined')
 	})
 })

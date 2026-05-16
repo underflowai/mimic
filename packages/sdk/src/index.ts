@@ -1,7 +1,7 @@
 import { MimicCall } from './call.js'
 import { MimicClient } from './client.js'
 import { MimicError } from './errors.js'
-import type { CallOptions, MimicOptions, ToolFunction } from './types.js'
+import type { CallOptions, MimicOptions, ToolInput } from './types.js'
 
 /**
  * The Mimic client. Create one with your API key, then make calls.
@@ -78,11 +78,11 @@ export class Mimic {
 	 * ```
 	 */
 	call(options: CallOptions): MimicCall
-	call(to: string, goal: string, tools?: Record<string, ToolFunction>): MimicCall
+	call(to: string, goal: string, tools?: Record<string, ToolInput>): MimicCall
 	call(
 		toOrOptions: string | CallOptions,
 		goal?: string,
-		tools?: Record<string, ToolFunction>,
+		tools?: Record<string, ToolInput>,
 	): MimicCall {
 		const options: CallOptions =
 			typeof toOrOptions === 'string'
@@ -101,7 +101,7 @@ export class Mimic {
 
 export { MimicCall } from './call.js'
 export { ApiError, CallFailedError, CallTimeoutError, MimicError } from './errors.js'
-export { introspectTools, parseParameterNames } from './tools.js'
+export { introspectTools, parseParameterNames, tool } from './tools.js'
 export type {
 	CallEvent,
 	CallOptions,
@@ -109,10 +109,11 @@ export type {
 	DoneEvent,
 	ErrorEvent,
 	MimicOptions,
+	MimicTool,
 	SpeechEvent,
 	ToolCallEvent,
 	ToolErrorEvent,
-	ToolFunction,
+	ToolInput,
 	ToolResultEvent,
 	ToolSchema,
 	TranscriptEntry,

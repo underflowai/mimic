@@ -7,7 +7,7 @@ import type {
 	CallOptions,
 	CallResult,
 	ServerMessage,
-	ToolFunction,
+	ToolInput,
 	WebSocketConstructor,
 } from './types.js'
 
@@ -62,7 +62,7 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 	private callId: string | null = null
 	private readonly client: MimicClient
 	private readonly options: CallOptions
-	private readonly tools: Record<string, ToolFunction>
+	private readonly tools: Record<string, ToolInput>
 	private readonly WebSocketImpl: WebSocketConstructor | undefined
 	private readonly eventBuffer: CallEvent[] = []
 	private readonly waiters: Array<(event: CallEvent | null) => void> = []

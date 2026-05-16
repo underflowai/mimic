@@ -1,23 +1,64 @@
-import type { ToolFunction, ToolSchema } from './types.js'
+import type { ZodError, ZodObject, ZodType } from 'zod'
+
+import type { MimicTool, ToolInput, ToolSchema } from './types.js'
+
+// ── tool() helper ─────────────────────────────────────────────────────
+
+/**
+ * Define a type-safe tool. The Zod schema is the single source of truth
+ * for parameter names, types, and descriptions — the `run` handler's
+ * input is inferred automatically.
+ *
+ * @example
+ * ```typescript
+ * import { z } from 'zod'
+ * import { tool } from '@mimic/sdk'
+ *
+ * const checkCalendar = tool({
+ *   description: 'Check available calendar slots',
+ *   parameters: z.object({
+ *     date: z.string().describe('The date to check'),
+ *   }),
+ *   run: async ({ date }) => {
+ *     // date is typed as string — inferred from schema
+ *     return await calendar.getSlots(date)
+ *   },
+ * })
+ * ```
+ */
+export function tool<T extends ZodType>(opts: {
+	description: string
+	parameters: T
+	run: (input: T extends ZodType<infer U> ? U : never) => Promise<string> | string
+}): MimicTool {
+	return {
+		__mimicTool: true,
+		description: opts.description,
+		schema: opts.parameters,
+		run: opts.run as (input: unknown) => Promise<string> | string,
+	}
+}
+
+// ── Type guards ───────────────────────────────────────────────────────
+
+function isStructuredTool(t: ToolInput): t is MimicTool {
+	return typeof t === 'object' && '__mimicTool' in t && t.__mimicTool === true
+}
+
+// ── Introspection ─────────────────────────────────────────────────────
 
 /**
  * Extract parameter names from a function by parsing its source.
  *
- * Handles:
- *   - Named functions: `function foo(a, b) {}`
- *   - Arrow functions: `(a, b) => ...` or `a => ...`
- *   - Methods: `{ foo(a, b) {} }`
- *   - Destructured defaults: strips `= ...` and `{ ... }` wrappers
+ * Handles named functions, arrow functions, rest params, defaults,
+ * destructuring, and nested parens in default values.
  */
 export function parseParameterNames(fn: Function): string[] {
 	const source = fn.toString()
 
-	// Single-param arrows without parens: `x => ...`
 	const arrowMatch = source.match(/^([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=>/)
 	if (arrowMatch) return [arrowMatch[1]!]
 
-	// Find the first `(` and its balanced closing `)`.
-	// Can't use a simple regex since default values may contain nested parens.
 	const openIdx = source.indexOf('(')
 	if (openIdx === -1) return []
 
@@ -41,10 +82,6 @@ export function parseParameterNames(fn: Function): string[] {
 	return extractParamNames(raw)
 }
 
-/**
- * Parse a comma-separated parameter string into clean names.
- * Handles rest params, defaults, destructuring, and type annotations.
- */
 function extractParamNames(raw: string): string[] {
 	const params: string[] = []
 	let depth = 0
@@ -69,54 +106,19 @@ function extractParamNames(raw: string): string[] {
 	return params
 }
 
-/** Extract a clean parameter name from a single param declaration. */
 function cleanParam(raw: string): string | null {
 	let s = raw.trim()
 	if (!s) return null
-
-	// Strip rest operator
 	if (s.startsWith('...')) s = s.slice(3).trim()
-
-	// Strip default value (`param = defaultValue`)
 	const eqIdx = s.indexOf('=')
 	if (eqIdx > 0) s = s.slice(0, eqIdx).trim()
-
-	// Strip TS type annotation (`param: Type`) — only if there's no destructuring
 	if (!s.startsWith('{') && !s.startsWith('[')) {
 		const colonIdx = s.indexOf(':')
 		if (colonIdx > 0) s = s.slice(0, colonIdx).trim()
 	}
-
-	// If destructured, use a generic name
 	if (s.startsWith('{') || s.startsWith('[')) return null
-
-	// Validate it looks like an identifier
 	if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(s)) return s
-
 	return null
-}
-
-/**
- * Introspect a record of functions into tool schemas for the API.
- *
- * The function name becomes the tool name. Parameter names are extracted
- * from the function source. If `fn.params` provides descriptions, they
- * are used; otherwise the parameter name itself serves as the description.
- */
-export function introspectTools(tools: Record<string, ToolFunction>): ToolSchema[] {
-	return Object.entries(tools).map(([name, fn]) => {
-		const paramNames = cachedParamNames(fn)
-		const paramDescriptions = fn.params ?? {}
-		const parameters: Record<string, string> = {}
-		for (const p of paramNames) {
-			parameters[p] = paramDescriptions[p] ?? p
-		}
-		return {
-			name,
-			description: fn.description ?? name,
-			parameters,
-		}
-	})
 }
 
 const paramCache = new WeakMap<Function, string[]>()
@@ -130,23 +132,105 @@ function cachedParamNames(fn: Function): string[] {
 	return names
 }
 
+// ── Schema → wire format ──────────────────────────────────────────────
+
+function zodSchemaToParameters(schema: ZodType): Record<string, string> {
+	const params: Record<string, string> = {}
+	const shape = getZodShape(schema)
+	if (!shape) return params
+
+	for (const [key, fieldSchema] of Object.entries(shape)) {
+		params[key] = describeZodField(key, fieldSchema as ZodType)
+	}
+	return params
+}
+
+function getZodShape(schema: ZodType): Record<string, ZodType> | null {
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const s = schema as any
+	if (s._def?.typeName === 'ZodObject' && s.shape) {
+		return (schema as ZodObject<Record<string, ZodType>>).shape
+	}
+	return null
+}
+
+function describeZodField(key: string, schema: ZodType): string {
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const def = (schema as any)._def
+	const description = def?.description as string | undefined
+	const typeName = (def?.typeName as string | undefined)?.replace('Zod', '').toLowerCase() ?? 'unknown'
+
+	const parts: string[] = [typeName]
+	if (description) parts.push(`— ${description}`)
+	if (def?.typeName === 'ZodOptional') parts.push('(optional)')
+
+	return parts.join(' ') || key
+}
+
+// ── Public introspection ──────────────────────────────────────────────
+
 /**
- * Execute a tool function by name, converting the args map to positional arguments.
- *
- * @returns The stringified result.
- * @throws If the tool is not registered or the function throws.
+ * Build tool schemas from a tools record. Handles both structured
+ * {@link MimicTool}s (Zod-based) and plain functions (introspected).
+ */
+export function introspectTools(tools: Record<string, ToolInput>): ToolSchema[] {
+	return Object.entries(tools).map(([name, t]) => {
+		if (isStructuredTool(t)) {
+			return {
+				name,
+				description: t.description,
+				parameters: zodSchemaToParameters(t.schema),
+			}
+		}
+
+		const paramNames = cachedParamNames(t)
+		const paramDescriptions = t.params ?? {}
+		const parameters: Record<string, string> = {}
+		for (const p of paramNames) {
+			parameters[p] = paramDescriptions[p] ?? p
+		}
+		return {
+			name,
+			description: t.description ?? name,
+			parameters,
+		}
+	})
+}
+
+// ── Execution ─────────────────────────────────────────────────────────
+
+function formatZodError(toolName: string, err: ZodError): string {
+	const issues = err.issues.map((issue) => {
+		const path = issue.path.length > 0 ? issue.path.join('.') : '(root)'
+		return `  - ${path}: ${issue.message}`
+	})
+	return `Tool "${toolName}" received invalid arguments:\n${issues.join('\n')}`
+}
+
+/**
+ * Execute a tool by name. For structured tools, validates args against
+ * the Zod schema first (with instructive error messages). For plain
+ * functions, maps the args record to positional arguments.
  */
 export async function executeTool(
-	tools: Record<string, ToolFunction>,
+	tools: Record<string, ToolInput>,
 	name: string,
 	args: Record<string, unknown>,
 ): Promise<string> {
-	const fn = tools[name]
-	if (!fn) throw new Error(`Tool "${name}" is not registered`)
+	const t = tools[name]
+	if (!t) throw new Error(`Tool "${name}" is not registered`)
 
-	const paramNames = cachedParamNames(fn)
+	if (isStructuredTool(t)) {
+		const parsed = t.schema.safeParse(args)
+		if (!parsed.success) {
+			throw new Error(formatZodError(name, parsed.error))
+		}
+		const result = await t.run(parsed.data)
+		return typeof result === 'string' ? result : JSON.stringify(result)
+	}
+
+	const paramNames = cachedParamNames(t)
 	const positionalArgs = paramNames.map((p) => args[p])
-
-	const result = await fn(...positionalArgs)
+	const result = await t(...positionalArgs)
 	return typeof result === 'string' ? result : JSON.stringify(result)
 }

@@ -1,29 +1,45 @@
 /**
  * Make a voice call with a few lines of code.
  *
- * Your functions are the tools — no wrappers, no schemas, no boilerplate.
- * The agent introspects function names and parameters automatically.
+ * Define tools with Zod schemas — the types flow into your handler
+ * automatically. The agent knows what to collect from the caller.
  *
  * Usage:
  *   MIMIC_API_KEY=mk_... npx tsx examples/sdk-call.ts
  */
 
-import { Mimic } from '@mimic/sdk'
+import { z } from 'zod'
+
+import { Mimic, tool } from '@mimic/sdk'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
-// ── Your existing functions ────────────────────────────────────────────
+// ── Define tools with Zod — types flow into your handler ───────────────
 
-async function checkCalendar(date: string) {
-	return JSON.stringify({ date, slots: ['2:00 PM', '3:00 PM', '4:00 PM'] })
-}
+const checkCalendar = tool({
+	description: 'Check available calendar slots for a given date',
+	parameters: z.object({
+		date: z.string().describe('The date to check, e.g. "next Thursday"'),
+	}),
+	run: async ({ date }) => {
+		// date is typed as string — inferred from the schema
+		return JSON.stringify({ date, slots: ['2:00 PM', '3:00 PM', '4:00 PM'] })
+	},
+})
 
-async function reschedule(newDate: string, newTime: string) {
-	console.log(`  → Rescheduling to ${newDate} at ${newTime}`)
-	return `Appointment rescheduled to ${newDate} at ${newTime}`
-}
+const reschedule = tool({
+	description: 'Reschedule an appointment to a new date and time',
+	parameters: z.object({
+		newDate: z.string().describe('The new date'),
+		newTime: z.string().describe('The new time'),
+	}),
+	run: async ({ newDate, newTime }) => {
+		console.log(`  Rescheduling to ${newDate} at ${newTime}`)
+		return `Appointment rescheduled to ${newDate} at ${newTime}`
+	},
+})
 
-// ── Option A: Stream events in real-time ───────────────────────────────
+// ── Make the call ──────────────────────────────────────────────────────
 
 const call = mimic.call('+15551234567', 'Confirm the appointment for tomorrow at 2pm with Dr. Smith', {
 	checkCalendar,
@@ -52,9 +68,3 @@ for await (const event of call) {
 			break
 	}
 }
-
-// ── Option B: Fire and forget ──────────────────────────────────────────
-// const result = await mimic.call('+15551234567', 'Confirm the appointment', {
-//   checkCalendar, reschedule,
-// }).result
-// console.log(result.goalAchieved, result.data, result.transcript)

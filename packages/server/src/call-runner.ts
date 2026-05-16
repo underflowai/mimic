@@ -22,6 +22,7 @@ import { deliverWebhook } from './webhook.js'
 
 import OpenAI from 'openai'
 import { randomUUID } from 'node:crypto'
+import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
 
 type EventCallback = (event: Record<string, unknown>) => void
 type ToolCallbackFn = (toolName: string, toolArgs: Record<string, unknown>, callbackId: string) => Promise<{ result: string } | { error: string }>
@@ -121,8 +122,10 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		)
 
 		let orchestratorRef: Awaited<ReturnType<typeof createCallOrchestrator>> | null = null
+		let egressId: string | null = null
 
 		const ambienceEnabled = (agent.ambience as boolean | null) !== false
+		const recordingEnabled = Boolean(process.env.RECORDING_S3_BUCKET)
 
 		const { sessionComplete } = await createVoiceAgent({
 			roomName,
@@ -133,6 +136,36 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 			livekitApiKey: config.livekit.apiKey,
 			livekitApiSecret: config.livekit.apiSecret,
 			ambience: { enabled: ambienceEnabled },
+			async onReady() {
+				if (!recordingEnabled) return
+				try {
+					const egressClient = new EgressClient(config.livekit.url, config.livekit.apiKey, config.livekit.apiSecret)
+					const info = await egressClient.startRoomCompositeEgress(
+						roomName,
+						{
+							file: new EncodedFileOutput({
+								filepath: `call-recordings/${callId}.ogg`,
+								fileType: EncodedFileType.OGG,
+								output: {
+									case: 's3',
+									value: new S3Upload({
+										accessKey: process.env.RECORDING_S3_ACCESS_KEY ?? '',
+										secret: process.env.RECORDING_S3_SECRET ?? '',
+										bucket: process.env.RECORDING_S3_BUCKET ?? '',
+										region: process.env.RECORDING_S3_REGION ?? 'us-east-1',
+										endpoint: process.env.RECORDING_S3_ENDPOINT ?? '',
+									}),
+								},
+							}),
+						},
+						{ audioOnly: true },
+					)
+					egressId = info.egressId
+					console.log(`[call-runner] Started recording egress ${egressId} for call ${callId}`)
+				} catch (err) {
+					console.error(`[call-runner] Failed to start recording for call ${callId}:`, err)
+				}
+			},
 			createOrchestrator: async (transport: AudioTransport) => {
 				const orchestrator = await createCallOrchestrator({
 					...orchestratorConfig,
@@ -173,6 +206,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					goalAchieved: extraction.goalAchieved,
 					goalAchievedReason: extraction.goalAchievedReason,
 					duration: result.durationSeconds,
+					recordingPath: egressId ? `call-recordings/${callId}.ogg` : null,
 				})
 
 				broadcast(callId, {

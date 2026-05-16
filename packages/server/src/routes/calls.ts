@@ -163,6 +163,7 @@ calls.get('/:id', async (c) => {
 		goalAchievedReason: call.goalAchievedReason,
 		duration: call.duration,
 		errorMessage: call.errorMessage,
+		recordingPath: call.recordingPath,
 	})
 })
 

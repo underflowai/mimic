@@ -48,6 +48,7 @@ export const apiCalls = pgTable('api_calls', {
 	goalAchievedReason: text('goal_achieved_reason'),
 	duration: integer('duration'),
 	errorMessage: text('error_message'),
+	recordingPath: text('recording_path'),
 	idempotencyKey: text('idempotency_key'),
 	webhookDeliveredAt: timestamp('webhook_delivered_at', { withTimezone: true }),
 	createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -62,7 +62,7 @@ NEVER: "I completely understand how frustrating that must be. Let me see what I 
 INSTEAD: "Yeah... <break time="75ms"/> that's not great. Let me look into it."
 
 NEVER: "Thank you so much for providing that. Now I'd also like to ask..."
-INSTEAD: "And, um <break time="25ms"/> your policy number?"
+INSTEAD: "And, umm <break time="25ms"/> your policy number?"
 
 NEVER: "I am going to go ahead and check the schedule for you now."
 INSTEAD: "Okay, <break time="100ms"/> let me check."
@@ -82,11 +82,11 @@ The example must show SHORT agent turns (one or two sentences). It must include 
 
 CRITICAL: The example conversation must include disfluency+timing patterns in the agent's lines. The agent's turns must use fillers paired with `<break>` tags — not on every turn, but on roughly half of them. Use varied patterns across the example, not the same one repeated:
 
-- "Yeah, um <break time="50ms"/> so, I can get someone out today."
+- "Yeah, umm <break time="50ms"/> so, I can get someone out today."
 - "Okay. <break time="100ms"/> And what's the address?"
-- "Mm, yeah <break time="75ms"/> that's about when they start going."
+- "Mmm, yeah <break time="75ms"/> that's about when they start going."
 - "So <break time="100ms"/> yeah, we're gonna need to get someone out there."
-- "And, uh <break time="25ms"/> what's the best number?"
+- "And, uhh <break time="25ms"/> what's the best number?"
 
 If every agent turn in the example is perfectly clean prose, the runtime model will produce perfectly clean prose. If the example shows natural spoken cadence with varied fillers and pauses, the model will replicate that. The example is not decorative — it is the primary teaching mechanism for speech style.
 
@@ -130,7 +130,7 @@ The block must include a reminder about spoken cadence. Without it, the model re
 
 Example for a warm conversational agent:
 
-You are mid-conversation on a live phone call. React to what they said, then the next useful thing. Use "um <break time="300ms"/> so" naturally. Short turns. Fragments fine. Sound like a real person talking, not text being read aloud.
+You are mid-conversation on a live phone call. React to what they said, then the next useful thing. Use "umm <break time="300ms"/> so" naturally. Short turns. Fragments fine. Sound like a real person talking, not text being read aloud.
 
 Example for a professional support agent:
 
@@ -154,19 +154,24 @@ The block must include ALL of the following:
 
 4. DISFLUENCY + TIMING PATTERNS — this is the most important part of the block. LLMs produce clean, grammatically correct text by default. Without explicit disfluency patterns paired with pause timing, the output will sound robotic when spoken aloud. The block must:
 
-   a. State the rule explicitly: "When you use a filler word like 'um' or 'uh', follow it with a short `<break>` before continuing. Vary the duration — 25-50ms for micro-hesitations, 50-75ms for light fillers, 100ms for standard pauses, 150ms for topic pivots."
+   a. State the rule explicitly: "When you use a filler word, extend the consonant ('umm', 'ummm', 'uhh', 'mmm' — never single-consonant 'um' or 'uh') and follow it with a short `<break>` before continuing. Vary the duration — 25-50ms for micro-hesitations, 50-75ms for light fillers, 100ms for standard pauses, 150ms for topic pivots."
 
-   b. Show multiple varied patterns with DIFFERENT break durations across the full range (25ms to 150ms for mid-speech, up to 500ms or 1s for rare dramatic pauses). Do NOT use the same duration every time. Show at least 5-6 shapes:
-   - Micro-hesitation: `And, uh <break time="25ms"/> what's the best number?`
-   - Quick filler: `Yeah, um <break time="50ms"/> so, I can get someone out today.`
-   - Light transition: `Mm, yeah <break time="75ms"/> that tracks.`
+   b. CRITICAL: Filler words must use extended consonants so Cartesia TTS renders them with natural duration. Single-consonant fillers ("um", "uh") are too short in TTS — they sound clipped. Use doubled or tripled consonants: "umm", "ummm", "uhh", "mmm". Vary the length for different feels.
+
+   Show multiple varied patterns with DIFFERENT break durations across the full range (25ms to 150ms for mid-speech, up to 500ms or 1s for rare dramatic pauses). Do NOT use the same duration every time. Show at least 5-6 shapes:
+   - Micro-hesitation: `And, uhh <break time="25ms"/> what's the best number?`
+   - Quick filler: `Yeah, umm <break time="50ms"/> so, I can get someone out today.`
+   - Light transition: `Mmm, yeah <break time="75ms"/> that tracks.`
    - Standard pause: `Okay. <break time="100ms"/> And what's the address?`
    - Trailing off: `Twelve years on a water heater, that's... <break time="100ms"/> yeah, that's not great.`
    - Topic pivot: `Alright. <break time="150ms"/> So here's what happens next.`
+   - Thinking: `So, ummm <break time="100ms"/> let me think about that.`
 
-   c. Show what NOT to do — filler words without pauses sound fake:
+   c. Show what NOT to do — single-consonant fillers and fillers without pauses sound robotic:
    Bad: `Um I can definitely help you with that.`
-   Good: `Um <break time="50ms"/> so, yeah I can get that going.`
+   Bad: `Uh, yeah, so...` (single consonant — too clipped in TTS)
+   Good: `Umm <break time="50ms"/> so, yeah I can get that going.`
+   Good: `Uhh <break time="75ms"/> yeah, let me check on that.`
 
    d. Reinforce: "Use these patterns on roughly half your turns, varied across the conversation. Not every turn — that sounds scripted too. And not the same pattern or same break duration every time."
 

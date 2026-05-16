@@ -1,22 +1,23 @@
 /**
  * Worker process — runs voice calls from the BullMQ queue.
  *
- * Each call runs in a forked child process (BullMQ sandboxed processor).
- * A crash in one call only kills that child — other active calls and
- * the worker supervisor are unaffected.
+ * Separate from the API server. Each call runs in-process (same as
+ * underflowjs). Concurrency limited to 4 calls.
  *
  * Usage:
  *   npx tsx src/worker.ts
  */
 
 import { createServer } from 'node:http'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { eq } from 'drizzle-orm'
 import { Worker } from 'bullmq'
 import { Redis } from 'ioredis'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const processorPath = join(__dirname, 'jobs/call-processor.ts')
+import { logger } from './logger.js'
+import { getDb } from './db/index.js'
+import { apiAgents, apiCalls } from './db/schema.js'
+import { runCall } from './call-runner.js'
+import type { CallJobData } from './jobs/queue.js'
 
 function getRedisConnection() {
 	const url = process.env.REDIS_URL
@@ -24,32 +25,40 @@ function getRedisConnection() {
 	return new Redis(url, { maxRetriesPerRequest: null })
 }
 
-import { logger } from './logger.js'
+logger.info({ concurrency: 4 }, 'starting call worker')
 
-logger.info({ processorPath, concurrency: 4 }, 'starting sandboxed call worker')
-
-const worker = new Worker(
+const worker = new Worker<CallJobData>(
 	'mimic-calls',
-	processorPath,
+	async (job) => {
+		const { callId, agentId } = job.data
+		logger.info({ callId, agentId, jobId: job.id }, 'processing call')
+
+		const db = getDb()
+		const [call] = await db.select().from(apiCalls).where(eq(apiCalls.id, callId)).limit(1)
+		const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)
+
+		if (!call || !agent) throw new Error(`Call ${callId} or agent ${agentId} not found`)
+
+		await runCall(call, agent)
+	},
 	{
 		connection: getRedisConnection() as never,
 		concurrency: 4,
 		lockDuration: 600_000,
 		stalledInterval: 60_000,
-		useWorkerThreads: false,
 	},
 )
 
 worker.on('failed', (job, err) => {
-	console.error(`[worker] Call ${job?.data?.callId ?? job?.id} failed (pid will be recycled):`, err.message)
+	logger.error({ callId: job?.data?.callId, jobId: job?.id, err: err.message }, 'call job failed')
 })
 
 worker.on('completed', (job) => {
-	console.log(`[worker] Call ${job.data?.callId ?? job.id} completed`)
+	logger.info({ callId: job.data?.callId, jobId: job.id }, 'call job completed')
 })
 
 worker.on('error', (err) => {
-	console.error('[worker] Worker error:', err.message)
+	logger.error({ err: err.message }, 'worker error')
 })
 
 const healthPort = Number(process.env.HEALTH_PORT) || 3001
@@ -63,11 +72,11 @@ const healthServer = createServer((req, res) => {
 	}
 })
 healthServer.listen(healthPort, () => {
-	console.log(`[worker] Health check on http://localhost:${healthPort}/health`)
+	logger.info({ port: healthPort }, 'health check ready')
 })
 
 const shutdown = async (signal: string) => {
-	console.log(`[worker] Received ${signal}, shutting down gracefully...`)
+	logger.info({ signal }, 'shutting down gracefully')
 	await Promise.allSettled([
 		worker.close(),
 		new Promise((resolve) => healthServer.close(resolve)),

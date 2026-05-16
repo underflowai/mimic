@@ -65,24 +65,9 @@ export interface MimicTool {
 }
 
 /**
- * A tool the agent can use during a call. Prefer {@link MimicTool}
- * (created via `tool()`) for type safety. Plain functions are supported
- * as a convenience fallback.
- *
- * @example
- * ```typescript
- * // Recommended: structured tool with Zod schema
- * const checkCalendar = tool({
- *   description: 'Check available calendar slots',
- *   parameters: z.object({ date: z.string().describe('Date to check') }),
- *   run: async ({ date }) => calendar.getSlots(date),
- * })
- *
- * // Fallback: plain function (name and params introspected at runtime)
- * async function getHours() { return '9am-5pm' }
- * ```
+ * A tool the agent can use during a call. Created via {@link tool}.
  */
-export type ToolInput = MimicTool | (Function & { description?: string; params?: Record<string, string> })
+export type ToolInput = MimicTool
 
 /** @internal Wire format for tool definitions sent to the API. */
 export interface ToolSchema {

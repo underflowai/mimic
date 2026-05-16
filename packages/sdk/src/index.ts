@@ -103,7 +103,7 @@ export class Mimic {
 
 export { MimicCall } from './call.js'
 export { ApiError, CallFailedError, CallTimeoutError, MimicError } from './errors.js'
-export { introspectTools, parseParameterNames, tool } from './tools.js'
+export { introspectTools, tool } from './tools.js'
 export type {
 	CallEvent,
 	CallEventMap,

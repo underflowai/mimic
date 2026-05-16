@@ -1,0 +1,29 @@
+{
+	"name": "@mimic/sdk",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Make AI phone calls with a few lines of code. Tools run locally — no webhooks needed.",
+	"license": "MIT",
+	"main": "./build/index.js",
+	"types": "./build/index.d.ts",
+	"exports": {
+		".": {
+			"import": {
+				"types": "./src/index.ts",
+				"production": "./build/index.js",
+				"default": "./src/index.ts"
+			}
+		}
+	},
+	"files": ["build/", "README.md"],
+	"scripts": {
+		"build": "tsc -b tsconfig.lib.json",
+		"typecheck": "tsc -b --noEmit",
+		"test": "tsx --test 'src/**/*.test.ts'"
+	},
+	"devDependencies": {
+		"@types/node": "^22.15.0",
+		"tsx": "^4.21.0",
+		"typescript": "^5.8.3"
+	}
+}

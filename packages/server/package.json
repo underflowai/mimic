@@ -1,0 +1,33 @@
+{
+	"name": "@mimic/server",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Minimal voice API server — goal compiler, tool bridge, and call lifecycle.",
+	"license": "MIT",
+	"main": "./build/index.js",
+	"types": "./build/index.d.ts",
+	"exports": {
+		".": {
+			"import": {
+				"types": "./src/index.ts",
+				"production": "./build/index.js",
+				"default": "./src/index.ts"
+			}
+		}
+	},
+	"files": ["build/", "README.md"],
+	"scripts": {
+		"build": "tsc -b tsconfig.lib.json",
+		"typecheck": "tsc -b --noEmit"
+	},
+	"dependencies": {
+		"ioredis": "^5.6.1",
+		"openai": "^5.8.0",
+		"zod": "^3.24.4",
+		"@mimic/engine": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^22.15.0",
+		"typescript": "^5.8.3"
+	}
+}

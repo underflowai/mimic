@@ -1,0 +1,33 @@
+{
+	"name": "@mimic/transport-livekit",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "LiveKit transport adapter for @mimic/engine — room lifecycle, audio streaming, SIP outbound.",
+	"license": "MIT",
+	"main": "./build/index.js",
+	"types": "./build/index.d.ts",
+	"exports": {
+		".": {
+			"import": {
+				"types": "./src/index.ts",
+				"production": "./build/index.js",
+				"default": "./src/index.ts"
+			}
+		}
+	},
+	"files": ["build/", "README.md"],
+	"scripts": {
+		"build": "tsc -b tsconfig.lib.json",
+		"typecheck": "tsc -b --noEmit"
+	},
+	"dependencies": {
+		"@livekit/rtc-node": "^0.13.28",
+		"@livekit/noise-cancellation-node": "^0.1.3",
+		"livekit-server-sdk": "^2.13.0",
+		"@mimic/engine": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/node": "^22.15.0",
+		"typescript": "^5.8.3"
+	}
+}

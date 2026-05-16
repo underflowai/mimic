@@ -1,0 +1,62 @@
+{
+	"name": "@mimic/engine",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Real-time voice AI engine — turn management, ASR, TTS, backchannel, and tool orchestration.",
+	"license": "MIT",
+	"main": "./build/index.js",
+	"types": "./build/index.d.ts",
+	"exports": {
+		".": {
+			"import": {
+				"types": "./src/index.ts",
+				"production": "./build/index.js",
+				"default": "./src/index.ts"
+			}
+		},
+		"./src/*": {
+			"import": {
+				"types": "./src/*",
+				"default": "./src/*"
+			}
+		}
+	},
+	"imports": {
+		"#engine/*": "./src/*",
+		"#test/*": "./test/*"
+	},
+	"files": ["build/", "README.md"],
+	"scripts": {
+		"build": "tsc -b tsconfig.lib.json",
+		"typecheck": "tsc -b --noEmit",
+		"test": "tsx --test 'src/**/*.test.ts'"
+	},
+	"dependencies": {
+		"openai": "^5.8.0",
+		"onnxruntime-web": "^1.22.0",
+		"p-queue": "^8.1.0",
+		"pino": "^9.6.0",
+		"remove-markdown": "^0.5.5",
+		"xstate": "^5.19.4",
+		"zod": "^3.24.4",
+		"handlebars": "^4.7.8"
+	},
+	"peerDependencies": {
+		"@livekit/rtc-node": ">=0.12.0",
+		"@sentry/node": ">=9.0.0"
+	},
+	"peerDependenciesMeta": {
+		"@livekit/rtc-node": {
+			"optional": true
+		},
+		"@sentry/node": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"@types/node": "^22.15.0",
+		"pino-pretty": "^13.0.0",
+		"tsx": "^4.21.0",
+		"typescript": "^5.8.3"
+	}
+}

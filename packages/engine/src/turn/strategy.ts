@@ -1,11 +1,8 @@
 /**
  * TurnStrategy — the pure selection function for turn-complete dispatch.
  *
- * `selectStrategy(input, world)` is a pure function that replaces:
- *   - The legacy monolithic turn-complete if-ladder
- *   - `tryCommitEagerFlush`'s search-conflict check
- *   - `tryCommitAwaitedEagerDraft`'s cached-draft logic
- *   - `commitFreshTurn`'s reset + search-claim logic
+ * `selectStrategy(input, world)` is a pure function that maps the full
+ * state of the call into exactly one dispatch path.
  *   - The machine's turn_complete guards (isClosing, softPaused, backchannelResumed)
  *
  * Every branch in those four locations maps to exactly one strategy kind.

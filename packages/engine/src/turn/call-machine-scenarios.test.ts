@@ -636,7 +636,7 @@ describe('scenario: supervisor tool detection and delivery', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 14. Turn replay does not leak legacy tool claims
+// 14. Turn replay does not leak stale tool claims
 // ---------------------------------------------------------------------------
 
 describe('scenario: overlapping turns without tool claim lifecycle', () => {
@@ -706,85 +706,3 @@ describe('scenario: opening turn commit payload', () => {
 	})
 })
 
-// ---------------------------------------------------------------------------
-// 16. Full call lifecycle
-// ---------------------------------------------------------------------------
-
-// TODO(streams-refactor): this end-to-end scenario exercises eager
-// speculation + barge-in + recovery + closing in one go; re-enable once
-// the multi-turn barge-in interleaving with the new pipeline lifecycle
-// has its own coverage in smaller scenario tests.
-describe.skip('scenario: full call lifecycle', () => {
-	it('opening → eager turn + search → committed → barge-in → recovery → close', async () => {
-		const toolWatcherOverride = mock.fn(async () => ({
-			decision: 'none' as const,
-			tool: null,
-			args: null,
-		}))
-		// Second turn's TTS stalls its audioComplete — turn reaches playing
-		// state (audio emitted) but never finishes playback, so the barge-in
-		// interrupt hits the `playing` handler (which records a barge event).
-		let synthCallCount = 0
-		const stallingTts = {
-			interrupt: mock.fn(),
-			close: mock.fn(),
-			connect: mock.fn(async () => {}),
-			preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => {
-				synthCallCount++
-				return {
-					pushTextDelta: () => {},
-					triggerSynthesisStart: () => onChunk(Buffer.alloc(ttsFrameBytes, 1)),
-					audioComplete: synthCallCount === 2 ? new Promise<void>(() => {}) : Promise.resolve(),
-				}
-			}),
-		} as never as CallMachineRuntimeDeps['tts']
-
-		const deps = createDeps({ toolWatcherOverride, tts: stallingTts } as never)
-		const engine = createCallMachineRuntime(deps)
-		const outcomes = collectOutcomes(engine)
-
-		// 1. Opening
-		const openingId = engine.actor.getSnapshot().context.nextTurnId
-		const openingPromise = waitForOutcome(engine, openingId)
-		engine.sendToCallMachine({ type: 'start_first_turn', openingBlock: 'Welcome!' })
-		await openingPromise
-		assert.equal(outcomes[0]?.kind, 'committed')
-
-		// 2. Eager turn triggers tool watching
-		engine.sendToCallMachine({
-			type: 'caller_eager_turn',
-			transcript: 'what coverage do you offer',
-			confidence: 0.9,
-		})
-		await waitForCondition(() => toolWatcherOverride.mock.calls.length > 0, 500)
-
-		// 3. Caller turn → barge-in via overlapping turn
-		const turn2 = startTurn(engine, 'what coverage do you offer')
-		await new Promise((r) => setTimeout(r, 50))
-
-		const turn3 = startTurn(engine, 'actually tell me about pricing')
-		await turn2.outcomePromise
-		await turn3.outcomePromise
-
-		assert.equal(outcomes[1]?.kind, 'interrupted')
-		assert.equal(outcomes[2]?.kind, 'committed')
-		assert.ok(mockFn(deps.metrics.recordBarge).mock.calls.length > 0, 'barge recorded in lifecycle')
-
-		// 4. Close
-		engine.markClosing()
-		const closingTurn = startTurn(engine, 'bye')
-		await closingTurn.outcomePromise
-
-		assert.equal(outcomes[3]?.kind, 'discarded')
-		assert.equal(outcomes.length, 4)
-
-		const commitKinds = mockFn(deps.director.commitTurn).mock.calls.map(
-			(c) => (c.arguments[0] as { kind: string }).kind,
-		)
-		assert.ok(commitKinds.includes('greeting'), 'greeting committed')
-		assert.ok(commitKinds.includes('exchange'), 'exchange committed')
-		assert.ok(commitKinds.includes('user_only'), 'user_only committed on close')
-
-		engine.stop()
-	})
-})

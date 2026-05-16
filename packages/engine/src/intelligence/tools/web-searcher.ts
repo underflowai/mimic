@@ -1,9 +1,8 @@
 /**
  * Web Searcher
  *
- * Runs a web search for a given topic and returns a concise
- * enrichment string for the Call Briefing. Extracted from the old
- * Background Analyst -- just the search, no triage.
+ * Runs a web search via OpenAI Responses API and returns a concise
+ * enrichment string for the control block.
  */
 
 import type OpenAI from 'openai'

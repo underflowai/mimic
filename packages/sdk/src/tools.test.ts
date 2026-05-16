@@ -204,7 +204,7 @@ describe('parseParameterNames', () => {
 })
 
 // ---------------------------------------------------------------------------
-// executeTool — plain functions (backwards compat)
+// executeTool — plain functions
 // ---------------------------------------------------------------------------
 
 describe('executeTool with plain functions', () => {

@@ -41,14 +41,7 @@ export interface TtsSynthesisHandle {
 export interface TtsSynthesisOptions {
 	tts: TtsSpeaker
 	sanitize: (text: string) => string
-	/**
-	 * Retained for test/backwards compatibility. Production token streams
-	 * should use the sentence chunker; this transform sends on boundaries.
-	 */
-	flushThreshold?: number
-	/** Optional logger context (e.g. turnId). */
 	logContext?: Record<string, unknown>
-	/** Abort signal used to interrupt the underlying TTS handle. */
 	signal?: AbortSignal
 }
 

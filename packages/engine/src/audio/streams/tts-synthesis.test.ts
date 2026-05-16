@@ -93,14 +93,13 @@ function createFakeSpeaker(): FakeSpeakerControls {
 
 async function runSynthesis(
 	tokens: Array<string | SentenceChunkEvent>,
-	opts: { flushThreshold?: number; signal?: AbortSignal; sanitize?: (text: string) => string } = {},
+	opts: { signal?: AbortSignal; sanitize?: (text: string) => string } = {},
 	sessionAutoComplete: boolean = true,
 ): Promise<{ controls: FakeSpeakerControls; pcm: Buffer[]; done: Promise<void>; handle: TtsSynthesisHandle }> {
 	const controls = createFakeSpeaker()
 	const handle = createTtsSynthesisTransform({
 		tts: controls.speaker,
 		sanitize: opts.sanitize ?? ((t) => (t.trim().length === 0 ? '' : t)),
-		flushThreshold: opts.flushThreshold ?? 0,
 		signal: opts.signal,
 	})
 
@@ -157,7 +156,7 @@ describe('createTtsSynthesisTransform', () => {
 				{ type: 'delta', text: 'Jumped over.' },
 				{ type: 'boundary' },
 			],
-			{ flushThreshold: 4 },
+			{},
 		)
 		await done
 		assert.equal(controls.sessions.length, 1, 'should only open one session per turn')
@@ -174,7 +173,7 @@ describe('createTtsSynthesisTransform', () => {
 				{ type: 'delta', text: "that's a great audience." },
 				{ type: 'boundary' },
 			],
-			{ flushThreshold: 4, sanitize: sanitizeForTts },
+			{ sanitize: sanitizeForTts },
 		)
 
 		await done
@@ -190,7 +189,6 @@ describe('createTtsSynthesisTransform', () => {
 		const handle = createTtsSynthesisTransform({
 			tts: controls.speaker,
 			sanitize: (t) => (t.trim().length === 0 ? '' : t),
-			flushThreshold: 0,
 		})
 
 		const tokens: SentenceChunkEvent[] = [
@@ -238,7 +236,6 @@ describe('createTtsSynthesisTransform', () => {
 
 	it('holds split inline speech tags until the angle bracket closes', async () => {
 		const { controls, done, handle } = await runSynthesis(['<gig', 'gle> ok.'], {
-			flushThreshold: 4,
 			sanitize: sanitizeForTts,
 		})
 
@@ -251,7 +248,6 @@ describe('createTtsSynthesisTransform', () => {
 
 	it('holds split square-bracket speech tags until the bracket closes', async () => {
 		const { controls, done, handle } = await runSynthesis(['[say war', 'mly] Hello there.'], {
-			flushThreshold: 4,
 			sanitize: sanitizeForTts,
 		})
 

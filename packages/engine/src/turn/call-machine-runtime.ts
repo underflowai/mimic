@@ -2,7 +2,7 @@
  * Call-machine runtime wiring over CallMachine + TurnActor.
  *
  * Constructs the provided CallMachine with real action/actor implementations,
- * exposes a small public API the orchestrator (and legacy consumers) call
+ * exposes a small public API the orchestrator calls
  * into. All state transitions, pipeline orchestration, commit, and interrupt
  * cleanup happen inside the machines — the engine just forwards events.
  *
@@ -804,7 +804,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 
 export type CallMachineRuntime = ReturnType<typeof createCallMachineRuntime>
 
-// Re-export for tests / legacy consumers
+// Re-export for tests
 export {
 	getEagerChildSnapshot,
 	getToolPipelineSnapshot,

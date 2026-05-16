@@ -1,34 +1,54 @@
 /**
  * Worker process — runs voice calls from the BullMQ queue.
  *
- * Separate from the API server. Deploy as a second container/process.
+ * Each call runs in a forked child process (BullMQ sandboxed processor).
+ * A crash in one call only kills that child — other active calls and
+ * the worker supervisor are unaffected.
  *
  * Usage:
  *   npx tsx src/worker.ts
  */
 
-import { eq } from 'drizzle-orm'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Worker } from 'bullmq'
+import { Redis } from 'ioredis'
 
-import { getDb } from './db/index.js'
-import { apiAgents, apiCalls } from './db/schema.js'
-import { runCall } from './call-runner.js'
-import { startCallWorker, type CallJobData } from './jobs/queue.js'
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const processorPath = join(__dirname, 'jobs/call-processor.ts')
 
-console.log('[worker] Starting call worker')
+function getRedisConnection() {
+	const url = process.env.REDIS_URL
+	if (!url) throw new Error('REDIS_URL is required')
+	return new Redis(url, { maxRetriesPerRequest: null })
+}
 
-const worker = startCallWorker(async (job) => {
-	const { callId, agentId } = job.data as CallJobData
-	console.log(`[worker] Processing call ${callId}`)
+console.log('[worker] Starting sandboxed call worker')
+console.log(`[worker] Processor: ${processorPath}`)
+console.log(`[worker] Concurrency: 4 (forked child per call)`)
 
-	const db = getDb()
-	const [call] = await db.select().from(apiCalls).where(eq(apiCalls.id, callId)).limit(1)
-	const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)
+const worker = new Worker(
+	'mimic-calls',
+	processorPath,
+	{
+		connection: getRedisConnection() as never,
+		concurrency: 4,
+		lockDuration: 600_000,
+		stalledInterval: 60_000,
+		useWorkerThreads: false,
+	},
+)
 
-	if (!call || !agent) {
-		throw new Error(`Call ${callId} or agent ${agentId} not found`)
-	}
+worker.on('failed', (job, err) => {
+	console.error(`[worker] Call ${job?.data?.callId ?? job?.id} failed (pid will be recycled):`, err.message)
+})
 
-	await runCall(call, agent)
+worker.on('completed', (job) => {
+	console.log(`[worker] Call ${job.data?.callId ?? job.id} completed`)
+})
+
+worker.on('error', (err) => {
+	console.error('[worker] Worker error:', err.message)
 })
 
 const shutdown = async (signal: string) => {

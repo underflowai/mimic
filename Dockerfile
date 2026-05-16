@@ -15,4 +15,8 @@ COPY packages/ packages/
 
 EXPOSE 3000
 ENV PORT=3000
+
+# Default: API server. Override CMD for the worker.
+# API:    docker run mimic
+# Worker: docker run mimic pnpm --filter @mimic/server worker
 CMD ["pnpm", "--filter", "@mimic/server", "start"]

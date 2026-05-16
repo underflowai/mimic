@@ -6,8 +6,8 @@ import { and, eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
-import { runCall } from '../call-runner.js'
-import { incrementActiveCalls, decrementActiveCalls } from '../middleware/rate-limit.js'
+import { enqueueCall } from '../jobs/queue.js'
+import { incrementActiveCalls } from '../middleware/rate-limit.js'
 
 function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean }): string {
 	const dataKeys = config.data ? Object.keys(config.data).sort() : []
@@ -131,7 +131,7 @@ calls.post('/', async (c) => {
 		return c.json({ error: 'Concurrent call limit reached. Wait for active calls to complete.' }, 429)
 	}
 
-	// Background: compile (if needed) → dial → run call
+	// Compile goal in background if needed, then enqueue the call job
 	void (async () => {
 		try {
 			if (needsCompilation) {
@@ -153,13 +153,10 @@ calls.post('/', async (c) => {
 				}).where(eq(apiAgents.id, agentId))
 			}
 
-			const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)
-			await runCall(call, agent!)
+			await enqueueCall({ callId: call.id, agentId })
 		} catch (err) {
 			const errorMessage = err instanceof Error ? err.message : String(err)
 			await db.update(apiCalls).set({ status: 'failed', errorMessage }).where(eq(apiCalls.id, call.id)).catch(() => {})
-		} finally {
-			decrementActiveCalls(apiKey.id)
 		}
 	})()
 

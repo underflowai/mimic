@@ -23,6 +23,7 @@ import { deliverWebhook } from './webhook.js'
 import OpenAI from 'openai'
 import { randomUUID } from 'node:crypto'
 import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
+import { decrementActiveCalls } from './middleware/rate-limit.js'
 
 type EventCallback = (event: Record<string, unknown>) => void
 type ToolCallbackFn = (toolName: string, toolArgs: Record<string, unknown>, callbackId: string) => Promise<{ result: string } | { error: string }>
@@ -239,5 +240,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		await updateCall(callId, { status: 'failed', errorMessage }).catch(() => {})
 		broadcast(callId, { type: 'call_status', status: 'failed' })
 		broadcast(callId, { type: 'error', message: errorMessage })
+	} finally {
+		decrementActiveCalls(call.apiKeyId)
 	}
 }

@@ -100,15 +100,23 @@ function cleanParam(raw: string): string | null {
  * Introspect a record of functions into tool schemas for the API.
  *
  * The function name becomes the tool name. Parameter names are extracted
- * from the function source. An optional `.description` property on the
- * function provides the tool description; otherwise the name is used.
+ * from the function source. If `fn.params` provides descriptions, they
+ * are used; otherwise the parameter name itself serves as the description.
  */
 export function introspectTools(tools: Record<string, ToolFunction>): ToolSchema[] {
-	return Object.entries(tools).map(([name, fn]) => ({
-		name,
-		description: fn.description ?? name,
-		parameters: parseParameterNames(fn),
-	}))
+	return Object.entries(tools).map(([name, fn]) => {
+		const paramNames = cachedParamNames(fn)
+		const paramDescriptions = fn.params ?? {}
+		const parameters: Record<string, string> = {}
+		for (const p of paramNames) {
+			parameters[p] = paramDescriptions[p] ?? p
+		}
+		return {
+			name,
+			description: fn.description ?? name,
+			parameters,
+		}
+	})
 }
 
 const paramCache = new WeakMap<Function, string[]>()

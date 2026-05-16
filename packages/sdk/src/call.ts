@@ -249,13 +249,18 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 
 	private async executeToolWithTimeout(name: string, args: Record<string, unknown>): Promise<string> {
 		const timeoutMs = this.options.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS
+		let timer: ReturnType<typeof setTimeout> | null = null
 
-		return Promise.race([
-			executeTool(this.tools, name, args),
-			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error(`Tool "${name}" timed out after ${timeoutMs}ms`)), timeoutMs),
-			),
-		])
+		try {
+			return await Promise.race([
+				executeTool(this.tools, name, args),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error(`Tool "${name}" timed out after ${timeoutMs}ms`)), timeoutMs)
+				}),
+			])
+		} finally {
+			if (timer) clearTimeout(timer)
+		}
 	}
 
 	// ── Polling fallback ───────────────────────────────────────────────
@@ -334,6 +339,7 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 			clearTimeout(this.streamTimeout)
 			this.streamTimeout = null
 		}
+		this.activeWs = null
 		for (const waiter of this.waiters) {
 			waiter(null)
 		}

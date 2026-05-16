@@ -80,7 +80,7 @@ describe('parseParameterNames', () => {
 // ---------------------------------------------------------------------------
 
 describe('introspectTools', () => {
-	it('uses function name as tool name and extracts params', () => {
+	it('uses function name as tool name and extracts params as record', () => {
 		function checkCalendar(date: string) {
 			return date
 		}
@@ -88,14 +88,16 @@ describe('introspectTools', () => {
 		assert.equal(schemas.length, 1)
 		assert.equal(schemas[0]!.name, 'checkCalendar')
 		assert.equal(schemas[0]!.description, 'checkCalendar')
-		assert.deepEqual(schemas[0]!.parameters, ['date'])
+		assert.deepEqual(schemas[0]!.parameters, { date: 'date' })
 	})
 
-	it('uses .description property if set', () => {
+	it('uses .description and .params when set', () => {
 		const fn: ToolFunction = (date: string) => date
 		fn.description = 'Check available calendar slots'
+		fn.params = { date: 'The date to check in YYYY-MM-DD format' }
 		const schemas = introspectTools({ checkCalendar: fn })
 		assert.equal(schemas[0]!.description, 'Check available calendar slots')
+		assert.deepEqual(schemas[0]!.parameters, { date: 'The date to check in YYYY-MM-DD format' })
 	})
 
 	it('handles multiple tools', () => {
@@ -109,7 +111,7 @@ describe('introspectTools', () => {
 		assert.equal(schemas.length, 2)
 		assert.equal(schemas[0]!.name, 'checkCalendar')
 		assert.equal(schemas[1]!.name, 'bookMeeting')
-		assert.deepEqual(schemas[1]!.parameters, ['time', 'email'])
+		assert.deepEqual(schemas[1]!.parameters, { time: 'time', email: 'email' })
 	})
 
 	it('handles empty tools record', () => {

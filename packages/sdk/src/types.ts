@@ -31,19 +31,22 @@ export type Voice = 'female' | 'male'
  * A tool function the voice agent can invoke during a call.
  *
  * Can be a plain function (name and parameters are introspected
- * automatically). Attach a `.description` property to provide
- * an explicit description for the agent.
+ * automatically). Attach optional metadata to guide the agent:
+ *
+ * - `.description` — what the tool does
+ * - `.params` — parameter descriptions (e.g. `{ date: 'The date to check in YYYY-MM-DD format' }`)
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolFunction = ((...args: any[]) => any) & {
 	description?: string
+	params?: Record<string, string>
 }
 
 /** Wire format for tool definitions sent to the API. */
 export interface ToolSchema {
 	name: string
 	description: string
-	parameters: string[]
+	parameters: Record<string, string>
 }
 
 // ── Call options ───────────────────────────────────────────────────────
@@ -198,7 +201,3 @@ export type ServerMessage =
 	| { type: 'error'; message: string }
 	| { type: 'call_status'; status: ApiCall['status'] }
 
-/** @internal Messages sent to the server over WebSocket. */
-export type ClientMessage =
-	| { type: 'tool_result'; callbackId: string; result: string }
-	| { type: 'tool_error'; callbackId: string; error: string }

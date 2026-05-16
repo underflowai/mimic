@@ -69,11 +69,3 @@ export class CallFailedError extends MimicError {
 		this.name = 'CallFailedError'
 	}
 }
-
-/** Thrown when the streaming connection drops unexpectedly. */
-export class ConnectionError extends MimicError {
-	constructor(message: string) {
-		super(message)
-		this.name = 'ConnectionError'
-	}
-}

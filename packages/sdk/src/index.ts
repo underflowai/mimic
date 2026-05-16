@@ -1,145 +1,120 @@
-import { runAgentCall, runCall } from './call.js'
+import { MimicCall } from './call.js'
 import { MimicClient } from './client.js'
-import type {
-	AgentCallOptions,
-	ApiAgent,
-	CallOptions,
-	CallResult,
-	CreateAgentOptions,
-	MimicOptions,
-	UpdateAgentOptions,
-} from './types.js'
+import { MimicError } from './errors.js'
+import type { CallOptions, MimicOptions, ToolFunction } from './types.js'
 
 /**
- * The main Mimic client. Create an instance with your API key, then
- * make calls or manage agents.
+ * The Mimic client. Create one with your API key, then make calls.
  *
  * @example
  * ```typescript
- * const uf = new Mimic({ apiKey: 'mk_...' })
+ * import { Mimic } from '@mimic/sdk'
  *
- * const result = await uf.call({
- *   to: '+15551234567',
- *   goal: 'Confirm the appointment for tomorrow at 2pm',
+ * const mimic = new Mimic('mk_...')
+ *
+ * // Three arguments: who, what, with
+ * const call = mimic.call('+15551234567', 'Book an appointment', {
+ *   checkCalendar,
+ *   bookMeeting,
  * })
+ *
+ * // Stream events in real-time
+ * for await (const event of call) {
+ *   console.log(event)
+ * }
+ *
+ * // Or just await the result
+ * const result = await call.result
  * ```
  */
 export class Mimic {
 	private readonly client: MimicClient
-	private readonly WebSocketImpl?: MimicOptions['WebSocket']
-
-	constructor(options: MimicOptions) {
-		this.client = new MimicClient(options)
-		this.WebSocketImpl = options.WebSocket
-	}
+	private readonly wsOption: MimicOptions['WebSocket']
 
 	/**
-	 * Make a one-shot voice call. Creates an agent behind the scenes, starts the call,
-	 * and polls until it completes or times out.
+	 * Create a Mimic client.
 	 *
-	 * @typeParam T - Shape of the structured data returned in `result.data`.
-	 * @param options - Call configuration including phone number, goal, tools, and result schema.
-	 * @returns The completed call result with transcript, extracted data, and goal outcome.
-	 * @throws {@link CallTimeoutError} if the call doesn't complete within `timeoutMs`.
-	 * @throws {@link CallFailedError} if the call reaches a terminal failed state.
+	 * @param options - API key string or full options object.
+	 * @throws {MimicError} If the API key is empty or malformed.
 	 */
-	call<T extends Record<string, unknown> = Record<string, unknown>>(options: CallOptions<T>): Promise<CallResult<T>> {
-		return runCall<T>(this.client, options, this.WebSocketImpl)
-	}
-
-	/**
-	 * Create a reusable agent. Use this when making multiple calls with the same
-	 * configuration — the agent is created once and can call many numbers.
-	 *
-	 * @param options - Agent configuration including goal, tools, and result schema.
-	 * @returns An {@link MimicAgent} that can make calls.
-	 */
-	async createAgent(options: CreateAgentOptions): Promise<MimicAgent> {
-		const agent = await this.client.createAgent(options)
-		return new MimicAgent(this.client, agent, options, this.WebSocketImpl)
-	}
-
-	/**
-	 * Fetch an existing agent by ID.
-	 *
-	 * @param id - The agent's unique identifier.
-	 * @returns An {@link MimicAgent} wrapping the fetched agent.
-	 * @throws {@link ApiError} with code `'not_found'` if the agent doesn't exist.
-	 */
-	async getAgent(id: string): Promise<MimicAgent> {
-		const agent = await this.client.getAgent(id)
-		return new MimicAgent(this.client, agent, {}, this.WebSocketImpl)
-	}
-
-	/**
-	 * Update an existing agent's configuration.
-	 *
-	 * @param id - The agent's unique identifier.
-	 * @param options - Fields to update. Only provided fields are changed.
-	 * @returns An {@link MimicAgent} wrapping the updated agent.
-	 */
-	async updateAgent(id: string, options: UpdateAgentOptions): Promise<MimicAgent> {
-		const agent = await this.client.updateAgent(id, options)
-		return new MimicAgent(this.client, agent, {}, this.WebSocketImpl)
-	}
-
-	/**
-	 * Fetch the current state of a call by ID.
-	 *
-	 * @param id - The call's unique identifier.
-	 * @returns The call result (may be in-progress with partial data).
-	 */
-	async getCall(id: string): Promise<CallResult> {
-		const call = await this.client.getCall(id)
-		return {
-			id: call.id,
-			status: call.status === 'failed' ? ('failed' as const) : ('completed' as const),
-			goalAchieved: call.goalAchieved ?? false,
-			goalAchievedReason: call.goalAchievedReason ?? '',
-			data: call.result ?? {},
-			transcript: call.transcript ?? [],
-			duration: call.duration,
+	constructor(options: string | MimicOptions) {
+		const opts = typeof options === 'string' ? { apiKey: options } : options
+		if (!opts.apiKey || typeof opts.apiKey !== 'string') {
+			throw new MimicError('API key is required. Pass a string starting with "mk_".')
 		}
+		if (!opts.apiKey.startsWith('mk_') && !opts.apiKey.startsWith('sk_')) {
+			throw new MimicError(`Invalid API key format: "${opts.apiKey.slice(0, 8)}...". Expected a key starting with "mk_".`)
+		}
+		this.client = new MimicClient(opts)
+		this.wsOption = typeof options === 'object' ? options.WebSocket : undefined
+	}
+
+	/**
+	 * Make a voice call.
+	 *
+	 * Returns a {@link MimicCall} that is both an `AsyncIterable<CallEvent>`
+	 * (for streaming) and has a `.result` promise (for fire-and-forget).
+	 *
+	 * @example
+	 * ```typescript
+	 * // Positional: who, what, with
+	 * const call = mimic.call('+15551234567', 'Book an appointment', {
+	 *   checkCalendar,
+	 *   bookMeeting,
+	 * })
+	 * ```
+	 *
+	 * @example
+	 * ```typescript
+	 * // Options object for full control
+	 * const call = mimic.call({
+	 *   to: '+15551234567',
+	 *   goal: 'Book an appointment',
+	 *   tools: { checkCalendar, bookMeeting },
+	 *   voice: 'female',
+	 *   context: { patientName: 'Jane Doe' },
+	 *   extract: { confirmed: 'whether confirmed', notes: 'any notes' },
+	 * })
+	 * ```
+	 */
+	call(options: CallOptions): MimicCall
+	call(to: string, goal: string, tools?: Record<string, ToolFunction>): MimicCall
+	call(
+		toOrOptions: string | CallOptions,
+		goal?: string,
+		tools?: Record<string, ToolFunction>,
+	): MimicCall {
+		const options: CallOptions =
+			typeof toOrOptions === 'string'
+				? { to: toOrOptions, goal: goal!, tools }
+				: toOrOptions
+
+		return new MimicCall({
+			client: this.client,
+			options,
+			WebSocketImpl: this.wsOption,
+		})
 	}
 }
 
-/**
- * A reusable voice agent. Created via {@link Mimic.createAgent} or
- * {@link Mimic.getAgent}. Call `.call()` to make outbound calls with
- * this agent's configuration.
- */
-export class MimicAgent {
-	constructor(
-		private readonly client: MimicClient,
-		/** The underlying API agent data. */
-		readonly agent: ApiAgent,
-		private readonly options: Pick<CreateAgentOptions, 'tools'>,
-		private readonly WebSocketImpl?: MimicOptions['WebSocket'],
-	) {}
+// ── Re-exports ────────────────────────────────────────────────────────
 
-	/**
-	 * Make a call with this agent.
-	 *
-	 * @typeParam T - Shape of the structured data returned in `result.data`.
-	 * @param to - Phone number to call (E.164 format).
-	 * @param options - Per-call overrides (context, timeout, idempotency key).
-	 */
-	call<T extends Record<string, unknown> = Record<string, unknown>>(
-		to: string,
-		options?: Omit<AgentCallOptions, 'to'>,
-	): Promise<CallResult<T>>
-	/**
-	 * Make a call with this agent.
-	 *
-	 * @typeParam T - Shape of the structured data returned in `result.data`.
-	 * @param options - Call options including phone number.
-	 */
-	call<T extends Record<string, unknown> = Record<string, unknown>>(options: AgentCallOptions): Promise<CallResult<T>>
-	call<T extends Record<string, unknown> = Record<string, unknown>>(
-		input: string | AgentCallOptions,
-		options: Omit<AgentCallOptions, 'to'> = {},
-	): Promise<CallResult<T>> {
-		const callOptions = typeof input === 'string' ? { ...options, to: input } : input
-		return runAgentCall<T>(this.client, this.agent, this.options, callOptions, this.WebSocketImpl)
-	}
-}
+export { MimicCall } from './call.js'
+export { ApiError, CallFailedError, CallTimeoutError, ConnectionError, MimicError } from './errors.js'
+export { introspectTools, parseParameterNames } from './tools.js'
+export type {
+	CallEvent,
+	CallOptions,
+	CallResult,
+	DoneEvent,
+	ErrorEvent,
+	MimicOptions,
+	SpeechEvent,
+	ToolCallEvent,
+	ToolErrorEvent,
+	ToolFunction,
+	ToolResultEvent,
+	ToolSchema,
+	TranscriptEntry,
+	Voice,
+} from './types.js'

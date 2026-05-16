@@ -1,102 +1,80 @@
 import { ApiError } from './errors.js'
-import type {
-	ApiAgent,
-	ApiCall,
-	CreateAgentOptions,
-	ToolDefinition,
-	ToolParameter,
-	MimicOptions,
-	MimicTool,
-	UpdateAgentOptions,
-} from './types.js'
+import type { ApiAgent, ApiCall, CreateCallResponse, MimicOptions, ToolSchema, Voice } from './types.js'
 
-export interface CreateCallResponse {
-	id: string
-	status: ApiCall['status']
-}
+const SDK_VERSION = '0.1.0'
+const MAX_RETRIES = 2
+const INITIAL_RETRY_DELAY_MS = 500
+const REQUEST_TIMEOUT_MS = 30_000
 
 function normalizeBaseUrl(baseUrl?: string) {
 	return (baseUrl ?? 'https://api.mimic.dev').replace(/\/+$/, '')
 }
 
-function serializeParameter(param: ToolParameter): string {
-	const parts: string[] = [param.type]
-	if (param.description) parts.push(`— ${param.description}`)
-	if (param.required === false) parts.push('(optional)')
-	return parts.join(' ')
+function isRetryable(status: number): boolean {
+	return status === 408 || status === 429 || status >= 500
 }
 
-export function toToolDefinitions(tools?: Record<string, MimicTool>): ToolDefinition[] {
-	return Object.entries(tools ?? {}).map(([name, tool]) => ({
-		name,
-		description: tool.description,
-		parameters: Object.fromEntries(
-			Object.entries(tool.parameters ?? {}).map(([key, param]) => [key, serializeParameter(param)]),
-		),
-	}))
+function retryDelay(attempt: number): number {
+	return INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 100
 }
 
+/**
+ * Thin HTTP client for the Mimic API with retries and timeouts.
+ *
+ * @internal
+ */
 export class MimicClient {
 	readonly baseUrl: string
 	private readonly fetchImpl: typeof fetch
 	private readonly apiKey: string
+	private readonly userAgent: string
 
 	constructor(options: MimicOptions) {
 		this.apiKey = options.apiKey
 		this.baseUrl = normalizeBaseUrl(options.baseUrl)
 		this.fetchImpl = options.fetch ?? fetch
+		this.userAgent = `@mimic/sdk/${SDK_VERSION} node/${typeof process !== 'undefined' ? process.version : 'unknown'}`
 	}
 
-	toolSocketUrl(callId: string) {
-		const url = new URL(`${this.baseUrl}/api/v1/calls/${encodeURIComponent(callId)}/tools`)
+	streamUrl(callId: string): string {
+		const url = new URL(`${this.baseUrl}/api/v1/calls/${encodeURIComponent(callId)}/stream`)
 		url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
 		url.searchParams.set('token', this.apiKey)
 		return url.toString()
 	}
 
-	async createAgent(options: CreateAgentOptions): Promise<ApiAgent> {
-		return this.request<ApiAgent>('/api/v1/agents', {
+	async createCall(params: {
+		goal: string
+		to: string
+		voice?: Voice
+		context?: Record<string, string>
+		tools?: ToolSchema[]
+		extract?: Record<string, string>
+		idempotencyKey?: string
+	}): Promise<{ agent: ApiAgent; call: CreateCallResponse }> {
+		const agent = await this.request<ApiAgent>('/api/v1/agents', {
 			method: 'POST',
 			body: JSON.stringify({
-				name: options.name ?? (options.goal.slice(0, 80) || 'voice agent'),
-				goal: options.goal,
-				voice: options.voice ?? 'female',
-				context: options.context ?? {},
-				data: options.data ?? {},
-				tools: toToolDefinitions(options.tools),
-				results: options.results ?? {},
-				successCondition: options.successCondition,
-				webhook: options.webhook,
+				name: params.goal.slice(0, 80) || 'voice agent',
+				goal: params.goal,
+				voice: params.voice ?? 'female',
+				context: params.context ?? {},
+				tools: params.tools ?? [],
+				results: params.extract ?? {},
 			}),
 		})
-	}
 
-	async getAgent(id: string): Promise<ApiAgent> {
-		return this.request<ApiAgent>(`/api/v1/agents/${encodeURIComponent(id)}`)
-	}
-
-	async updateAgent(id: string, options: UpdateAgentOptions): Promise<ApiAgent> {
-		return this.request<ApiAgent>(`/api/v1/agents/${encodeURIComponent(id)}`, {
-			method: 'PATCH',
-			body: JSON.stringify(options),
-		})
-	}
-
-	async createCall(params: {
-		agentId: string
-		to: string
-		context?: Record<string, string>
-		idempotencyKey?: string
-	}): Promise<CreateCallResponse> {
-		return this.request<CreateCallResponse>('/api/v1/calls', {
+		const call = await this.request<CreateCallResponse>('/api/v1/calls', {
 			method: 'POST',
 			body: JSON.stringify({
-				agentId: params.agentId,
+				agentId: agent.id,
 				to: params.to,
 				context: params.context ?? {},
 				idempotencyKey: params.idempotencyKey,
 			}),
 		})
+
+		return { agent, call }
 	}
 
 	async getCall(id: string): Promise<ApiCall> {
@@ -104,23 +82,60 @@ export class MimicClient {
 	}
 
 	private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-		const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-			...init,
-			headers: {
-				authorization: `Bearer ${this.apiKey}`,
-				'content-type': 'application/json',
-				...init.headers,
-			},
-		})
-		const text = await response.text()
-		const body = text ? (JSON.parse(text) as unknown) : null
-		if (!response.ok) {
-			const message =
-				body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
-					? body.error
-					: `Mimic API request failed with ${response.status}`
-			throw new ApiError(message, response.status, body)
+		let lastError: Error | null = null
+
+		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			if (attempt > 0) {
+				await new Promise((r) => setTimeout(r, retryDelay(attempt - 1)))
+			}
+
+			const abort = new AbortController()
+			const timeout = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS)
+
+			try {
+				const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+					...init,
+					signal: abort.signal,
+					headers: {
+						authorization: `Bearer ${this.apiKey}`,
+						'content-type': 'application/json',
+						'user-agent': this.userAgent,
+						...init.headers,
+					},
+				})
+
+				clearTimeout(timeout)
+
+				const text = await response.text()
+				const body = text ? (JSON.parse(text) as unknown) : null
+
+				if (!response.ok) {
+					const message =
+						body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
+							? body.error
+							: `Mimic API request failed with ${response.status}`
+					const err = new ApiError(message, response.status, body)
+
+					if (isRetryable(response.status) && attempt < MAX_RETRIES) {
+						lastError = err
+						continue
+					}
+					throw err
+				}
+
+				return body as T
+			} catch (err) {
+				clearTimeout(timeout)
+
+				if (err instanceof ApiError) throw err
+
+				// Network error or timeout — retryable
+				lastError = err instanceof Error ? err : new Error(String(err))
+				if (attempt < MAX_RETRIES) continue
+				throw lastError
+			}
 		}
-		return body as T
+
+		throw lastError ?? new Error('Request failed')
 	}
 }

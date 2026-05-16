@@ -1,66 +1,6 @@
-/** Voice persona for the agent. */
-export type Voice = 'female' | 'male'
+// ── Client options ────────────────────────────────────────────────────
 
-/**
- * How the platform evaluates whether the call achieved its goal.
- *
- * - `llm_evaluated` — the LLM decides based on the conversation (default).
- * - `tool_called` — goal is achieved when the named tool is successfully called.
- * - `field_filled` — goal is achieved when the named result field has a value.
- */
-export type SuccessCondition =
-	| { type: 'llm_evaluated' }
-	| { type: 'tool_called'; toolName: string }
-	| { type: 'field_filled'; fieldName: string }
-
-/** A single entry in the call transcript. */
-export interface TranscriptEntry {
-	/** Who spoke — typically `'user'` (caller) or `'assistant'` (agent). */
-	role: string
-	/** What was said. */
-	content: string
-}
-
-/** Allowed types for tool parameters. */
-export type ToolParameterType = 'string' | 'number' | 'boolean'
-
-/** Describes a single parameter that a tool accepts. */
-export interface ToolParameter {
-	/** The data type of this parameter. */
-	type: ToolParameterType
-	/** Human-readable description. Helps the voice agent collect the right value from the caller. */
-	description?: string
-	/** Whether this parameter is required. Defaults to `true`. */
-	required?: boolean
-}
-
-/**
- * A tool the voice agent can use during a call.
- *
- * The `description` and `parameters` are sent to the server so the agent knows when and how
- * to invoke the tool. The `run` function executes locally in your process — your secrets and
- * APIs never leave your machine.
- */
-export interface MimicTool {
-	/** What this tool does. The agent uses this to decide when to call it. */
-	description: string
-	/** Parameters the tool accepts. The agent collects these from the caller before invoking. */
-	parameters?: Record<string, ToolParameter>
-	/**
-	 * Execute the tool locally. Receives the arguments the agent collected from the caller.
-	 * Return a string result that the agent will relay back to the caller.
-	 */
-	run?: (args: Record<string, unknown>) => Promise<string> | string
-}
-
-/** Wire format for tool definitions sent to the API. */
-export interface ToolDefinition {
-	name: string
-	description: string
-	parameters: Record<string, string>
-}
-
-/** Options for creating an {@link Mimic} client. */
+/** Options for creating a {@link Mimic} client. */
 export interface MimicOptions {
 	/** Your Mimic API key. Starts with `mk_`. */
 	apiKey: string
@@ -68,88 +8,158 @@ export interface MimicOptions {
 	baseUrl?: string
 	/** Custom `fetch` implementation. Defaults to the global `fetch`. */
 	fetch?: typeof fetch
-	/** Custom `WebSocket` constructor. Defaults to the global `WebSocket`. */
-	WebSocket?: typeof WebSocket
+	/** Custom `WebSocket` constructor, or `null` to disable streaming (forces polling). */
+	WebSocket?: WebSocketConstructor | null
 }
 
-/** Options for creating a reusable voice agent. */
-export interface CreateAgentOptions {
-	/** Display name for the agent. Defaults to the first 80 characters of the goal. */
-	name?: string
-	/** What the agent should accomplish on the call. Be specific and outcome-oriented. */
-	goal: string
-	/** Voice persona. Defaults to `'female'`. */
-	voice?: Voice
-	/** Key-value context the agent can reference during the call (e.g. company info, FAQs, background knowledge). */
-	context?: Record<string, string>
-	/** Structured data the agent should confirm or collect (supports nested objects, arrays, and constrained fields). */
-	data?: Record<string, unknown>
-	/** Tools the agent can use. Keys are tool names, values define behavior and local execution. */
-	tools?: Record<string, MimicTool>
-	/** What the agent should extract from the call. Keys are field names, values describe what to extract. */
-	results?: Record<string, unknown>
-	/** How to determine if the call achieved its goal. Defaults to LLM evaluation. */
-	successCondition?: SuccessCondition
-	/** URL to receive a webhook when the call completes. */
-	webhook?: string
+export type WebSocketConstructor = {
+	new (url: string | URL, protocols?: string | string[]): WebSocket
+	readonly CONNECTING: number
+	readonly OPEN: number
+	readonly CLOSING: number
+	readonly CLOSED: number
 }
 
-/** Options for updating an existing agent. All fields are optional. */
-export interface UpdateAgentOptions {
-	name?: string
-	webhook?: string | null
-	phoneNumber?: string | null
-	systemPrompt?: string
-	turnControlBlock?: string | null
-	agentName?: string
-}
+// ── Voice ─────────────────────────────────────────────────────────────
+
+/** Voice persona for the agent. */
+export type Voice = 'female' | 'male'
+
+// ── Tool types ────────────────────────────────────────────────────────
 
 /**
- * Options for making a one-shot call. Extends {@link CreateAgentOptions} with
- * the phone number to call and polling configuration.
+ * A tool function the voice agent can invoke during a call.
  *
- * @typeParam T - Shape of the structured data returned in {@link CallResult.data}.
+ * Can be a plain function (name and parameters are introspected
+ * automatically). Attach a `.description` property to provide
+ * an explicit description for the agent.
  */
-export interface CallOptions<T extends Record<string, unknown> = Record<string, unknown>> extends CreateAgentOptions {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ToolFunction = ((...args: any[]) => any) & {
+	description?: string
+}
+
+/** Wire format for tool definitions sent to the API. */
+export interface ToolSchema {
+	name: string
+	description: string
+	parameters: string[]
+}
+
+// ── Call options ───────────────────────────────────────────────────────
+
+/** Full options object for {@link Mimic.call}. */
+export interface CallOptions {
 	/** Phone number to call (E.164 format, e.g. `'+15551234567'`). */
 	to: string
-	/** What to extract from the call. Keys must match the type parameter `T`. */
-	results?: { [K in keyof T]: unknown }
-	/** Deduplicate calls with the same key. If a call with this key already exists, it is returned instead. */
-	idempotencyKey?: string
+	/** What the agent should accomplish on the call. */
+	goal: string
+	/** Tools the agent can use. Keys are tool names, values are functions. */
+	tools?: Record<string, ToolFunction>
+	/** Voice persona. Defaults to `'female'`. */
+	voice?: Voice
+	/** Key-value context the agent can reference (e.g. company info, caller details). */
+	context?: Record<string, string>
+	/** What to extract from the call. Keys are field names, values describe what to extract. */
+	extract?: Record<string, string>
 	/** Maximum time to wait for the call to complete, in milliseconds. Defaults to 5 minutes. */
 	timeoutMs?: number
-	/** How often to poll for call status, in milliseconds. Defaults to 2 seconds. */
+	/** Polling interval when WebSocket is unavailable, in milliseconds. Defaults to 2 seconds. */
 	pollIntervalMs?: number
-}
-
-/** Options for calling with a reusable agent. */
-export interface AgentCallOptions {
-	/** Phone number to call (E.164 format). */
-	to: string
-	/** Per-call context that overrides or extends the agent's default context. */
-	context?: Record<string, string>
+	/** Per-tool execution timeout in milliseconds. Defaults to 30 seconds. */
+	toolTimeoutMs?: number
 	/** Deduplicate calls with the same key. */
 	idempotencyKey?: string
-	/** Maximum time to wait for completion, in milliseconds. Defaults to 5 minutes. */
-	timeoutMs?: number
-	/** Poll interval in milliseconds. Defaults to 2 seconds. */
-	pollIntervalMs?: number
 }
 
-/** An agent as returned by the API. */
-export interface ApiAgent {
-	id: string
+// ── Call events ───────────────────────────────────────────────────────
+
+/** Agent or caller spoke. */
+export interface SpeechEvent {
+	type: 'speech'
+	/** Who spoke. */
+	role: 'agent' | 'caller'
+	/** What was said. */
+	text: string
+}
+
+/** The agent invoked a tool. */
+export interface ToolCallEvent {
+	type: 'tool_call'
+	/** Tool name. */
 	name: string
-	goal: string
-	voice: Voice
-	context: Record<string, string>
-	data?: Record<string, unknown>
-	tools: ToolDefinition[]
-	results: Record<string, unknown>
+	/** Arguments the agent collected from the caller. */
+	args: Record<string, unknown>
 }
 
-/** A call as returned by the API (may be in-progress). */
+/** A tool returned a result. */
+export interface ToolResultEvent {
+	type: 'tool_result'
+	/** Tool name. */
+	name: string
+	/** The result returned by the tool function. */
+	result: string
+}
+
+/** A tool threw an error. */
+export interface ToolErrorEvent {
+	type: 'tool_error'
+	/** Tool name. */
+	name: string
+	/** Error message. */
+	error: string
+}
+
+/** The call ended. */
+export interface DoneEvent {
+	type: 'done'
+	/** Whether the agent achieved its stated goal. */
+	goalAchieved: boolean
+	/** The agent's reasoning for the goal outcome. */
+	goalAchievedReason: string
+}
+
+/** An error occurred during the call. */
+export interface ErrorEvent {
+	type: 'error'
+	/** Error message. */
+	message: string
+}
+
+/** Union of all events emitted during a call. */
+export type CallEvent = SpeechEvent | ToolCallEvent | ToolResultEvent | ToolErrorEvent | DoneEvent | ErrorEvent
+
+// ── Call result ───────────────────────────────────────────────────────
+
+/** A single entry in the call transcript. */
+export interface TranscriptEntry {
+	/** Who spoke — `'agent'` or `'caller'`. */
+	role: string
+	/** What was said. */
+	content: string
+}
+
+/** The final result of a completed call. */
+export interface CallResult {
+	/** Unique call identifier. */
+	id: string
+	/** Terminal status. */
+	status: 'completed' | 'failed'
+	/** Whether the agent achieved its stated goal. */
+	goalAchieved: boolean
+	/** The agent's reasoning for the goal outcome. */
+	goalAchievedReason: string
+	/** Structured data extracted from the call, shaped by `extract`. */
+	data: Record<string, unknown>
+	/** Full call transcript. */
+	transcript: TranscriptEntry[]
+	/** Call duration in seconds, or `null` if unavailable. */
+	duration: number | null
+}
+
+// ── API wire types ────────────────────────────────────────────────────
+
+/** @internal Call as returned by the API. */
 export interface ApiCall {
 	id: string
 	status: 'pending' | 'in_progress' | 'completed' | 'failed'
@@ -161,25 +171,34 @@ export interface ApiCall {
 	errorMessage: string | null
 }
 
-/**
- * The result of a completed call.
- *
- * @typeParam T - Shape of the structured data in {@link data}. Pass a type parameter
- * to `call<T>()` and define a matching `results` to get typed access.
- */
-export interface CallResult<T extends Record<string, unknown> = Record<string, unknown>> {
-	/** Unique call identifier. */
+/** @internal Agent as returned by the API (created implicitly). */
+export interface ApiAgent {
 	id: string
-	/** Terminal status. */
-	status: 'completed' | 'failed'
-	/** Whether the agent achieved its stated goal. */
-	goalAchieved: boolean
-	/** The agent's reasoning for the goal outcome. */
-	goalAchievedReason: string
-	/** Structured data extracted from the call, shaped by `results`. */
-	data: T
-	/** Full call transcript. */
-	transcript: TranscriptEntry[]
-	/** Call duration in seconds, or `null` if unavailable. */
-	duration: number | null
+	name: string
+	goal: string
+	voice: Voice
+	context: Record<string, string>
+	tools: ToolSchema[]
+	results: Record<string, unknown>
 }
+
+/** @internal Response from POST /calls. */
+export interface CreateCallResponse {
+	id: string
+	status: ApiCall['status']
+}
+
+// ── Stream protocol ───────────────────────────────────────────────────
+
+/** @internal Messages received from the server over WebSocket. */
+export type ServerMessage =
+	| { type: 'speech'; role: 'agent' | 'caller'; text: string }
+	| { type: 'tool_call'; callbackId: string; toolName: string; toolArgs: Record<string, unknown> }
+	| { type: 'done'; goalAchieved: boolean; goalAchievedReason: string }
+	| { type: 'error'; message: string }
+	| { type: 'call_status'; status: ApiCall['status'] }
+
+/** @internal Messages sent to the server over WebSocket. */
+export type ClientMessage =
+	| { type: 'tool_result'; callbackId: string; result: string }
+	| { type: 'tool_error'; callbackId: string; error: string }

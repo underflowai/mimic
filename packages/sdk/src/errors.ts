@@ -30,16 +30,14 @@ function extractField(body: unknown, field: string): string | null {
  * an optional `requestId` for support debugging.
  */
 export class ApiError extends MimicError {
-	/** Machine-readable error code. Derived from the response body or HTTP status. */
+	/** Machine-readable error code. */
 	readonly code: string
 	/** Server-assigned request identifier, if available. */
 	readonly requestId: string | null
 
 	constructor(
 		message: string,
-		/** HTTP status code. */
 		readonly status: number,
-		/** Raw response body. */
 		readonly body: unknown,
 	) {
 		super(message)
@@ -49,11 +47,10 @@ export class ApiError extends MimicError {
 	}
 }
 
-/** Thrown when polling for a call exceeds the configured timeout. */
+/** Thrown when a call exceeds the configured timeout. */
 export class CallTimeoutError extends MimicError {
 	constructor(
 		message: string,
-		/** The call that timed out. */
 		readonly callId?: string,
 	) {
 		super(message)
@@ -65,12 +62,18 @@ export class CallTimeoutError extends MimicError {
 export class CallFailedError extends MimicError {
 	constructor(
 		message: string,
-		/** The call that failed. */
 		readonly callId: string,
-		/** Raw API response body. */
 		readonly body: unknown,
 	) {
 		super(message)
 		this.name = 'CallFailedError'
+	}
+}
+
+/** Thrown when the streaming connection drops unexpectedly. */
+export class ConnectionError extends MimicError {
+	constructor(message: string) {
+		super(message)
+		this.name = 'ConnectionError'
 	}
 }

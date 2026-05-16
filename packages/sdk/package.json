@@ -16,6 +16,9 @@
 		}
 	},
 	"files": ["build/", "README.md"],
+	"engines": {
+		"node": ">=22.0.0"
+	},
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json",
 		"typecheck": "tsc -b --noEmit",

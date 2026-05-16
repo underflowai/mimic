@@ -1,59 +1,67 @@
 /**
- * SDK client example — make a one-shot AI phone call.
+ * Make a voice call with a few lines of code.
  *
- * The SDK connects to the Mimic API, creates an agent from your goal,
- * starts the call, and polls until it completes. Tools run locally
- * in your process via WebSocket.
+ * Your functions are the tools — no wrappers, no schemas, no boilerplate.
+ * The agent introspects function names and parameters automatically.
  *
  * Usage:
- *   MIMIC_API_KEY=... npx tsx examples/sdk-call.ts
+ *   MIMIC_API_KEY=mk_... npx tsx examples/sdk-call.ts
  */
 
 import { Mimic } from '@mimic/sdk'
 
-const client = new Mimic({
-	apiKey: process.env.MIMIC_API_KEY!,
-	baseUrl: process.env.MIMIC_API_URL,
+const mimic = new Mimic(process.env.MIMIC_API_KEY!)
+
+// ── Your existing functions ────────────────────────────────────────────
+
+async function checkCalendar(date: string) {
+	// In real code this would hit your calendar API
+	return JSON.stringify({ date, slots: ['2:00 PM', '3:00 PM', '4:00 PM'] })
+}
+
+async function reschedule(newDate: string, newTime: string) {
+	console.log(`  → Rescheduling to ${newDate} at ${newTime}`)
+	return `Appointment rescheduled to ${newDate} at ${newTime}`
+}
+
+// ── Make the call ──────────────────────────────────────────────────────
+
+const call = mimic.call('+15551234567', 'Confirm the appointment for tomorrow at 2pm with Dr. Smith', {
+	checkCalendar,
+	reschedule,
 })
 
-const result = await client.call({
-	to: '+15551234567',
-	goal: 'Confirm the appointment for tomorrow at 2pm with Dr. Smith',
-	voice: 'female',
-	context: {
-		patientName: 'Jane Doe',
-		appointmentDate: 'May 16, 2026',
-		appointmentTime: '2:00 PM',
-		doctorName: 'Dr. Smith',
-		clinicName: 'Greenwood Medical',
-	},
-	tools: {
-		reschedule: {
-			description: 'Reschedule the appointment to a new date and time',
-			parameters: {
-				newDate: { type: 'string', description: 'The new date for the appointment' },
-				newTime: { type: 'string', description: 'The new time for the appointment' },
-			},
-			async run(args) {
-				console.log(`Rescheduling to ${args.newDate} at ${args.newTime}`)
-				return `Appointment rescheduled to ${args.newDate} at ${args.newTime}`
-			},
-		},
-	},
-	results: {
-		confirmed: 'Whether the appointment was confirmed (true/false)',
-		notes: 'Any notes from the conversation',
-	},
-	timeoutMs: 3 * 60_000,
-})
+// ── Stream events in real-time ─────────────────────────────────────────
 
-console.log('Call result:', {
+for await (const event of call) {
+	switch (event.type) {
+		case 'speech':
+			console.log(`[${event.role}] ${event.text}`)
+			break
+		case 'tool_call':
+			console.log(`  ⚡ ${event.name}(${JSON.stringify(event.args)})`)
+			break
+		case 'tool_result':
+			console.log(`  ← ${event.name}: ${event.result}`)
+			break
+		case 'tool_error':
+			console.log(`  ✗ ${event.name}: ${event.error}`)
+			break
+		case 'done':
+			console.log(`\nGoal achieved: ${event.goalAchieved}`)
+			break
+		case 'error':
+			console.error(`Error: ${event.message}`)
+			break
+	}
+}
+
+// ── Or just await the result ───────────────────────────────────────────
+
+const result = await call.result
+console.log('\nCall result:', {
 	status: result.status,
 	goalAchieved: result.goalAchieved,
-	data: result.data,
 	duration: result.duration,
+	data: result.data,
 })
-
-for (const entry of result.transcript) {
-	console.log(`[${entry.role}] ${entry.content}`)
-}

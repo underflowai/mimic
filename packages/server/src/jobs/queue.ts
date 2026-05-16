@@ -22,17 +22,22 @@ function connection() {
 	return _connection
 }
 
-export const callQueue = new Queue('mimic-calls', {
-	connection: { lazyConnect: true },
-	defaultJobOptions: {
-		attempts: 2,
-		backoff: { type: 'exponential', delay: 5000 },
-		removeOnComplete: { age: 86_400, count: 500 },
-		removeOnFail: { age: 3 * 86_400, count: 1000 },
-	},
-})
+let _queue: Queue<CallJobData> | null = null
 
-callQueue.opts.connection = connection() as never
+function getQueue(): Queue<CallJobData> {
+	if (!_queue) {
+		_queue = new Queue<CallJobData>('mimic-calls', {
+			connection: connection() as never,
+			defaultJobOptions: {
+				attempts: 2,
+				backoff: { type: 'exponential', delay: 5000 },
+				removeOnComplete: { age: 86_400, count: 500 },
+				removeOnFail: { age: 3 * 86_400, count: 1000 },
+			},
+		})
+	}
+	return _queue
+}
 
 export interface CallJobData {
 	callId: string
@@ -67,12 +72,12 @@ export function startCallWorker(
 }
 
 export async function enqueueCall(data: CallJobData) {
-	await callQueue.add('call', data, {
+	await getQueue().add('call', data, {
 		jobId: data.callId,
 	})
 }
 
 export async function shutdownQueue() {
-	await callQueue.close()
+	await _queue?.close()
 	_connection?.disconnect()
 }

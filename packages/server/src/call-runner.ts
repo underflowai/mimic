@@ -21,10 +21,17 @@ import { createSipDialer } from './sip.js'
 import { deliverWebhook } from './webhook.js'
 
 import OpenAI from 'openai'
+import { randomUUID } from 'node:crypto'
 
 type EventCallback = (event: Record<string, unknown>) => void
+type ToolCallbackFn = (toolName: string, toolArgs: Record<string, unknown>, callbackId: string) => Promise<{ result: string } | { error: string }>
+
+export interface ToolHandler {
+	unregister: () => void
+}
 
 const activeCallSubscribers = new Map<string, Set<EventCallback>>()
+const activeToolHandlers = new Map<string, ToolCallbackFn>()
 
 export function subscribeToCall(callId: string, callback: EventCallback): () => void {
 	let subs = activeCallSubscribers.get(callId)
@@ -39,6 +46,13 @@ export function subscribeToCall(callId: string, callback: EventCallback): () => 
 	}
 }
 
+export function registerToolHandler(callId: string, handler: ToolCallbackFn): ToolHandler {
+	activeToolHandlers.set(callId, handler)
+	return {
+		unregister: () => activeToolHandlers.delete(callId),
+	}
+}
+
 function broadcast(callId: string, event: Record<string, unknown>) {
 	const subs = activeCallSubscribers.get(callId)
 	if (!subs) return
@@ -47,6 +61,13 @@ function broadcast(callId: string, event: Record<string, unknown>) {
 			cb(event)
 		} catch {}
 	}
+}
+
+async function executeToolViaWebSocket(callId: string, toolName: string, toolArgs: Record<string, unknown>): Promise<{ result: string } | { error: string }> {
+	const handler = activeToolHandlers.get(callId)
+	if (!handler) return { error: 'No SDK tool handler connected' }
+	const callbackId = randomUUID()
+	return handler(toolName, toolArgs, callbackId)
 }
 
 function agentRowToConfig(row: ApiAgentRow): AgentConfig {
@@ -117,6 +138,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					...orchestratorConfig,
 					callId,
 					audioTransport: transport,
+					executeTool: async (params: { toolName: string; toolArgs: Record<string, unknown> }) => executeToolViaWebSocket(callId, params.toolName, params.toolArgs),
 					onTurnCommitted(turn) {
 						broadcast(callId, { type: 'speech', role: 'agent', text: turn.assistantResponse })
 						if (turn.userTranscript) {

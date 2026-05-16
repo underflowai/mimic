@@ -1,8 +1,9 @@
 /**
- * Post-call result extraction.
+ * Post-call result extraction with typed structured output.
  *
- * After a call ends, extracts structured data and goal achievement
- * from the transcript using an LLM.
+ * Uses OpenAI's structured output (JSON Schema response_format) to
+ * enforce exact types on the extraction result — booleans come back
+ * as booleans, nullable fields come back as null, not "null".
  */
 
 import OpenAI from 'openai'
@@ -24,6 +25,13 @@ export interface ToolCallRecord {
 	success?: boolean
 }
 
+export interface TypedField {
+	type: string
+	description: string
+	nullable?: boolean
+	optional?: boolean
+}
+
 export interface ExtractionResult {
 	result: Record<string, unknown>
 	goalAchieved: boolean
@@ -33,10 +41,46 @@ export interface ExtractionResult {
 export interface ExtractionInput {
 	goal: string
 	transcript: TranscriptEntry[]
-	/** Schema of what to extract. Keys are field names, values describe what to extract. */
-	results: Record<string, unknown>
+	/** Typed schema for extraction. Each field has type + description + nullable/optional. */
+	results: Record<string, unknown> | Record<string, TypedField>
 	toolCalls?: ToolCallRecord[]
 	successCondition?: SuccessCondition
+}
+
+function isTypedSchema(results: Record<string, unknown>): results is Record<string, TypedField> {
+	const first = Object.values(results)[0]
+	return first !== null && typeof first === 'object' && 'type' in (first as Record<string, unknown>)
+}
+
+function buildJsonSchema(results: Record<string, TypedField>): Record<string, unknown> {
+	const properties: Record<string, Record<string, unknown>> = {}
+	const required: string[] = []
+
+	for (const [key, field] of Object.entries(results)) {
+		const prop: Record<string, unknown> = { description: field.description }
+
+		const baseType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
+
+		if (field.nullable) {
+			prop.type = [baseType, 'null']
+		} else {
+			prop.type = baseType
+		}
+
+		properties[key] = prop
+		if (!field.optional) required.push(key)
+	}
+
+	properties.goalAchieved = { type: 'boolean', description: 'Whether the agent achieved its stated goal' }
+	properties.goalAchievedReason = { type: 'string', description: 'Brief explanation of why the goal was or was not achieved' }
+	required.push('goalAchieved', 'goalAchievedReason')
+
+	return {
+		type: 'object',
+		properties,
+		required,
+		additionalProperties: false,
+	}
 }
 
 function formatTranscript(transcript: TranscriptEntry[]) {
@@ -44,10 +88,14 @@ function formatTranscript(transcript: TranscriptEntry[]) {
 }
 
 function formatResults(results: Record<string, unknown>) {
-	const entries = Object.entries(results)
-	if (entries.length === 0) return 'None.'
-	return entries
-		.map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+	return Object.entries(results)
+		.map(([key, value]) => {
+			if (typeof value === 'object' && value !== null && 'description' in value) {
+				const f = value as TypedField
+				return `${key} (${f.type}${f.nullable ? ', nullable' : ''}): ${f.description}`
+			}
+			return `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`
+		})
 		.join('\n')
 }
 
@@ -88,47 +136,22 @@ function deterministicSuccess(
 	}
 }
 
-/**
- * Extract structured results and goal achievement from a call transcript.
- *
- * Uses an LLM to analyze the transcript against the goal and result schema.
- * Deterministic success conditions (tool_called, field_filled) are evaluated
- * without the LLM when possible.
- *
- * @example
- * ```typescript
- * const extraction = await extractCallResult(openai, {
- *   goal: 'Confirm the appointment',
- *   transcript: [...],
- *   results: { confirmed: 'whether confirmed', notes: 'any notes' },
- * })
- * // extraction.result = { confirmed: true, notes: 'Patient confirmed for 2pm' }
- * // extraction.goalAchieved = true
- * ```
- */
+const SYSTEM_PROMPT = [
+	'You are a call result extractor. Given a goal, result schema, and transcript,',
+	'extract the requested fields and determine if the goal was achieved.',
+	'For boolean fields, use true/false. For missing information, use null if nullable.',
+].join('\n')
+
 export async function extractCallResult(
 	client: OpenAI,
 	input: ExtractionInput,
 ): Promise<ExtractionResult> {
 	const deterministic = deterministicSuccess(input.successCondition, {}, input.toolCalls ?? [])
 
-	const systemPrompt = [
-		'You are a call result extractor. Given a goal, result schema, and transcript,',
-		'extract the requested fields and determine if the goal was achieved.',
-		'',
-		'Respond with JSON: { "result": { ... }, "goalAchieved": boolean, "goalAchievedReason": "..." }',
-		'',
-		'The "result" object must have exactly the keys from the result schema.',
-		'For boolean fields, use true/false. For missing information, use null.',
-	].join('\n')
-
 	const userPrompt = [
-		'Goal:', input.goal,
-		'',
-		'Result schema:', formatResults(input.results),
-		'',
-		'Tool calls:', formatToolCalls(input.toolCalls ?? []),
-		'',
+		'Goal:', input.goal, '',
+		'Result schema:', formatResults(input.results), '',
+		'Tool calls:', formatToolCalls(input.toolCalls ?? []), '',
 		deterministic
 			? `Deterministic goal decision: goalAchieved=${deterministic.value}, reason: ${deterministic.reason}`
 			: 'Deterministic goal decision: none (use your judgment)',
@@ -136,19 +159,38 @@ export async function extractCallResult(
 		'Transcript:', formatTranscript(input.transcript),
 	].join('\n')
 
+	const useStructured = isTypedSchema(input.results)
+
 	const response = await client.chat.completions.create({
 		model: 'gpt-4o',
-		response_format: { type: 'json_object' },
 		messages: [
-			{ role: 'system', content: systemPrompt },
+			{ role: 'system', content: SYSTEM_PROMPT },
 			{ role: 'user', content: userPrompt },
 		],
+		...(useStructured
+			? {
+					response_format: {
+						type: 'json_schema',
+						json_schema: {
+							name: 'extraction_result',
+							strict: true,
+							schema: buildJsonSchema(input.results as Record<string, TypedField>),
+						},
+					},
+				}
+			: { response_format: { type: 'json_object' } }),
 	})
 
 	const content = response.choices[0]?.message.content ?? '{}'
-	const parsed = JSON.parse(content) as Partial<ExtractionResult>
+	const parsed = JSON.parse(content) as Record<string, unknown>
 
-	const result = parsed.result ?? {}
+	const goalAchieved = typeof parsed.goalAchieved === 'boolean' ? parsed.goalAchieved : false
+	const goalAchievedReason = typeof parsed.goalAchievedReason === 'string' ? parsed.goalAchievedReason : ''
+
+	const result: Record<string, unknown> = {}
+	for (const key of Object.keys(input.results)) {
+		result[key] = parsed[key] ?? null
+	}
 
 	const fieldDecision =
 		input.successCondition?.type === 'field_filled'
@@ -157,7 +199,7 @@ export async function extractCallResult(
 
 	return {
 		result,
-		goalAchieved: fieldDecision?.value ?? parsed.goalAchieved ?? false,
-		goalAchievedReason: fieldDecision?.reason ?? parsed.goalAchievedReason ?? '',
+		goalAchieved: fieldDecision?.value ?? goalAchieved,
+		goalAchievedReason: fieldDecision?.reason ?? goalAchievedReason,
 	}
 }

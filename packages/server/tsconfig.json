@@ -1,12 +1,13 @@
 {
 	"compilerOptions": {
 		"target": "ES2024",
-		"lib": ["ES2024"],
+		"lib": ["ES2024", "DOM"],
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
 		"strict": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
+		"disableReferencedProjectLoad": true,
 		"noUnusedLocals": true,
 		"noUnusedParameters": true,
 		"declaration": true,
@@ -14,8 +15,7 @@
 		"sourceMap": true,
 		"outDir": "build",
 		"rootDir": "src",
-		"composite": true
+		"composite": false
 	},
-	"include": ["src"],
-	"references": [{ "path": "../engine" }, { "path": "../transport-livekit" }]
+	"include": ["src"]
 }

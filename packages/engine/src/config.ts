@@ -11,17 +11,9 @@ const mimicFluxAudioChunkTargetMs = 80
 export const config = {
 	mimic: {
 		director: {
-			get providerFromEnv(): MimicDirectorProvider {
-				const v = getEnv('MIMIC_DIRECTOR_PROVIDER', 'openai').toLowerCase()
-				if (v === 'anthropic') return 'anthropic'
-				return 'openai'
-			},
-			get openaiModel() {
-				return getEnv('MIMIC_OPENAI_DIRECTOR_MODEL', 'gpt-5-chat-latest')
-			},
-			get anthropicModel() {
-				return getEnv('MIMIC_ANTHROPIC_DIRECTOR_MODEL', 'claude-haiku-4-5')
-			},
+			defaultProvider: 'openai' as MimicDirectorProvider,
+			defaultOpenaiModel: 'gpt-5-chat-latest',
+			defaultAnthropicModel: 'claude-haiku-4-5',
 		},
 		openai: {
 			get apiKey() {

@@ -7,6 +7,7 @@ import { config } from '#engine/config.js'
 import { createLogger } from '#engine/logger.js'
 
 import { resolveVoiceDirectorProvider } from './intelligence/director-provider.js'
+import type { MimicDirectorProvider } from './config.js'
 
 import { createDeepgramTranscriber } from './audio/deepgram-transcriber.js'
 import type { AudioTransport } from './audio/streams/types.js'
@@ -50,6 +51,10 @@ interface TurnCarryover {
 export interface CallOrchestratorConfig {
 	callId?: string
 	persona?: VoicePersona
+	/** LLM provider for the voice director. Defaults to `'openai'`. */
+	directorProvider?: MimicDirectorProvider
+	/** LLM model name. Defaults to provider-specific default from config. */
+	directorModel?: string
 	systemPrompt: string
 	userFirstName: string
 	userLastName?: string
@@ -93,7 +98,10 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		client: directorClient,
 		model: directorModel,
 		provider: directorProvider,
-	} = await resolveVoiceDirectorProvider()
+	} = await resolveVoiceDirectorProvider({
+		provider: callConfig.directorProvider,
+		model: callConfig.directorModel,
+	})
 	const openai = new OpenAI({ apiKey: config.mimic.openai.apiKey })
 
 	log.info({ provider: directorProvider, model: directorModel }, 'director provider selected')

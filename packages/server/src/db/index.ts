@@ -15,7 +15,7 @@ export function getDb() {
 	if (!_db) {
 		const client = postgres(getDatabaseUrl(), {
 			max: 10,
-			idle_timeout: 30,
+			idle_timeout: 0,
 			connect_timeout: 10,
 		})
 		_db = drizzle(client, { schema })

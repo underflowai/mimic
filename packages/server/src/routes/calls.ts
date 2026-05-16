@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import { Hono } from 'hono'
 import { and, eq } from 'drizzle-orm'
 
@@ -5,6 +7,11 @@ import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
 import { runCall } from '../call-runner.js'
+
+function hashPromptConfig(apiKeyId: string, goal: string, voice: string, tools: unknown[], results: unknown): string {
+	const payload = JSON.stringify({ apiKeyId, goal, voice, tools, results })
+	return createHash('sha256').update(payload).digest('hex')
+}
 
 const calls = new Hono()
 
@@ -56,26 +63,38 @@ calls.post('/', async (c) => {
 			parameters: t.parameters ?? {},
 		}))
 		const results = body.results ?? body.extract ?? {}
+		const configHash = hashPromptConfig(apiKey.id, body.goal, voice, tools, results)
 
-		const compiled = await compileGoal({ goal: body.goal, voice, context: body.context ?? {}, tools, results })
+		const [cached] = await db
+			.select()
+			.from(apiAgents)
+			.where(and(eq(apiAgents.apiKeyId, apiKey.id), eq(apiAgents.configHash, configHash)))
+			.limit(1)
 
-		const [agent] = await db
-			.insert(apiAgents)
-			.values({
-				apiKeyId: apiKey.id,
-				name: body.goal.slice(0, 80) || 'voice agent',
-				goal: body.goal,
-				voice,
-				context: body.context ?? {},
-				tools,
-				results,
-				systemPrompt: compiled.systemPrompt,
-				turnControlBlock: compiled.turnControlBlock ?? null,
-				agentName: compiled.agentName,
-				ambience: body.ambience ?? true,
-			})
-			.returning()
-		agentId = agent.id
+		if (cached) {
+			agentId = cached.id
+		} else {
+			const compiled = await compileGoal({ goal: body.goal, voice, context: body.context ?? {}, tools, results })
+
+			const [agent] = await db
+				.insert(apiAgents)
+				.values({
+					apiKeyId: apiKey.id,
+					name: body.goal.slice(0, 80) || 'voice agent',
+					goal: body.goal,
+					voice,
+					context: body.context ?? {},
+					tools,
+					results,
+					configHash,
+					systemPrompt: compiled.systemPrompt,
+					turnControlBlock: compiled.turnControlBlock ?? null,
+					agentName: compiled.agentName,
+					ambience: body.ambience ?? true,
+				})
+				.returning()
+			agentId = agent.id
+		}
 	}
 
 	const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)

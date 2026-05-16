@@ -27,6 +27,7 @@ export const apiAgents = pgTable('api_agents', {
 	systemPrompt: text('system_prompt').notNull(),
 	turnControlBlock: text('turn_control_block'),
 	agentName: text('agent_name').notNull(),
+	configHash: text('config_hash'),
 	webhook: text('webhook'),
 	successCondition: jsonb('success_condition'),
 	ambience: jsonb('ambience'),

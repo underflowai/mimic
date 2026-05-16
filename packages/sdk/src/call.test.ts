@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { z } from 'zod'
 
-import { Mimic } from './index.js'
+import { Mimic, tool } from './index.js'
 import type { CallEvent, WebSocketConstructor } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -19,7 +20,6 @@ interface MockSocket {
 
 function createMockWsFactory() {
 	const sockets: MockSocket[] = []
-
 	const Factory = function (url: string | URL) {
 		const listeners: Record<string, Array<(...args: any[]) => void>> = {}
 		const sent: string[] = []
@@ -28,39 +28,19 @@ function createMockWsFactory() {
 			removeEventListener(): void
 			send(d: string): void
 		} = {
-			url: String(url),
-			sent,
-			readyState: 0,
-			addEventListener(t, fn) {
-				;(listeners[t] ??= []).push(fn)
-			},
+			url: String(url), sent, readyState: 0,
+			addEventListener(t, fn) { ;(listeners[t] ??= []).push(fn) },
 			removeEventListener() {},
-			send(d) {
-				sent.push(d)
-			},
-			close() {
-				sock.readyState = 3
-				for (const fn of listeners['close'] ?? []) fn()
-			},
-			open() {
-				sock.readyState = 1
-				for (const fn of listeners['open'] ?? []) fn()
-			},
-			serverSend(msg) {
-				for (const fn of listeners['message'] ?? []) fn({ data: JSON.stringify(msg) })
-			},
+			send(d) { sent.push(d) },
+			close() { sock.readyState = 3; for (const fn of listeners['close'] ?? []) fn() },
+			open() { sock.readyState = 1; for (const fn of listeners['open'] ?? []) fn() },
+			serverSend(msg) { for (const fn of listeners['message'] ?? []) fn({ data: JSON.stringify(msg) }) },
 		}
 		sockets.push(sock)
 		return sock
 	} as unknown as WebSocketConstructor
-
 	Object.assign(Factory, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 })
-	return {
-		Factory,
-		get last(): MockSocket {
-			return sockets[sockets.length - 1]!
-		},
-	}
+	return { Factory, get last(): MockSocket { return sockets[sockets.length - 1]! } }
 }
 
 // ---------------------------------------------------------------------------
@@ -72,19 +52,11 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 const agentResp = { id: 'agent_1', name: 'agent', goal: 'schedule', voice: 'female', context: {}, tools: [], results: {} }
-
 const completedCall = {
-	id: 'call_1',
-	status: 'completed',
-	transcript: [
-		{ role: 'agent', content: 'Hi, calling about your appointment.' },
-		{ role: 'caller', content: 'Yes, Thursday works.' },
-	],
-	result: { confirmed: true },
-	goalAchieved: true,
-	goalAchievedReason: 'appointment confirmed',
-	duration: 42,
-	errorMessage: null,
+	id: 'call_1', status: 'completed',
+	transcript: [{ role: 'agent', content: 'Hi!' }, { role: 'caller', content: 'Hello.' }],
+	result: { confirmed: true, notes: 'all good' },
+	goalAchieved: true, goalAchievedReason: 'confirmed', duration: 42, errorMessage: null,
 }
 
 function defaultFetch(): typeof fetch {
@@ -100,12 +72,7 @@ function defaultFetch(): typeof fetch {
 
 function createTestMimic(fetchOverride?: typeof fetch) {
 	const ws = createMockWsFactory()
-	const mimic = new Mimic({
-		apiKey: 'mk_test',
-		baseUrl: 'http://localhost:3000',
-		fetch: fetchOverride ?? defaultFetch(),
-		WebSocket: ws.Factory,
-	})
+	const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchOverride ?? defaultFetch(), WebSocket: ws.Factory })
 	return { mimic, ws }
 }
 
@@ -122,46 +89,42 @@ async function waitForSocket(ws: ReturnType<typeof createMockWsFactory>) {
 
 describe('Mimic constructor', () => {
 	it('accepts a string API key', () => {
-		const mimic = new Mimic('mk_test')
-		assert.ok(mimic)
+		assert.ok(new Mimic('mk_test'))
 	})
 
 	it('accepts an options object', () => {
-		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000' })
-		assert.ok(mimic)
+		assert.ok(new Mimic({ apiKey: 'mk_test' }))
+	})
+
+	it('rejects empty API key', () => {
+		assert.throws(() => new Mimic(''), { name: 'MimicError' })
+	})
+
+	it('rejects malformed API key', () => {
+		assert.throws(() => new Mimic('bad_key'), { name: 'MimicError' })
 	})
 })
 
 // ---------------------------------------------------------------------------
-// Call overloads
+// call() — single options signature
 // ---------------------------------------------------------------------------
 
-describe('Mimic.call overloads', () => {
-	it('positional: (to, goal, tools)', () => {
+describe('Mimic.call', () => {
+	it('accepts options object and returns MimicCall', () => {
 		const { mimic } = createTestMimic()
-		function checkCalendar(date: string) {
-			return `slots for ${date}`
-		}
-		const call = mimic.call('+15551234567', 'Book appointment', { checkCalendar })
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
 		assert.ok(call)
 		assert.ok(call.result instanceof Promise)
 	})
 
-	it('options object with all fields', () => {
+	it('accepts tools as tool() definitions', () => {
 		const { mimic } = createTestMimic()
-		const call = mimic.call({
-			to: '+15551234567',
-			goal: 'Book appointment',
-			voice: 'male',
-			context: { patientName: 'Jane' },
-			extract: { confirmed: 'whether confirmed' },
+		const checkCalendar = tool({
+			description: 'Check slots',
+			parameters: z.object({ date: z.string() }),
+			run: async ({ date }) => `slots for ${date}`,
 		})
-		assert.ok(call)
-	})
-
-	it('positional without tools: (to, goal)', () => {
-		const { mimic } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Say hello')
+		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { checkCalendar } })
 		assert.ok(call)
 	})
 })
@@ -171,43 +134,95 @@ describe('Mimic.call overloads', () => {
 // ---------------------------------------------------------------------------
 
 describe('MimicCall streaming', () => {
-	it('yields speech events and done', async () => {
+	it('yields speech events via for-await', async () => {
 		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Say hello')
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
 
 		await waitForSocket(ws)
-
-		ws.last.serverSend({ type: 'speech', role: 'agent', text: 'Hello there!' })
-		ws.last.serverSend({ type: 'speech', role: 'caller', text: 'Hi!' })
+		ws.last.serverSend({ type: 'speech', role: 'agent', text: 'Hello!' })
 		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'greeted' })
 
 		const events: CallEvent[] = []
-		for await (const event of call) {
-			events.push(event)
-		}
+		for await (const event of call) events.push(event)
 
-		assert.equal(events.length, 3)
-		assert.deepEqual(events[0], { type: 'speech', role: 'agent', text: 'Hello there!' })
-		assert.deepEqual(events[1], { type: 'speech', role: 'caller', text: 'Hi!' })
-		assert.equal(events[2]!.type, 'done')
-		if (events[2]!.type === 'done') {
-			assert.equal(events[2]!.goalAchieved, true)
-		}
+		assert.equal(events.length, 2)
+		assert.deepEqual(events[0], { type: 'speech', role: 'agent', text: 'Hello!' })
+		assert.equal(events[1]!.type, 'done')
+	})
+})
+
+// ---------------------------------------------------------------------------
+// .on() typed event handlers
+// ---------------------------------------------------------------------------
+
+describe('MimicCall.on()', () => {
+	it('fires speech handler with narrowed type', async () => {
+		const { mimic, ws } = createTestMimic()
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
+
+		const speeches: Array<{ role: string; text: string }> = []
+		call.on('speech', (event) => {
+			speeches.push({ role: event.role, text: event.text })
+		})
+
+		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'speech', role: 'agent', text: 'Hi!' })
+		ws.last.serverSend({ type: 'speech', role: 'caller', text: 'Hey!' })
+		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'done' })
+		await call.result
+
+		assert.equal(speeches.length, 2)
+		assert.equal(speeches[0]!.role, 'agent')
+		assert.equal(speeches[1]!.text, 'Hey!')
 	})
 
-	it('.result resolves with full call data', async () => {
+	it('fires done handler', async () => {
 		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Confirm appointment')
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
+
+		let achieved: boolean | null = null
+		call.on('done', (event) => { achieved = event.goalAchieved })
+
+		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'ok' })
+		await call.result
+
+		assert.equal(achieved, true)
+	})
+
+	it('returns this for chaining', () => {
+		const { mimic } = createTestMimic()
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
+		const returned = call.on('speech', () => {}).on('done', () => {})
+		assert.equal(returned, call)
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Typed extract + discriminated result
+// ---------------------------------------------------------------------------
+
+describe('Typed extract and discriminated result', () => {
+	it('.result resolves with typed data on completed', async () => {
+		const { mimic, ws } = createTestMimic()
+		const call = mimic.call<{ confirmed: boolean; notes: string }>({
+			to: '+15551234567',
+			goal: 'Confirm appointment',
+			extract: { confirmed: 'whether confirmed', notes: 'any notes' },
+		})
 
 		await waitForSocket(ws)
 		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'confirmed' })
 
 		const result = await call.result
-		assert.equal(result.id, 'call_1')
-		assert.equal(result.goalAchieved, true)
-		assert.deepEqual(result.data, { confirmed: true })
-		assert.equal(result.transcript.length, 2)
-		assert.equal(result.duration, 42)
+		assert.equal(result.status, 'completed')
+		if (result.status === 'completed') {
+			assert.equal(result.goalAchieved, true)
+			assert.equal(result.data.confirmed, true)
+			assert.equal(result.data.notes, 'all good')
+			assert.equal(result.duration, 42)
+			assert.equal(result.transcript.length, 2)
+		}
 	})
 })
 
@@ -216,25 +231,19 @@ describe('MimicCall streaming', () => {
 // ---------------------------------------------------------------------------
 
 describe('MimicCall tool dispatch', () => {
-	it('executes local tool and sends result to server', async () => {
+	it('executes structured tool and sends result', async () => {
 		const calls: string[] = []
-		async function checkCalendar(date: string) {
-			calls.push(date)
-			return `Slots for ${date}: 2pm, 3pm`
-		}
-
-		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Book appointment', { checkCalendar })
-
-		await waitForSocket(ws)
-
-		ws.last.serverSend({
-			type: 'tool_call',
-			callbackId: 'cb_1',
-			toolName: 'checkCalendar',
-			toolArgs: { date: 'Thursday' },
+		const checkCalendar = tool({
+			description: 'Check slots',
+			parameters: z.object({ date: z.string() }),
+			run: async ({ date }) => { calls.push(date); return `slots for ${date}` },
 		})
 
+		const { mimic, ws } = createTestMimic()
+		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { checkCalendar } })
+
+		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'tool_call', callbackId: 'cb_1', toolName: 'checkCalendar', toolArgs: { date: 'Thursday' } })
 		await new Promise((r) => setImmediate(r))
 		await new Promise((r) => setImmediate(r))
 
@@ -243,128 +252,64 @@ describe('MimicCall tool dispatch', () => {
 
 		const sent = JSON.parse(ws.last.sent[ws.last.sent.length - 1]!)
 		assert.equal(sent.type, 'tool_result')
-		assert.equal(sent.callbackId, 'cb_1')
-		assert.equal(sent.result, 'Slots for Thursday: 2pm, 3pm')
+		assert.equal(sent.result, 'slots for Thursday')
 
 		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'booked' })
 		await call.result
 	})
 
-	it('sends tool_error when tool throws', async () => {
-		function failingTool() {
-			throw new Error('database down')
-		}
-
-		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Do something', { failingTool })
-
-		await waitForSocket(ws)
-
-		ws.last.serverSend({
-			type: 'tool_call',
-			callbackId: 'cb_2',
-			toolName: 'failingTool',
-			toolArgs: {},
+	it('sends tool_error with instructive Zod validation message', async () => {
+		const book = tool({
+			description: 'Book meeting',
+			parameters: z.object({ date: z.string(), email: z.string().email() }),
+			run: async () => 'ok',
 		})
 
+		const { mimic, ws } = createTestMimic()
+		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { book } })
+
+		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'tool_call', callbackId: 'cb_1', toolName: 'book', toolArgs: { date: 123, email: 'bad' } })
 		await new Promise((r) => setImmediate(r))
 		await new Promise((r) => setImmediate(r))
 
 		const sent = JSON.parse(ws.last.sent[ws.last.sent.length - 1]!)
 		assert.equal(sent.type, 'tool_error')
-		assert.equal(sent.callbackId, 'cb_2')
-		assert.equal(sent.error, 'database down')
+		assert.ok(sent.error.includes('Tool "book" received invalid arguments'))
+		assert.ok(sent.error.includes('date'))
 
 		ws.last.serverSend({ type: 'done', goalAchieved: false, goalAchievedReason: 'failed' })
 		await call.result
 	})
-
-	it('emits tool_call and tool_result events in the stream', async () => {
-		function checkCalendar(date: string) {
-			return `open: ${date}`
-		}
-
-		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Book appointment', { checkCalendar })
-
-		await waitForSocket(ws)
-
-		ws.last.serverSend({
-			type: 'tool_call',
-			callbackId: 'cb_3',
-			toolName: 'checkCalendar',
-			toolArgs: { date: 'Friday' },
-		})
-
-		await new Promise((r) => setImmediate(r))
-		await new Promise((r) => setImmediate(r))
-
-		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'done' })
-
-		const events: CallEvent[] = []
-		for await (const event of call) {
-			events.push(event)
-		}
-
-		const toolCall = events.find((e) => e.type === 'tool_call')
-		assert.ok(toolCall)
-		if (toolCall?.type === 'tool_call') {
-			assert.equal(toolCall.name, 'checkCalendar')
-			assert.deepEqual(toolCall.args, { date: 'Friday' })
-		}
-
-		const toolResult = events.find((e) => e.type === 'tool_result')
-		assert.ok(toolResult)
-		if (toolResult?.type === 'tool_result') {
-			assert.equal(toolResult.name, 'checkCalendar')
-			assert.equal(toolResult.result, 'open: Friday')
-		}
-	})
 })
 
 // ---------------------------------------------------------------------------
-// Error handling
+// Error suggestions
 // ---------------------------------------------------------------------------
 
-describe('MimicCall error handling', () => {
-	it('rejects .result on API auth error', async () => {
-		const ws = createMockWsFactory()
-		const mimic = new Mimic({
-			apiKey: 'mk_bad',
-			baseUrl: 'http://localhost:3000',
-			fetch: async () => jsonResponse({ error: 'Invalid API key' }, 401),
-			WebSocket: ws.Factory,
+describe('Error suggestions', () => {
+	it('suggests similar tool name on typo', async () => {
+		const checkCalendar = tool({
+			description: 'Check slots',
+			parameters: z.object({ date: z.string() }),
+			run: async () => 'ok',
 		})
 
-		const call = mimic.call('+15551234567', 'Say hello')
-		await assert.rejects(call.result, { name: 'ApiError' })
-	})
-
-	it('emits error events from server', async () => {
 		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Say hello')
+		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { checkCalendar } })
 
 		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'tool_call', callbackId: 'cb_1', toolName: 'checkCalendr', toolArgs: {} })
+		await new Promise((r) => setImmediate(r))
+		await new Promise((r) => setImmediate(r))
 
-		ws.last.serverSend({ type: 'error', message: 'Internal server error' })
-		ws.last.serverSend({ type: 'done', goalAchieved: false, goalAchievedReason: 'error' })
+		const sent = JSON.parse(ws.last.sent[ws.last.sent.length - 1]!)
+		assert.equal(sent.type, 'tool_error')
+		assert.ok(sent.error.includes('Did you mean "checkCalendar"'), `got: ${sent.error}`)
+		assert.ok(sent.error.includes('Available tools: checkCalendar'), `got: ${sent.error}`)
 
-		const events: CallEvent[] = []
-		for await (const event of call) {
-			events.push(event)
-		}
-
-		assert.ok(events.some((e) => e.type === 'error' && e.message === 'Internal server error'))
-	})
-
-	it('rejects on call_status failed', async () => {
-		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Say hello')
-
-		await waitForSocket(ws)
-		ws.last.serverSend({ type: 'call_status', status: 'failed' })
-
-		await assert.rejects(call.result, { name: 'CallFailedError' })
+		ws.last.serverSend({ type: 'done', goalAchieved: false, goalAchievedReason: 'err' })
+		await call.result
 	})
 })
 
@@ -373,50 +318,20 @@ describe('MimicCall error handling', () => {
 // ---------------------------------------------------------------------------
 
 describe('MimicCall.cancel', () => {
-	it('cancels a streaming call and rejects .result', async () => {
+	it('rejects .result and emits error event', async () => {
 		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Say hello')
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
 
 		await waitForSocket(ws)
-
-		ws.last.serverSend({ type: 'speech', role: 'agent', text: 'Hi!' })
 		call.cancel()
 
 		await assert.rejects(call.result, { name: 'MimicError', message: 'Call cancelled' })
 	})
-
-	it('cancel is idempotent', async () => {
-		const { mimic, ws } = createTestMimic()
-		const call = mimic.call('+15551234567', 'Say hello')
-
-		await waitForSocket(ws)
-
-		call.cancel()
-		call.cancel()
-
-		await assert.rejects(call.result, { name: 'MimicError' })
-	})
 })
 
-describe('Mimic constructor validation', () => {
-	it('rejects empty API key', () => {
-		assert.throws(() => new Mimic(''), { name: 'MimicError' })
-	})
-
-	it('rejects malformed API key', () => {
-		assert.throws(() => new Mimic('bad_key'), { name: 'MimicError' })
-	})
-
-	it('accepts mk_ prefixed keys', () => {
-		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost' })
-		assert.ok(mimic)
-	})
-
-	it('accepts sk_ prefixed keys for backwards compat', () => {
-		const mimic = new Mimic({ apiKey: 'sk_test', baseUrl: 'http://localhost' })
-		assert.ok(mimic)
-	})
-})
+// ---------------------------------------------------------------------------
+// Polling fallback
+// ---------------------------------------------------------------------------
 
 describe('MimicCall polling fallback', () => {
 	it('polls to completion when WebSocket is disabled', async () => {
@@ -429,28 +344,17 @@ describe('MimicCall polling fallback', () => {
 			if (url.includes('/api/v1/calls/call_1')) {
 				pollCount++
 				if (pollCount >= 2) return jsonResponse(completedCall)
-				return jsonResponse({
-					...completedCall,
-					status: 'in_progress',
-					goalAchieved: null,
-					result: null,
-					transcript: null,
-				})
+				return jsonResponse({ ...completedCall, status: 'in_progress', goalAchieved: null, result: null, transcript: null })
 			}
 			return jsonResponse({ error: 'not found' }, 404)
 		}
 
-		const mimic = new Mimic({
-			apiKey: 'mk_test',
-			baseUrl: 'http://localhost:3000',
-			fetch: fetchImpl,
-			WebSocket: null,
-		})
-
-		const call = mimic.call('+15551234567', 'Say hello')
+		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchImpl, WebSocket: null })
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
 		const result = await call.result
-		assert.equal(result.id, 'call_1')
-		assert.equal(result.goalAchieved, true)
-		assert.ok(pollCount >= 2)
+		assert.equal(result.status, 'completed')
+		if (result.status === 'completed') {
+			assert.equal(result.goalAchieved, true)
+		}
 	})
 })

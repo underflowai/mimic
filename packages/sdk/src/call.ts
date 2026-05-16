@@ -4,6 +4,7 @@ import { executeTool, introspectTools } from './tools.js'
 import type {
 	ApiCall,
 	CallEvent,
+	CallEventMap,
 	CallOptions,
 	CallResult,
 	ServerMessage,
@@ -20,79 +21,145 @@ function sleep(ms: number) {
 	return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function toCallResult(call: ApiCall): CallResult {
+function toCallResult<T extends Record<string, unknown>>(call: ApiCall): CallResult<T> {
+	if (call.status === 'failed') {
+		return { status: 'failed', id: call.id, error: call.errorMessage ?? 'Call failed' }
+	}
 	return {
+		status: 'completed',
 		id: call.id,
-		status: call.status === 'failed' ? 'failed' : 'completed',
 		goalAchieved: call.goalAchieved ?? false,
 		goalAchievedReason: call.goalAchievedReason ?? '',
-		data: call.result ?? {},
-		transcript: call.transcript ?? [],
-		duration: call.duration,
+		data: (call.result ?? {}) as T,
+		transcript: (call.transcript ?? []).map((e) => ({
+			role: e.role as 'agent' | 'caller',
+			content: e.content,
+		})),
+		duration: call.duration ?? 0,
 	}
 }
 
-interface MimicCallInit {
+function levenshtein(a: string, b: string): number {
+	const m = a.length
+	const n = b.length
+	const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0) as number[])
+	for (let i = 0; i <= m; i++) dp[i]![0] = i
+	for (let j = 0; j <= n; j++) dp[0]![j] = j
+	for (let i = 1; i <= m; i++) {
+		for (let j = 1; j <= n; j++) {
+			dp[i]![j] = a[i - 1] === b[j - 1]
+				? dp[i - 1]![j - 1]!
+				: 1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!)
+		}
+	}
+	return dp[m]![n]!
+}
+
+function suggestToolName(name: string, available: string[]): string | null {
+	if (available.length === 0) return null
+	let best = available[0]!
+	let bestDist = levenshtein(name.toLowerCase(), best.toLowerCase())
+	for (let i = 1; i < available.length; i++) {
+		const dist = levenshtein(name.toLowerCase(), available[i]!.toLowerCase())
+		if (dist < bestDist) {
+			bestDist = dist
+			best = available[i]!
+		}
+	}
+	return bestDist <= 3 ? best : null
+}
+
+/** @internal */
+export interface MimicCallInit<T extends Record<string, unknown>> {
 	client: MimicClient
-	options: CallOptions
-	/** Pass `null` to force polling mode (no WebSocket). */
+	options: CallOptions<T>
 	WebSocketImpl?: WebSocketConstructor | null
 }
 
 /**
- * A live voice call. Implements `AsyncIterable<CallEvent>` for real-time
- * streaming, and exposes `.result` as a `Promise<CallResult>` for
- * fire-and-forget usage.
+ * A live voice call. Stream events in real-time via `for await` or
+ * `.on()`, and get the final result from `.result`.
+ *
+ * @typeParam T - Shape of the extracted data. Inferred from `CallOptions<T>`.
  *
  * @example
  * ```typescript
- * // Stream events
+ * // Stream with for-await
  * for await (const event of call) {
- *   console.log(event)
+ *   if (event.type === 'speech') console.log(event.text)
  * }
+ *
+ * // Or use typed event handlers
+ * call.on('speech', ({ role, text }) => console.log(`[${role}] ${text}`))
+ * call.on('done', ({ goalAchieved }) => console.log(goalAchieved))
  *
  * // Or just await the result
  * const result = await call.result
+ * if (result.status === 'completed') console.log(result.data)
  * ```
  */
-export class MimicCall implements AsyncIterable<CallEvent> {
-	/** Resolves when the call completes with the final result. */
-	readonly result: Promise<CallResult>
+export class MimicCall<T extends Record<string, unknown> = Record<string, unknown>>
+	implements AsyncIterable<CallEvent>
+{
+	/** Resolves when the call completes with the final typed result. */
+	readonly result: Promise<CallResult<T>>
 
 	private callId: string | null = null
 	private readonly client: MimicClient
-	private readonly options: CallOptions
+	private readonly options: CallOptions<T>
 	private readonly tools: Record<string, ToolInput>
 	private readonly WebSocketImpl: WebSocketConstructor | undefined
 	private readonly eventBuffer: CallEvent[] = []
 	private readonly waiters: Array<(event: CallEvent | null) => void> = []
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	private readonly listeners: Record<string, Array<(event: any) => void>> = {}
 	private done = false
 	private settled = false
-	private resultResolve!: (result: CallResult) => void
+	private resultResolve!: (result: CallResult<T>) => void
 	private resultReject!: (error: Error) => void
 	private streamTimeout: ReturnType<typeof setTimeout> | null = null
 	private activeWs: WebSocket | null = null
 	private cancelled = false
 
-	constructor(init: MimicCallInit) {
+	constructor(init: MimicCallInit<T>) {
 		this.client = init.client
 		this.options = init.options
 		this.tools = init.options.tools ?? {}
 		this.WebSocketImpl = init.WebSocketImpl === null ? undefined : (init.WebSocketImpl ?? globalThis.WebSocket)
 
-		this.result = new Promise<CallResult>((resolve, reject) => {
+		this.result = new Promise<CallResult<T>>((resolve, reject) => {
 			this.resultResolve = resolve
 			this.resultReject = reject
 		})
-
 		this.result.catch(() => {})
 
 		void this.start()
 	}
 
 	/**
-	 * Cancel the call. Closes the WebSocket, stops polling, and rejects
-	 * `.result` with a `MimicError`.
+	 * Register a typed event handler. The callback type is narrowed
+	 * based on the event name.
+	 *
+	 * @example
+	 * ```typescript
+	 * call.on('speech', ({ role, text }) => console.log(`[${role}] ${text}`))
+	 * call.on('tool_call', ({ name, args }) => console.log(name, args))
+	 * call.on('done', ({ goalAchieved }) => console.log(goalAchieved))
+	 * ```
+	 */
+	on<K extends keyof CallEventMap>(type: K, handler: (event: CallEventMap[K]) => void): this {
+		;(this.listeners[type] ??= []).push(handler)
+		return this
+	}
+
+	/**
+	 * Cancel the call. Closes the connection and rejects `.result`.
+	 *
+	 * @example
+	 * ```typescript
+	 * const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
+	 * setTimeout(() => call.cancel(), 60_000)
+	 * ```
 	 */
 	cancel() {
 		if (this.done) return
@@ -123,7 +190,7 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 				voice: this.options.voice,
 				context: this.options.context,
 				tools: toolSchemas,
-				extract: this.options.extract,
+				extract: this.options.extract as Record<string, string> | undefined,
 				idempotencyKey: this.options.idempotencyKey,
 			})
 
@@ -216,16 +283,16 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 
 				try {
 					const fullCall = await this.client.getCall(this.callId!)
-					this.settle('resolve', toCallResult(fullCall))
+					this.settle('resolve', toCallResult<T>(fullCall))
 				} catch {
 					this.settle('resolve', {
-						id: this.callId!,
 						status: 'completed',
+						id: this.callId!,
 						goalAchieved: msg.goalAchieved,
 						goalAchievedReason: msg.goalAchievedReason,
-						data: {},
+						data: {} as T,
 						transcript: [],
-						duration: null,
+						duration: 0,
 					})
 				}
 				break
@@ -245,9 +312,17 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 		}
 	}
 
-	// ── Tool execution with timeout ────────────────────────────────────
+	// ── Tool execution ─────────────────────────────────────────────────
 
 	private async executeToolWithTimeout(name: string, args: Record<string, unknown>): Promise<string> {
+		const available = Object.keys(this.tools)
+		if (!this.tools[name]) {
+			const suggestion = suggestToolName(name, available)
+			const availStr = available.length > 0 ? ` Available tools: ${available.join(', ')}.` : ''
+			const didYouMean = suggestion ? ` Did you mean "${suggestion}"?` : ''
+			throw new Error(`Tool "${name}" is not registered.${availStr}${didYouMean}`)
+		}
+
 		const timeoutMs = this.options.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS
 		let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -277,22 +352,25 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 				const call = await this.client.getCall(callId)
 
 				if (call.status === 'completed') {
-					const result = toCallResult(call)
-					this.pushEvent({
-						type: 'done',
-						goalAchieved: result.goalAchieved,
-						goalAchievedReason: result.goalAchievedReason,
-					})
+					const result = toCallResult<T>(call)
+					if (result.status === 'completed') {
+						this.pushEvent({
+							type: 'done',
+							goalAchieved: result.goalAchieved,
+							goalAchievedReason: result.goalAchievedReason,
+						})
+					}
 					this.complete()
 					this.settle('resolve', result)
 					return
 				}
 
 				if (call.status === 'failed') {
-					const err = new CallFailedError(call.errorMessage ?? 'Call failed', callId, call)
-					this.pushEvent({ type: 'error', message: err.message })
+					const result = toCallResult<T>(call)
+					const errMsg = result.status === 'failed' ? result.error : 'Call failed'
+					this.pushEvent({ type: 'error', message: errMsg })
 					this.complete()
-					this.settle('reject', err)
+					this.settle('reject', new CallFailedError(errMsg, callId, call))
 					return
 				}
 			} catch {
@@ -308,20 +386,26 @@ export class MimicCall implements AsyncIterable<CallEvent> {
 		this.settle('reject', err)
 	}
 
-	// ── Result settlement (guarded against double-resolve) ─────────────
+	// ── Settlement ─────────────────────────────────────────────────────
 
-	private settle(type: 'resolve', result: CallResult): void
+	private settle(type: 'resolve', result: CallResult<T>): void
 	private settle(type: 'reject', error: Error): void
-	private settle(type: 'resolve' | 'reject', value: CallResult | Error): void {
+	private settle(type: 'resolve' | 'reject', value: CallResult<T> | Error): void {
 		if (this.settled) return
 		this.settled = true
-		if (type === 'resolve') this.resultResolve(value as CallResult)
+		if (type === 'resolve') this.resultResolve(value as CallResult<T>)
 		else this.resultReject(value as Error)
 	}
 
-	// ── Event buffering for async iteration ────────────────────────────
+	// ── Event buffering + dispatch ─────────────────────────────────────
 
 	private pushEvent(event: CallEvent) {
+		const handlers = this.listeners[event.type]
+		if (handlers) {
+			for (const handler of handlers) handler(event)
+		}
+
+		// Buffer for async iteration
 		if (this.waiters.length > 0) {
 			const waiter = this.waiters.shift()!
 			waiter(event)

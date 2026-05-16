@@ -1,4 +1,15 @@
-/** Base error class for all Mimic SDK errors. */
+/**
+ * Base error class for all Mimic SDK errors.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await call.result
+ * } catch (err) {
+ *   if (err instanceof MimicError) console.error(err.message)
+ * }
+ * ```
+ */
 export class MimicError extends Error {
 	constructor(message: string) {
 		super(message)
@@ -26,13 +37,19 @@ function extractField(body: unknown, field: string): string | null {
 /**
  * Thrown when the Mimic API returns a non-2xx response.
  *
- * Includes a structured `code` (e.g. `'invalid_request'`, `'not_found'`) and
- * an optional `requestId` for support debugging.
+ * @example
+ * ```typescript
+ * try {
+ *   await call.result
+ * } catch (err) {
+ *   if (err instanceof ApiError) {
+ *     console.error(err.code, err.status, err.requestId)
+ *   }
+ * }
+ * ```
  */
 export class ApiError extends MimicError {
-	/** Machine-readable error code. */
 	readonly code: string
-	/** Server-assigned request identifier, if available. */
 	readonly requestId: string | null
 
 	constructor(
@@ -47,7 +64,20 @@ export class ApiError extends MimicError {
 	}
 }
 
-/** Thrown when a call exceeds the configured timeout. */
+/**
+ * Thrown when a call exceeds the configured `timeoutMs`.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await call.result
+ * } catch (err) {
+ *   if (err instanceof CallTimeoutError) {
+ *     console.error(`Call ${err.callId} timed out`)
+ *   }
+ * }
+ * ```
+ */
 export class CallTimeoutError extends MimicError {
 	constructor(
 		message: string,
@@ -58,7 +88,20 @@ export class CallTimeoutError extends MimicError {
 	}
 }
 
-/** Thrown when a call reaches a terminal failed state. */
+/**
+ * Thrown when a call reaches a terminal failed state.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await call.result
+ * } catch (err) {
+ *   if (err instanceof CallFailedError) {
+ *     console.error(`Call ${err.callId} failed`)
+ *   }
+ * }
+ * ```
+ */
 export class CallFailedError extends MimicError {
 	constructor(
 		message: string,

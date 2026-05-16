@@ -1,6 +1,15 @@
+import type { ZodType } from 'zod'
+
 // ── Client options ────────────────────────────────────────────────────
 
-/** Options for creating a {@link Mimic} client. */
+/**
+ * Options for creating a {@link Mimic} client.
+ *
+ * @example
+ * ```typescript
+ * const mimic = new Mimic({ apiKey: 'mk_...' })
+ * ```
+ */
 export interface MimicOptions {
 	/** Your Mimic API key. Starts with `mk_`. */
 	apiKey: string
@@ -12,6 +21,7 @@ export interface MimicOptions {
 	WebSocket?: WebSocketConstructor | null
 }
 
+/** @internal */
 export type WebSocketConstructor = {
 	new (url: string | URL, protocols?: string | string[]): WebSocket
 	readonly CONNECTING: number
@@ -29,28 +39,53 @@ export type Voice = 'female' | 'male'
 
 /**
  * A structured tool definition created by {@link tool}. The Zod schema
- * provides parameter names, types, and descriptions — and the `run`
- * handler's input type is inferred from the schema automatically.
+ * is the single source of truth for parameter names, types, and
+ * descriptions. The `run` handler's input is inferred from the schema.
+ *
+ * @example
+ * ```typescript
+ * import { z } from 'zod'
+ * import { tool } from '@mimic/sdk'
+ *
+ * const checkCalendar = tool({
+ *   description: 'Check available calendar slots',
+ *   parameters: z.object({
+ *     date: z.string().describe('The date to check'),
+ *   }),
+ *   run: async ({ date }) => calendar.getSlots(date),
+ * })
+ * ```
  */
 export interface MimicTool {
-	/** @internal Marker so the SDK can distinguish structured tools from plain functions. */
+	/** @internal */
 	__mimicTool: true
 	description: string
-	/** Zod schema for the tool's parameters. */
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	schema: import('zod').ZodType<any>
-	/** Execute the tool. Input is validated and typed by the schema. */
+	schema: ZodType
 	run: (input: unknown) => Promise<string> | string
 }
 
 /**
- * A tool the agent can use — either a structured {@link MimicTool} (from
- * the `tool()` helper) or a plain function (introspected at runtime).
+ * A tool the agent can use during a call. Prefer {@link MimicTool}
+ * (created via `tool()`) for type safety. Plain functions are supported
+ * as a convenience fallback.
+ *
+ * @example
+ * ```typescript
+ * // Recommended: structured tool with Zod schema
+ * const checkCalendar = tool({
+ *   description: 'Check available calendar slots',
+ *   parameters: z.object({ date: z.string().describe('Date to check') }),
+ *   run: async ({ date }) => calendar.getSlots(date),
+ * })
+ *
+ * // Fallback: plain function (name and params introspected at runtime)
+ * async function getHours() { return '9am-5pm' }
+ * ```
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolInput = MimicTool | (((...args: any[]) => any) & { description?: string; params?: Record<string, string> })
 
-/** Wire format for tool definitions sent to the API. */
+/** @internal Wire format for tool definitions sent to the API. */
 export interface ToolSchema {
 	name: string
 	description: string
@@ -59,20 +94,38 @@ export interface ToolSchema {
 
 // ── Call options ───────────────────────────────────────────────────────
 
-/** Full options object for {@link Mimic.call}. */
-export interface CallOptions {
+/**
+ * Options for making a voice call via {@link Mimic.call}.
+ *
+ * @typeParam T - Shape of the structured data to extract from the call.
+ *   Keys must match the `extract` descriptions. Defaults to `{}`.
+ *
+ * @example
+ * ```typescript
+ * const call = mimic.call<{ confirmed: boolean }>({
+ *   to: '+15551234567',
+ *   goal: 'Confirm the appointment',
+ *   extract: { confirmed: 'whether the appointment was confirmed' },
+ *   tools: { checkCalendar },
+ * })
+ * ```
+ */
+export interface CallOptions<T extends Record<string, unknown> = Record<string, never>> {
 	/** Phone number to call (E.164 format, e.g. `'+15551234567'`). */
 	to: string
 	/** What the agent should accomplish on the call. */
 	goal: string
-	/** Tools the agent can use. Keys are tool names, values are {@link MimicTool}s or plain functions. */
+	/** Tools the agent can use. Keys are tool names. */
 	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
 	voice?: Voice
-	/** Key-value context the agent can reference (e.g. company info, caller details). */
+	/** Key-value context the agent can reference during the call. */
 	context?: Record<string, string>
-	/** What to extract from the call. Keys are field names, values describe what to extract. */
-	extract?: Record<string, string>
+	/**
+	 * What to extract from the call. Keys must match the type parameter `T`.
+	 * Values are plain-English descriptions of what to extract.
+	 */
+	extract?: { [K in keyof T]: string }
 	/** Maximum time to wait for the call to complete, in milliseconds. Defaults to 5 minutes. */
 	timeoutMs?: number
 	/** Polling interval when WebSocket is unavailable, in milliseconds. Defaults to 2 seconds. */
@@ -85,92 +138,115 @@ export interface CallOptions {
 
 // ── Call events ───────────────────────────────────────────────────────
 
-/** Agent or caller spoke. */
+/**
+ * Agent or caller spoke.
+ *
+ * @example
+ * ```typescript
+ * call.on('speech', ({ role, text }) => {
+ *   console.log(`[${role}] ${text}`)
+ * })
+ * ```
+ */
 export interface SpeechEvent {
 	type: 'speech'
-	/** Who spoke. */
 	role: 'agent' | 'caller'
-	/** What was said. */
 	text: string
 }
 
-/** The agent invoked a tool. */
+/**
+ * The agent invoked a tool. The SDK executes it locally and sends the
+ * result back automatically.
+ */
 export interface ToolCallEvent {
 	type: 'tool_call'
-	/** Tool name. */
 	name: string
-	/** Arguments the agent collected from the caller. */
 	args: Record<string, unknown>
 }
 
 /** A tool returned a result. */
 export interface ToolResultEvent {
 	type: 'tool_result'
-	/** Tool name. */
 	name: string
-	/** The result returned by the tool function. */
 	result: string
 }
 
 /** A tool threw an error. */
 export interface ToolErrorEvent {
 	type: 'tool_error'
-	/** Tool name. */
 	name: string
-	/** Error message. */
 	error: string
 }
 
-/** The call ended. */
+/** The call completed. */
 export interface DoneEvent {
 	type: 'done'
-	/** Whether the agent achieved its stated goal. */
 	goalAchieved: boolean
-	/** The agent's reasoning for the goal outcome. */
 	goalAchievedReason: string
 }
 
 /** An error occurred during the call. */
 export interface ErrorEvent {
 	type: 'error'
-	/** Error message. */
 	message: string
 }
 
 /** Union of all events emitted during a call. */
 export type CallEvent = SpeechEvent | ToolCallEvent | ToolResultEvent | ToolErrorEvent | DoneEvent | ErrorEvent
 
+/** Map from event type string to its event interface. Used by `.on()`. */
+export interface CallEventMap {
+	speech: SpeechEvent
+	tool_call: ToolCallEvent
+	tool_result: ToolResultEvent
+	tool_error: ToolErrorEvent
+	done: DoneEvent
+	error: ErrorEvent
+}
+
 // ── Call result ───────────────────────────────────────────────────────
 
 /** A single entry in the call transcript. */
 export interface TranscriptEntry {
-	/** Who spoke — `'agent'` or `'caller'`. */
-	role: string
-	/** What was said. */
+	role: 'agent' | 'caller'
 	content: string
 }
 
-/** The final result of a completed call. */
-export interface CallResult {
-	/** Unique call identifier. */
-	id: string
-	/** Terminal status. */
-	status: 'completed' | 'failed'
-	/** Whether the agent achieved its stated goal. */
-	goalAchieved: boolean
-	/** The agent's reasoning for the goal outcome. */
-	goalAchievedReason: string
-	/** Structured data extracted from the call, shaped by `extract`. */
-	data: Record<string, unknown>
-	/** Full call transcript. */
-	transcript: TranscriptEntry[]
-	/** Call duration in seconds, or `null` if unavailable. */
-	duration: number | null
-}
+/**
+ * The final result of a completed call. Discriminated on `status` —
+ * narrow with `if (result.status === 'completed')` to access typed data.
+ *
+ * @typeParam T - Shape of the extracted data. Inferred from `CallOptions<T>`.
+ *
+ * @example
+ * ```typescript
+ * const result = await call.result
+ * if (result.status === 'completed') {
+ *   console.log(result.data.confirmed) // typed
+ * } else {
+ *   console.error(result.error)
+ * }
+ * ```
+ */
+export type CallResult<T extends Record<string, unknown> = Record<string, unknown>> =
+	| {
+			status: 'completed'
+			id: string
+			goalAchieved: boolean
+			goalAchievedReason: string
+			data: T
+			transcript: TranscriptEntry[]
+			duration: number
+	  }
+	| {
+			status: 'failed'
+			id: string
+			error: string
+	  }
 
 // ── API wire types ────────────────────────────────────────────────────
 
-/** @internal Call as returned by the API. */
+/** @internal */
 export interface ApiCall {
 	id: string
 	status: 'pending' | 'in_progress' | 'completed' | 'failed'
@@ -182,7 +258,7 @@ export interface ApiCall {
 	errorMessage: string | null
 }
 
-/** @internal Agent as returned by the API (created implicitly). */
+/** @internal */
 export interface ApiAgent {
 	id: string
 	name: string
@@ -193,19 +269,16 @@ export interface ApiAgent {
 	results: Record<string, unknown>
 }
 
-/** @internal Response from POST /calls. */
+/** @internal */
 export interface CreateCallResponse {
 	id: string
 	status: ApiCall['status']
 }
 
-// ── Stream protocol ───────────────────────────────────────────────────
-
-/** @internal Messages received from the server over WebSocket. */
+/** @internal */
 export type ServerMessage =
 	| { type: 'speech'; role: 'agent' | 'caller'; text: string }
 	| { type: 'tool_call'; callbackId: string; toolName: string; toolArgs: Record<string, unknown> }
 	| { type: 'done'; goalAchieved: boolean; goalAchievedReason: string }
 	| { type: 'error'; message: string }
 	| { type: 'call_status'; status: ApiCall['status'] }
-

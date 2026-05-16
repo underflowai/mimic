@@ -7,6 +7,7 @@ import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
 import { runCall } from '../call-runner.js'
+import { incrementActiveCalls, decrementActiveCalls } from '../middleware/rate-limit.js'
 
 function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean }): string {
 	const dataKeys = config.data ? Object.keys(config.data).sort() : []
@@ -137,7 +138,11 @@ calls.post('/', async (c) => {
 		})
 		.returning()
 
-	void runCall(call, agent!)
+	if (!incrementActiveCalls(apiKey.id)) {
+		return c.json({ error: 'Concurrent call limit reached. Wait for active calls to complete.' }, 429)
+	}
+
+	void runCall(call, agent!).finally(() => decrementActiveCalls(apiKey.id))
 
 	return c.json({ id: call.id, status: call.status }, 201)
 })

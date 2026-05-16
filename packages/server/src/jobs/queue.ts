@@ -22,7 +22,7 @@ function connection() {
 	return _connection
 }
 
-export const callQueue = new Queue('mimic:calls', {
+export const callQueue = new Queue('mimic-calls', {
 	connection: { lazyConnect: true },
 	defaultJobOptions: {
 		attempts: 2,
@@ -44,7 +44,7 @@ export function startCallWorker(
 	options?: Partial<WorkerOptions>,
 ): Worker<CallJobData> {
 	const worker = new Worker<CallJobData>(
-		'mimic:calls',
+		'mimic-calls',
 		processor,
 		{
 			connection: connection() as never,

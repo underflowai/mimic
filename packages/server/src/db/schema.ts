@@ -29,6 +29,7 @@ export const apiAgents = pgTable('api_agents', {
 	agentName: text('agent_name').notNull(),
 	webhook: text('webhook'),
 	successCondition: jsonb('success_condition'),
+	ambience: jsonb('ambience'),
 	createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 

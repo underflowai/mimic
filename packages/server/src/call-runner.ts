@@ -101,6 +101,8 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 
 		let orchestratorRef: Awaited<ReturnType<typeof createCallOrchestrator>> | null = null
 
+		const ambienceEnabled = (agent.ambience as boolean | null) !== false
+
 		const { sessionComplete } = await createVoiceAgent({
 			roomName,
 			identity: `mimic-agent-${callId}`,
@@ -109,6 +111,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 			livekitAgentUrl: config.livekit.agentUrl,
 			livekitApiKey: config.livekit.apiKey,
 			livekitApiSecret: config.livekit.apiSecret,
+			ambience: { enabled: ambienceEnabled },
 			createOrchestrator: async (transport: AudioTransport) => {
 				const orchestrator = await createCallOrchestrator({
 					...orchestratorConfig,

@@ -17,6 +17,7 @@ agents.post('/', async (c) => {
 		results?: Record<string, unknown>
 		successCondition?: { type: string; toolName?: string; fieldName?: string }
 		webhook?: string
+		ambience?: boolean
 	}>()
 
 	if (!body.goal?.trim()) {
@@ -54,6 +55,7 @@ agents.post('/', async (c) => {
 			agentName: compiled.agentName,
 			webhook: body.webhook ?? null,
 			successCondition: body.successCondition ?? null,
+			ambience: body.ambience ?? true,
 		})
 		.returning()
 

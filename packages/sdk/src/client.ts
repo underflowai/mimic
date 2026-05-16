@@ -50,6 +50,7 @@ export class MimicClient {
 		context?: Record<string, string>
 		tools?: ToolSchema[]
 		extract?: Record<string, string>
+		ambience?: boolean
 		idempotencyKey?: string
 	}): Promise<{ agent: ApiAgent; call: CreateCallResponse }> {
 		const agent = await this.request<ApiAgent>('/api/v1/agents', {
@@ -61,6 +62,7 @@ export class MimicClient {
 				context: params.context ?? {},
 				tools: params.tools ?? [],
 				results: params.extract ?? {},
+				ambience: params.ambience,
 			}),
 		})
 

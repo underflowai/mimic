@@ -118,6 +118,8 @@ export interface CallOptions<T extends Record<string, unknown> = Record<string, 
 	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
 	voice?: Voice
+	/** Office ambience background audio. Defaults to `true`. */
+	ambience?: boolean
 	/** Key-value context the agent can reference during the call. */
 	context?: Record<string, string>
 	/**

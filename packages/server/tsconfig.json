@@ -1,6 +1,7 @@
 {
 	"compilerOptions": {
-		"target": "ES2022",
+		"target": "ES2024",
+		"lib": ["ES2024"],
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
 		"strict": true,
@@ -16,5 +17,5 @@
 		"composite": true
 	},
 	"include": ["src"],
-	"references": [{ "path": "../engine" }]
+	"references": [{ "path": "../engine" }, { "path": "../transport-livekit" }]
 }

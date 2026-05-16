@@ -47,7 +47,10 @@ export class MimicClient {
 		goal: string
 		to: string
 		voice?: Voice
-		context?: Record<string, string>
+		context?: string
+		data?: Record<string, unknown>
+		recipient?: { firstName: string; lastName?: string; email?: string }
+		aiDisclosure?: boolean
 		tools?: ToolSchema[]
 		extract?: Record<string, string>
 		ambience?: boolean
@@ -59,7 +62,10 @@ export class MimicClient {
 				to: params.to,
 				goal: params.goal,
 				voice: params.voice ?? 'female',
-				context: params.context ?? {},
+				context: params.context,
+				data: params.data,
+				recipient: params.recipient,
+				aiDisclosure: params.aiDisclosure,
 				tools: params.tools ?? [],
 				extract: params.extract ?? {},
 				ambience: params.ambience,

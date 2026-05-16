@@ -118,10 +118,41 @@ export interface CallOptions<T extends Record<string, unknown> = Record<string, 
 	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
 	voice?: Voice
+	/**
+	 * Background knowledge the agent can reference — company info, policies,
+	 * product details. Write it as a paragraph, like you'd brief a human.
+	 *
+	 * @example
+	 * ```typescript
+	 * context: `You're calling on behalf of Greenwood Medical. We require
+	 * 24-hour cancellation notice. If they need to reschedule, offer the
+	 * next available slot. Dr. Smith is out on Fridays.`
+	 * ```
+	 */
+	context?: string
+	/**
+	 * Structured data the agent should confirm or collect on the call.
+	 * These become fields the agent walks through in conversation.
+	 *
+	 * @example
+	 * ```typescript
+	 * data: {
+	 *   appointmentDate: 'Thursday May 16',
+	 *   appointmentTime: '2:00 PM',
+	 *   doctorName: 'Dr. Smith',
+	 * }
+	 * ```
+	 */
+	data?: Record<string, unknown>
+	/**
+	 * Who you're calling. Injected per-turn so the agent can use
+	 * their name naturally. Does NOT affect the compiled prompt.
+	 */
+	recipient?: { firstName: string; lastName?: string; email?: string }
+	/** Whether the agent should disclose it's AI and that the call is recorded. Defaults to `true`. */
+	aiDisclosure?: boolean
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
-	/** Key-value context the agent can reference during the call. */
-	context?: Record<string, string>
 	/**
 	 * What to extract from the call. Keys must match the type parameter `T`.
 	 * Values are plain-English descriptions of what to extract.

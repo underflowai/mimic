@@ -8,8 +8,9 @@ import { apiAgents, apiCalls } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
 import { runCall } from '../call-runner.js'
 
-function hashPromptConfig(apiKeyId: string, goal: string, voice: string, context: unknown, tools: unknown[], results: unknown): string {
-	const payload = JSON.stringify({ apiKeyId, goal, voice, context, tools, results })
+function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean }): string {
+	const dataKeys = config.data ? Object.keys(config.data).sort() : []
+	const payload = JSON.stringify({ apiKeyId, goal: config.goal, voice: config.voice, context: config.context, dataKeys, tools: config.tools, results: config.results, aiDisclosure: config.aiDisclosure })
 	return createHash('sha256').update(payload).digest('hex')
 }
 
@@ -22,7 +23,10 @@ calls.post('/', async (c) => {
 		goal: string
 		agentId?: string
 		voice?: 'female' | 'male'
-		context?: Record<string, string>
+		context?: string
+		data?: Record<string, unknown>
+		recipient?: { firstName: string; lastName?: string; email?: string }
+		aiDisclosure?: boolean
 		tools?: Array<{ name: string; description: string; parameters: Record<string, string> }>
 		results?: Record<string, unknown>
 		extract?: Record<string, unknown>
@@ -63,7 +67,16 @@ calls.post('/', async (c) => {
 			parameters: t.parameters ?? {},
 		}))
 		const results = body.results ?? body.extract ?? {}
-		const configHash = hashPromptConfig(apiKey.id, body.goal, voice, body.context ?? {}, tools, results)
+
+		const configHash = hashPromptConfig(apiKey.id, {
+			goal: body.goal,
+			voice,
+			context: body.context,
+			data: body.data,
+			tools,
+			results,
+			aiDisclosure: body.aiDisclosure,
+		})
 
 		const [cached] = await db
 			.select()
@@ -74,7 +87,16 @@ calls.post('/', async (c) => {
 		if (cached) {
 			agentId = cached.id
 		} else {
-			const compiled = await compileGoal({ goal: body.goal, voice, context: body.context ?? {}, tools, results })
+			const compiled = await compileGoal({
+				goal: body.goal,
+				voice,
+				context: body.context ?? '',
+				data: body.data,
+				recipient: body.recipient,
+				tools,
+				results,
+				aiDisclosure: body.aiDisclosure,
+			})
 
 			const [agent] = await db
 				.insert(apiAgents)
@@ -83,7 +105,7 @@ calls.post('/', async (c) => {
 					name: body.goal.slice(0, 80) || 'voice agent',
 					goal: body.goal,
 					voice,
-					context: body.context ?? {},
+					context: body.context ?? '',
 					tools,
 					results,
 					configHash,
@@ -99,13 +121,18 @@ calls.post('/', async (c) => {
 
 	const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)
 
+	const callContext: Record<string, string> = {}
+	if (body.recipient?.firstName) callContext.firstName = body.recipient.firstName
+	if (body.recipient?.lastName) callContext.lastName = body.recipient.lastName
+	if (body.recipient?.email) callContext.email = body.recipient.email
+
 	const [call] = await db
 		.insert(apiCalls)
 		.values({
 			apiKeyId: apiKey.id,
 			agentId,
 			toPhone: body.to,
-			callContext: body.context ?? {},
+			callContext,
 			idempotencyKey: body.idempotencyKey ?? null,
 		})
 		.returning()

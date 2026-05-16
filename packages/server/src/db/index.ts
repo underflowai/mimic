@@ -13,7 +13,11 @@ let _db: ReturnType<typeof drizzle<typeof schema>> | null = null
 
 export function getDb() {
 	if (!_db) {
-		const client = postgres(getDatabaseUrl())
+		const client = postgres(getDatabaseUrl(), {
+			max: 10,
+			idle_timeout: 30,
+			connect_timeout: 10,
+		})
 		_db = drizzle(client, { schema })
 	}
 	return _db

@@ -78,7 +78,7 @@ export interface CallOrchestratorConfig {
 	onTurnCommitted?: (turn: CommittedTurnInfo) => void
 	onBackchannel?: (token: import('./backchannel/engine.js').BackchannelToken) => void
 	tools?: import('./intelligence/tools/runner.js').ToolDefinition[]
-	executeSdkTool?: import('./intelligence/tools/transport.js').SdkToolExecutor
+	executeTool?: import('./intelligence/tools/transport.js').ToolExecutor
 	maxCompletionTokens?: number
 	endCallEnabled?: boolean
 }
@@ -215,7 +215,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		getCallerDateTime: () => formatUserDateTime(callConfig.userTimezone),
 		getDirectorTurns: () => director.listTurns(),
 		tools: callConfig.tools,
-		executeSdkTool: callConfig.executeSdkTool,
+		executeTool: callConfig.executeTool,
 		// Silence watchdog exhausted its check-in budget. Emit the hangup
 		// event so the transport layer (createVoiceAgent) can tear down the
 		// LiveKit room — that disconnect flow also triggers our own

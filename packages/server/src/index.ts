@@ -27,11 +27,6 @@ export type { GeneratedKey } from './auth.js'
 export { deliverWebhook } from './webhook.js'
 export type { WebhookParams } from './webhook.js'
 
-// ── Tool socket ───────────────────────────────────────────────────────
-
-export { createToolSocketBridge, requestToolExecutionOverSocket } from './tool-socket.js'
-export type { ToolSocketCallError, ToolSocketCallRequest, ToolSocketCallResult } from './tool-socket.js'
-
 // ── Goal compiler ─────────────────────────────────────────────────────
 
 export { compileGoal, buildOrchestratorConfigFromAgent } from './goal-compiler.js'

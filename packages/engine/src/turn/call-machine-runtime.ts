@@ -102,7 +102,7 @@ export interface CallMachineRuntimeDeps {
 	getCallerDateTime: () => string | undefined
 	getDirectorTurns: () => CallTurn[]
 	tools?: import('../intelligence/tools/runner.js').ToolDefinition[]
-	executeSdkTool?: import('../intelligence/tools/transport.js').SdkToolExecutor
+	executeTool?: import('../intelligence/tools/transport.js').ToolExecutor
 	onSilenceHangup: () => void
 }
 
@@ -292,7 +292,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 		getCallerDateTime: deps.getCallerDateTime,
 		tools: deps.tools ?? [],
 		webSearcher: deps.webSearcher,
-		executeSdkTool: deps.executeSdkTool,
+		executeTool: deps.executeTool,
 	})
 	const allTools: ToolDefinition[] = [
 		...defaultMimicTools,

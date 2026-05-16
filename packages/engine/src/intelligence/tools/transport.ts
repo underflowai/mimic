@@ -7,7 +7,12 @@ const log = createLogger('mimic:tool-transport')
 
 export type ToolTransportResult = { result: string } | { error: string }
 
-export interface SdkToolExecutor {
+/**
+ * Callback for executing user-defined tools. The voice engine calls this
+ * when a tool invocation is detected. The implementation should execute the
+ * tool (locally, via WebSocket, etc.) and return the result.
+ */
+export interface ToolExecutor {
 	(params: { toolName: string; toolArgs: Record<string, unknown>; signal?: AbortSignal }): Promise<ToolTransportResult>
 }
 
@@ -15,7 +20,7 @@ export interface ToolTransportDeps {
 	getCallerDateTime: () => string | undefined
 	tools: ToolDefinition[]
 	webSearcher: WebSearcher
-	executeSdkTool?: SdkToolExecutor
+	executeTool?: ToolExecutor
 }
 
 export interface ToolTransportExecuteParams {
@@ -37,18 +42,18 @@ async function executeWebSearch(deps: ToolTransportDeps, params: ToolTransportEx
 	return { result } satisfies ToolTransportResult
 }
 
-async function executeSdkCallback(deps: ToolTransportDeps, params: ToolTransportExecuteParams) {
-	if (!deps.executeSdkTool) return { error: 'no SDK tool executor configured' } satisfies ToolTransportResult
+async function executeToolCallback(deps: ToolTransportDeps, params: ToolTransportExecuteParams) {
+	if (!deps.executeTool) return { error: 'no tool executor configured' } satisfies ToolTransportResult
 
-	const socketResult = await deps.executeSdkTool({
+	const toolResult = await deps.executeTool({
 		toolName: params.toolName,
 		toolArgs: params.toolArgs,
 		signal: params.signal,
 	})
-	if ('error' in socketResult) return socketResult
+	if ('error' in toolResult) return toolResult
 
-	const result = socketResult.result.trim()
-	if (!result) return { error: 'SDK tool returned empty result' } satisfies ToolTransportResult
+	const result = toolResult.result.trim()
+	if (!result) return { error: 'tool returned empty result' } satisfies ToolTransportResult
 	return { result } satisfies ToolTransportResult
 }
 
@@ -56,7 +61,7 @@ export function createToolTransport(deps: ToolTransportDeps): ToolTransport {
 	return {
 		async execute(params) {
 			if (params.toolName === 'webSearch') return executeWebSearch(deps, params)
-			const result = await executeSdkCallback(deps, params)
+			const result = await executeToolCallback(deps, params)
 			if ('error' in result) {
 				log.error({ toolName: params.toolName, error: result.error }, 'tool execution failed')
 			}

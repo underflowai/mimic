@@ -10,7 +10,6 @@ import { createCallOrchestrator, type CallOrchestratorConfig } from '@mimic/engi
 import type { AudioTransport } from '@mimic/engine/src/audio/streams/types.js'
 
 import { createSipDialer, type SipConfig } from './sip.js'
-import { requestToolExecutionOverSocket } from './tool-socket.js'
 
 export interface OrchestratorCloseResult {
 	turns: Array<{ role: string; content: string }>
@@ -102,8 +101,6 @@ export async function runOutboundCall(
 				...config.orchestratorConfig,
 				callId: params.callId,
 				audioTransport,
-				executeSdkTool: (toolParams) =>
-					requestToolExecutionOverSocket({ callId: params.callId, ...toolParams }),
 			})
 			orchestratorRef = orchestrator
 			return orchestrator

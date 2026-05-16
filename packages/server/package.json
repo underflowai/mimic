@@ -2,7 +2,7 @@
 	"name": "@mimic/server",
 	"version": "0.1.0",
 	"type": "module",
-	"description": "Minimal voice API server — goal compiler, tool bridge, and call lifecycle.",
+	"description": "Voice API server — SIP dialing, call lifecycle, goal compiler, result extraction.",
 	"license": "MIT",
 	"main": "./build/index.js",
 	"types": "./build/index.d.ts",
@@ -25,7 +25,6 @@
 	},
 	"dependencies": {
 		"@mimic/engine": "workspace:*",
-		"ioredis": "^5.6.1",
 		"livekit-server-sdk": "^2.15.3",
 		"openai": "^5.8.0",
 		"zod": "^3.24.4"

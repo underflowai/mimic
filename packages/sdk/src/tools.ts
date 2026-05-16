@@ -1,4 +1,4 @@
-import type { ZodError, ZodObject, ZodType } from 'zod'
+import { ZodObject, type ZodError, type ZodType } from 'zod'
 
 import type { MimicTool, ToolInput, ToolSchema } from './types.js'
 
@@ -146,25 +146,19 @@ function zodSchemaToParameters(schema: ZodType): Record<string, string> {
 }
 
 function getZodShape(schema: ZodType): Record<string, ZodType> | null {
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const s = schema as any
-	if (s._def?.typeName === 'ZodObject' && s.shape) {
-		return (schema as ZodObject<Record<string, ZodType>>).shape
-	}
+	if (schema instanceof ZodObject) return schema.shape as Record<string, ZodType>
 	return null
 }
 
-function describeZodField(key: string, schema: ZodType): string {
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const def = (schema as any)._def
-	const description = def?.description as string | undefined
-	const typeName = (def?.typeName as string | undefined)?.replace('Zod', '').toLowerCase() ?? 'unknown'
+function describeZodField(key: string, field: ZodType): string {
+	const description = field.description
+	const isOptional = field.isOptional()
 
-	const parts: string[] = [typeName]
-	if (description) parts.push(`— ${description}`)
-	if (def?.typeName === 'ZodOptional') parts.push('(optional)')
+	const parts: string[] = []
+	if (description) parts.push(description)
+	if (isOptional) parts.push('(optional)')
 
-	return parts.join(' ') || key
+	return parts.length > 0 ? parts.join(' ') : key
 }
 
 // ── Public introspection ──────────────────────────────────────────────

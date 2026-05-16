@@ -111,8 +111,7 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 	private readonly WebSocketImpl: WebSocketConstructor | undefined
 	private readonly eventBuffer: CallEvent[] = []
 	private readonly waiters: Array<(event: CallEvent | null) => void> = []
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	private readonly listeners: Record<string, Array<(event: any) => void>> = {}
+	private readonly listeners: Record<string, Function[]> = {}
 	private done = false
 	private settled = false
 	private resultResolve!: (result: CallResult<T>) => void

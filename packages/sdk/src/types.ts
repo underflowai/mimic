@@ -82,8 +82,7 @@ export interface MimicTool {
  * async function getHours() { return '9am-5pm' }
  * ```
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type ToolInput = MimicTool | (((...args: any[]) => any) & { description?: string; params?: Record<string, string> })
+export type ToolInput = MimicTool | (Function & { description?: string; params?: Record<string, string> })
 
 /** @internal Wire format for tool definitions sent to the API. */
 export interface ToolSchema {

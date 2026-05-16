@@ -64,7 +64,7 @@ describe('introspectTools with tool()', () => {
 		})
 
 		const schemas = introspectTools({ simple: t })
-		assert.ok(schemas[0]!.parameters.query.includes('string'))
+		assert.equal(schemas[0]!.parameters.query, 'query')
 	})
 
 	it('handles mix of structured and plain function tools', () => {

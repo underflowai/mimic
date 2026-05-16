@@ -231,8 +231,12 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 	const agentName = parsed.agentName || defaultAgentName(input.voice)
 	const systemPrompt = await renderSystemPromptFromTemplate(agentName, parsed)
 
+	// Store the prompt with [AGENT_NAME] placeholder so it can be reused
+	// across voices without recompilation
+	const templatePrompt = systemPrompt.replaceAll(agentName, '[AGENT_NAME]')
+
 	return {
-		systemPrompt,
+		systemPrompt: templatePrompt,
 		turnControlBlock: parsed.turnControlBlock,
 		agentName,
 	}
@@ -294,7 +298,7 @@ export function buildOrchestratorConfigFromAgent(
 	return {
 		orchestratorConfig: {
 			persona,
-			systemPrompt: agent.systemPrompt,
+			systemPrompt: agent.systemPrompt.replaceAll('[AGENT_NAME]', persona.firstName),
 			maxCompletionTokens: 384,
 			userFirstName: resolveFirstName(agent, callContext),
 			recipient,

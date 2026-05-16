@@ -1,4 +1,5 @@
 FROM node:22-slim AS base
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@10.12.1 --activate
 WORKDIR /app
 

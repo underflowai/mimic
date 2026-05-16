@@ -15,16 +15,20 @@
 			}
 		}
 	},
-	"files": ["build/", "README.md"],
+	"files": [
+		"build/",
+		"README.md"
+	],
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json",
 		"typecheck": "tsc -b --noEmit"
 	},
 	"dependencies": {
+		"@mimic/engine": "workspace:*",
 		"ioredis": "^5.6.1",
+		"livekit-server-sdk": "^2.15.3",
 		"openai": "^5.8.0",
-		"zod": "^3.24.4",
-		"@mimic/engine": "workspace:*"
+		"zod": "^3.24.4"
 	},
 	"devDependencies": {
 		"@types/node": "^22.15.0",

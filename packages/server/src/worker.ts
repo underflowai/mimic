@@ -9,6 +9,7 @@
  *   npx tsx src/worker.ts
  */
 
+import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'bullmq'
@@ -23,9 +24,9 @@ function getRedisConnection() {
 	return new Redis(url, { maxRetriesPerRequest: null })
 }
 
-console.log('[worker] Starting sandboxed call worker')
-console.log(`[worker] Processor: ${processorPath}`)
-console.log(`[worker] Concurrency: 4 (forked child per call)`)
+import { logger } from './logger.js'
+
+logger.info({ processorPath, concurrency: 4 }, 'starting sandboxed call worker')
 
 const worker = new Worker(
 	'mimic-calls',
@@ -51,9 +52,26 @@ worker.on('error', (err) => {
 	console.error('[worker] Worker error:', err.message)
 })
 
+const healthPort = Number(process.env.HEALTH_PORT) || 3001
+const healthServer = createServer((req, res) => {
+	if (req.url === '/health') {
+		res.writeHead(200, { 'content-type': 'application/json' })
+		res.end(JSON.stringify({ status: 'ok', running: worker.isRunning(), pid: process.pid }))
+	} else {
+		res.writeHead(404)
+		res.end()
+	}
+})
+healthServer.listen(healthPort, () => {
+	console.log(`[worker] Health check on http://localhost:${healthPort}/health`)
+})
+
 const shutdown = async (signal: string) => {
 	console.log(`[worker] Received ${signal}, shutting down gracefully...`)
-	await worker.close()
+	await Promise.allSettled([
+		worker.close(),
+		new Promise((resolve) => healthServer.close(resolve)),
+	])
 	process.exit(0)
 }
 

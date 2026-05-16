@@ -21,6 +21,7 @@ import { createSipDialer } from './sip.js'
 import { deliverWebhook } from './webhook.js'
 
 import OpenAI from 'openai'
+import { childLogger } from './logger.js'
 import { randomUUID } from 'node:crypto'
 import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
 import { decrementActiveCalls } from './middleware/rate-limit.js'
@@ -93,7 +94,7 @@ async function updateCall(callId: string, updates: Partial<ApiCallRow>) {
 
 export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 	const callId = call.id
-	console.log(`[call-runner] Starting call ${callId} to ${call.toPhone}`)
+	childLogger({ callId, toPhone: call.toPhone }).info('starting call')
 
 	try {
 		await updateCall(callId, { status: 'in_progress' })
@@ -114,7 +115,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 			participantName: call.toPhone,
 		})
 
-		console.log(`[call-runner] SIP dial successful, room: ${roomName}`)
+		childLogger({ callId, roomName }).info('SIP dial successful')
 
 		const agentConfig = agentRowToConfig(agent)
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(
@@ -162,9 +163,9 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 						{ audioOnly: true },
 					)
 					egressId = info.egressId
-					console.log(`[call-runner] Started recording egress ${egressId} for call ${callId}`)
+					childLogger({ callId, egressId }).info('started recording')
 				} catch (err) {
-					console.error(`[call-runner] Failed to start recording for call ${callId}:`, err)
+					childLogger({ callId, err }).error('failed to start recording')
 				}
 			},
 			createOrchestrator: async (transport: AudioTransport) => {
@@ -225,17 +226,17 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 							result: extraction,
 							transcript,
 						},
-					}).catch((err) => console.error(`[call-runner] Webhook delivery failed:`, err))
+					}).catch((err) => childLogger({ callId, err }).error('webhook delivery failed'))
 				}
 
-				console.log(`[call-runner] Call ${callId} completed (${result.durationSeconds}s)`)
+				childLogger({ callId, durationSeconds: result.durationSeconds }).info('call completed')
 			},
 		})
 
 		await sessionComplete
 	} catch (err) {
 		const errorMessage = err instanceof Error ? err.message : String(err)
-		console.error(`[call-runner] Call ${callId} failed:`, errorMessage)
+		childLogger({ callId, errorMessage }).error('call failed')
 
 		await updateCall(callId, { status: 'failed', errorMessage }).catch(() => {})
 		broadcast(callId, { type: 'call_status', status: 'failed' })

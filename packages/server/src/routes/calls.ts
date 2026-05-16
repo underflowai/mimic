@@ -8,8 +8,8 @@ import { apiAgents, apiCalls } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
 import { runCall } from '../call-runner.js'
 
-function hashPromptConfig(apiKeyId: string, goal: string, voice: string, tools: unknown[], results: unknown): string {
-	const payload = JSON.stringify({ apiKeyId, goal, voice, tools, results })
+function hashPromptConfig(apiKeyId: string, goal: string, voice: string, context: unknown, tools: unknown[], results: unknown): string {
+	const payload = JSON.stringify({ apiKeyId, goal, voice, context, tools, results })
 	return createHash('sha256').update(payload).digest('hex')
 }
 
@@ -63,7 +63,7 @@ calls.post('/', async (c) => {
 			parameters: t.parameters ?? {},
 		}))
 		const results = body.results ?? body.extract ?? {}
-		const configHash = hashPromptConfig(apiKey.id, body.goal, voice, tools, results)
+		const configHash = hashPromptConfig(apiKey.id, body.goal, voice, body.context ?? {}, tools, results)
 
 		const [cached] = await db
 			.select()

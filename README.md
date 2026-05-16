@@ -1,6 +1,6 @@
 # Mimic
 
-Make AI phone calls with a few lines of code.
+Attach a voice agent to your existing tools and make phone calls.
 
 ```typescript
 import { z } from 'zod'
@@ -8,32 +8,39 @@ import { Mimic, tool } from '@mimic/sdk'
 
 const mimic = new Mimic('mk_...')
 
+// Wrap your existing functions — the agent calls them during the conversation
 const checkCalendar = tool({
   description: 'Check available calendar slots',
-  parameters: z.object({
-    date: z.string().describe('The date to check'),
-  }),
-  run: async ({ date }) => calendar.getSlots(date),
+  parameters: z.object({ date: z.string().describe('The date to check') }),
+  run: async ({ date }) => myCalendarAPI.getSlots(date),  // your existing code
 })
 
+const bookAppointment = tool({
+  description: 'Book an appointment',
+  parameters: z.object({
+    time: z.string().describe('The time slot'),
+    email: z.string().email().describe('Patient email'),
+  }),
+  run: async ({ time, email }) => myCalendarAPI.book(time, email),  // your existing code
+})
+
+// Make the call — the agent uses your tools automatically
 const call = mimic.call({
   to: '+15551234567',
   goal: 'Confirm the appointment for tomorrow at 2pm',
-  tools: { checkCalendar },
+  tools: { checkCalendar, bookAppointment },
   extract: z.object({
     confirmed: z.boolean().describe('whether the appointment was confirmed'),
-    notes: z.string().nullable().describe('any notes from the conversation'),
   }),
 })
 
-call.on('speech', ({ role, text }) => console.log(`[${role}] ${text}`))
-
 const result = await call.result
 if (result.status === 'completed') {
-  result.data.confirmed  // boolean — enforced, not guessed
-  result.data.notes      // string | null
+  result.data.confirmed  // boolean — typed and enforced
 }
 ```
+
+Your functions run locally in your process. Your secrets and APIs never leave your machine.
 
 ## How it works
 

@@ -49,6 +49,7 @@ calls.post('/', async (c) => {
 	}
 
 	let agentId: string
+	let needsCompilation = false
 
 	if (body.agentId) {
 		const [existing] = await db
@@ -88,18 +89,8 @@ calls.post('/', async (c) => {
 		if (cached) {
 			agentId = cached.id
 		} else {
-			const compiled = await compileGoal({
-				goal: body.goal,
-				voice,
-				context: body.context ?? '',
-				data: body.data,
-				recipient: body.recipient,
-				tools,
-				results,
-				aiDisclosure: body.aiDisclosure,
-			})
-
-			const [agent] = await db
+			// Create a placeholder agent row — compile in background
+			const [placeholder] = await db
 				.insert(apiAgents)
 				.values({
 					apiKeyId: apiKey.id,
@@ -110,17 +101,15 @@ calls.post('/', async (c) => {
 					tools,
 					results,
 					configHash,
-					systemPrompt: compiled.systemPrompt,
-					turnControlBlock: compiled.turnControlBlock ?? null,
-					agentName: compiled.agentName,
+					systemPrompt: '',
+					agentName: voice === 'male' ? 'Arlo' : 'Aurora',
 					ambience: body.ambience ?? true,
 				})
 				.returning()
-			agentId = agent.id
+			agentId = placeholder.id
+			needsCompilation = true
 		}
 	}
-
-	const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)
 
 	const callContext: Record<string, string> = {}
 	if (body.recipient?.firstName) callContext.firstName = body.recipient.firstName
@@ -142,7 +131,37 @@ calls.post('/', async (c) => {
 		return c.json({ error: 'Concurrent call limit reached. Wait for active calls to complete.' }, 429)
 	}
 
-	void runCall(call, agent!).finally(() => decrementActiveCalls(apiKey.id))
+	// Background: compile (if needed) → dial → run call
+	void (async () => {
+		try {
+			if (needsCompilation) {
+				const compiled = await compileGoal({
+					goal: body.goal!,
+					voice: body.voice ?? 'female',
+					context: body.context ?? '',
+					data: body.data,
+					recipient: body.recipient,
+					tools: (body.tools ?? []).map((t) => ({ ...t, kind: 'read' as const, parameters: t.parameters ?? {} })),
+					results: body.results ?? body.extract ?? {},
+					aiDisclosure: body.aiDisclosure,
+				})
+
+				await db.update(apiAgents).set({
+					systemPrompt: compiled.systemPrompt,
+					turnControlBlock: compiled.turnControlBlock ?? null,
+					agentName: compiled.agentName,
+				}).where(eq(apiAgents.id, agentId))
+			}
+
+			const [agent] = await db.select().from(apiAgents).where(eq(apiAgents.id, agentId)).limit(1)
+			await runCall(call, agent!)
+		} catch (err) {
+			const errorMessage = err instanceof Error ? err.message : String(err)
+			await db.update(apiCalls).set({ status: 'failed', errorMessage }).where(eq(apiCalls.id, call.id)).catch(() => {})
+		} finally {
+			decrementActiveCalls(apiKey.id)
+		}
+	})()
 
 	return c.json({ id: call.id, status: call.status }, 201)
 })

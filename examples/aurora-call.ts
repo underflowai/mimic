@@ -1,4 +1,4 @@
-import { Mimic } from '@mimic/sdk'
+import { Mimic } from '../packages/sdk/src/index.js'
 
 const mimic = new Mimic({
 	apiKey: 'mk_live_8OMembhePGXoAUY6x65vP_LjDRykYgJl',

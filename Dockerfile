@@ -12,6 +12,8 @@ COPY packages/sdk/package.json packages/sdk/
 RUN pnpm install --frozen-lockfile
 
 COPY packages/ packages/
+
+RUN pnpm --filter @mimic/engine run build || true
 RUN pnpm build
 
 EXPOSE 3000

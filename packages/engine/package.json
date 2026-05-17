@@ -28,7 +28,7 @@
 	},
 	"files": ["build/"],
 	"scripts": {
-		"build": "tsc -b tsconfig.lib.json",
+		"build": "tsc -b tsconfig.lib.json && node -e \"const{cpSync}=require('fs');cpSync('src/prompts','build/prompts',{recursive:true});cpSync('src/backchannel/audio','build/backchannel/audio',{recursive:true});try{cpSync('src/audio/silero_vad_v5.onnx','build/audio/silero_vad_v5.onnx')}catch{}\"",
 		"typecheck": "tsc -p tsconfig.lib.json --noEmit",
 		"test": "NODE_OPTIONS='--conditions=source' tsx --test 'src/**/*.test.ts'"
 	},

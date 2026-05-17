@@ -233,6 +233,9 @@ const result = await call.result
 // result will reject with MimicError('Call cancelled')
 ```
 
+Cancellation propagates to the server — the call is marked as cancelled,
+queued jobs are removed, and any in-progress call is terminated.
+
 ## Options reference
 
 ```typescript

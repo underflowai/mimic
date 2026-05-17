@@ -1,159 +1,126 @@
 # Mimic
 
-Attach a voice agent to your existing tools and make phone calls.
+Make AI phone calls with a few lines of code.
+
+```typescript
+import { Mimic } from '@mimic/sdk'
+
+const mimic = new Mimic('mk_...')
+
+const call = mimic.call({
+  to: '+15551234567',
+  goal: 'Confirm the appointment for tomorrow at 2pm with Dr. Smith',
+  context: `You're calling on behalf of Greenwood Medical. We require
+  24-hour cancellation notice. Dr. Smith is out on Fridays.`,
+})
+
+const result = await call.result
+console.log(result.status) // 'completed' or 'failed'
+```
+
+Give it a phone number and a goal. Mimic handles the rest — dialing, conversation, interruptions, and structured results.
+
+## How it works
+
+```
+Your code → Mimic API → LiveKit SIP → Phone call
+                       → Deepgram Flux (listen)
+                       → OpenAI / Anthropic (think)
+                       → Cartesia Sonic (speak)
+```
+
+The SDK sends a goal to the API server. The server compiles it into a voice agent prompt, dials the phone number via SIP, runs a real-time voice engine, and returns structured results when the call ends. Tool functions execute locally in your process — your secrets never leave your machine.
+
+## Quick start
+
+```bash
+npm install @mimic/sdk zod
+```
+
+```typescript
+import { Mimic } from '@mimic/sdk'
+
+const mimic = new Mimic(process.env.MIMIC_API_KEY!)
+
+const call = mimic.call({
+  to: '+15551234567',
+  goal: 'Say hello and ask how their day is going',
+})
+
+const result = await call.result
+```
+
+## Adding context
+
+Tell the agent what it needs to know. Write it like you'd brief a human:
+
+```typescript
+const call = mimic.call({
+  to: '+15551234567',
+  goal: 'Confirm the appointment for tomorrow at 2pm',
+  context: `You're calling on behalf of Greenwood Medical. We require
+  24-hour cancellation notice. If they need to reschedule, offer the
+  next available slot. Dr. Smith is out on Fridays.`,
+  recipient: { firstName: 'Jane', lastName: 'Smith' },
+})
+```
+
+## Tools
+
+Give the agent functions it can call during the conversation:
 
 ```typescript
 import { z } from 'zod'
 import { Mimic, tool } from '@mimic/sdk'
 
-const mimic = new Mimic('mk_...')
+const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
-// Wrap your existing functions — the agent calls them during the conversation
 const checkCalendar = tool({
   description: 'Check available calendar slots',
   parameters: z.object({ date: z.string().describe('The date to check') }),
-  run: async ({ date }) => myCalendarAPI.getSlots(date),  // your existing code
+  run: async ({ date }) => myCalendarAPI.getSlots(date),
 })
 
-const bookAppointment = tool({
-  description: 'Book an appointment',
-  parameters: z.object({
-    time: z.string().describe('The time slot'),
-    email: z.string().email().describe('Patient email'),
-  }),
-  run: async ({ time, email }) => myCalendarAPI.book(time, email),  // your existing code
-})
-
-// Make the call — the agent uses your tools automatically
 const call = mimic.call({
   to: '+15551234567',
-  goal: 'Confirm the appointment for tomorrow at 2pm',
-  tools: { checkCalendar, bookAppointment },
-  extract: z.object({
-    confirmed: z.boolean().describe('whether the appointment was confirmed'),
-  }),
+  goal: 'Book an appointment for the caller',
+  tools: { checkCalendar },
 })
-
-const result = await call.result
-if (result.status === 'completed') {
-  result.data.confirmed  // boolean — typed and enforced
-}
 ```
 
-Your functions run locally in your process. Your secrets and APIs never leave your machine.
-
-Or connect to an MCP server and skip the wrapping entirely:
+Tools execute locally in your process. Or connect to an MCP server:
 
 ```typescript
 const tools = await mimic.mcp('http://localhost:3000/mcp')
 mimic.call({ to: '+15551234567', goal: 'Book an appointment', tools })
 ```
 
-## How it works
+## Extracting data
 
-```
-SDK (your code) → API server (Railway) → LiveKit SIP → Phone call
-                                        → Deepgram (listen)
-                                        → LLM (think)
-                                        → Cartesia (speak)
-```
-
-The SDK opens a WebSocket to the server. The server dials the phone number via SIP, runs the voice engine, and streams events back in real-time. Your tool functions execute locally in your process.
-
-## Packages
-
-| Package | What it does |
-|---|---|
-| `packages/sdk` | Client SDK — `tool()`, streaming, typed results |
-| `packages/engine` | Voice engine — ASR, LLM, TTS, interrupts, speculation, backchannel |
-| `packages/server` | API server — Hono, Postgres, SIP dialing, result extraction |
-| `packages/transport-livekit` | LiveKit adapter — rooms, audio I/O, noise cancellation |
-
-## SDK
-
-### Install
-
-```bash
-npm install @mimic/sdk zod
-```
-
-### Connect to an MCP server (zero wrapping)
-
-If you already have tools exposed via MCP, just point Mimic at your server:
-
-```typescript
-const tools = await mimic.mcp('http://localhost:3000/mcp')
-
-mimic.call({
-  to: '+15551234567',
-  goal: 'Book an appointment',
-  tools,
-})
-```
-
-Tool names, descriptions, and parameter schemas are discovered automatically. No `tool()` wrappers, no Zod schemas, no code to write.
-
-### Define custom tools
-
-For functions that aren't behind an MCP server, use `tool()` with Zod:
+Use a Zod schema to get typed results from the call:
 
 ```typescript
 import { z } from 'zod'
-import { tool } from '@mimic/sdk'
 
-const reschedule = tool({
-  description: 'Reschedule an appointment',
-  parameters: z.object({
-    newDate: z.string().describe('The new date'),
-    newTime: z.string().describe('The new time'),
-  }),
-  run: async ({ newDate, newTime }) => {
-    await calendar.reschedule(newDate, newTime)
-    return `Rescheduled to ${newDate} at ${newTime}`
-  },
-})
-```
-
-### Make a call
-
-```typescript
 const call = mimic.call({
   to: '+15551234567',
-  goal: 'Confirm the appointment for tomorrow at 2pm',
-
-  // Background knowledge (baked into the agent's prompt)
-  context: `You're calling on behalf of Greenwood Medical. We require
-  24-hour cancellation notice. Dr. Smith is out on Fridays.`,
-
-  // Per-call structured data (field names compiled, values injected at runtime)
-  data: {
-    appointmentDate: 'Thursday May 16',
-    appointmentTime: '2:00 PM',
-    doctorName: 'Dr. Smith',
-  },
-
-  // Who you're calling (injected per-turn, not compiled into prompt)
-  recipient: { firstName: 'Jane', lastName: 'Smith' },
-
-  // Tools the agent can use
-  tools: { checkCalendar, reschedule },
-
-  // What to extract — Zod schema enforces types
+  goal: 'Confirm the appointment',
   extract: z.object({
-    confirmed: z.boolean().describe('whether confirmed'),
-    notes: z.string().nullable().describe('any notes'),
+    confirmed: z.boolean().describe('whether the appointment was confirmed'),
+    notes: z.string().nullable().describe('any notes from the conversation'),
   }),
-
-  voice: 'female',          // Aurora (female) or Arlo (male)
-  aiDisclosure: true,        // disclose AI status + recording
-  ambience: true,            // office background noise
 })
+
+const result = await call.result
+if (result.status === 'completed') {
+  result.data.confirmed  // boolean
+  result.data.notes      // string | null
+}
 ```
 
-### Stream events
+## Streaming events
 
 ```typescript
-// Typed event handlers
 call.on('speech', ({ role, text }) => console.log(`[${role}] ${text}`))
 call.on('tool_call', ({ name, args }) => console.log(`calling ${name}`))
 call.on('done', ({ goalAchieved }) => console.log(goalAchieved))
@@ -165,29 +132,49 @@ for await (const event of call) { ... }
 const result = await call.result
 ```
 
-### Typed results
+## Options reference
 
 ```typescript
-const result = await call.result
+mimic.call({
+  // Required
+  to: '+15551234567',           // E.164 phone number
+  goal: 'What the agent should do',
 
-if (result.status === 'completed') {
-  result.data.confirmed  // boolean — from Zod schema
-  result.transcript      // TranscriptEntry[]
-  result.duration        // number (seconds)
-} else {
-  result.error           // string
-}
+  // Knowledge
+  context: 'Background info...',
+  data: { field: 'value' },     // Structured per-call data
+
+  // Who you're calling
+  recipient: { firstName: 'Jane', lastName: 'Smith' },
+
+  // Tools
+  tools: { checkCalendar },     // tool() definitions or MCP tools
+
+  // Extraction
+  extract: z.object({ ... }),   // Zod schema for typed results
+
+  // Voice
+  voice: 'female',              // 'female' (Aurora) or 'male' (Arlo)
+  aiDisclosure: true,           // Disclose AI status + recording
+  ambience: true,               // Office background noise
+
+  // Timeouts
+  timeoutMs: 300_000,           // Max wait (default 5 min)
+  toolTimeoutMs: 30_000,        // Per-tool timeout (default 30s)
+
+  // Deduplication
+  idempotencyKey: 'unique-key',
+})
 ```
 
-### Cancel a call
+## Packages
 
-```typescript
-call.cancel()
-```
-
-### Prompt caching
-
-Same `goal + context + tools + data + ambience` reuses a compiled prompt. If any of those inputs change, Mimic recompiles.
+| Package | What it does |
+|---|---|
+| `packages/sdk` | Client SDK — `tool()`, streaming, typed results |
+| `packages/engine` | Voice engine — ASR, LLM, TTS, interrupts, speculation, backchannel |
+| `packages/server` | API server — Hono, Postgres, SIP dialing, result extraction |
+| `packages/transport-livekit` | LiveKit adapter — rooms, audio I/O, noise cancellation |
 
 ## Self-hosting
 
@@ -195,6 +182,7 @@ Same `goal + context + tools + data + ambience` reuses a compiled prompt. If any
 
 - Node.js 22+
 - PostgreSQL
+- Redis
 - [LiveKit Cloud](https://cloud.livekit.io) account with SIP trunk
 - API keys: OpenAI, Deepgram, Cartesia
 
@@ -210,8 +198,6 @@ LIVEKIT_API_SECRET=...
 LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_...
 REDIS_URL=redis://localhost:6379
 DATABASE_URL=postgresql://...
-# Optional (set to 1 when running a separate worker process)
-# MIMIC_DISABLE_IN_PROCESS_WORKER=1
 ```
 
 ### Run locally
@@ -227,29 +213,31 @@ pnpm start
 ### Deploy
 
 ```bash
-# Railway (includes Dockerfile)
+# Railway
 railway up
 
 # Docker
 docker build -t mimic .
 docker run -p 3000:3000 --env-file .env mimic
+```
 
-# Optional dedicated worker topology:
-# 1) set MIMIC_DISABLE_IN_PROCESS_WORKER=1 on the API container
-# 2) run a separate worker container
-docker run --env-file .env mimic pnpm --filter @mimic/server worker
+The server includes an in-process call worker by default. For dedicated worker topology, set `MIMIC_DISABLE_IN_PROCESS_WORKER=1` on the API container and run the worker separately:
+
+```bash
+docker run --env-file .env mimic node packages/server/build/worker.js
 ```
 
 ## Engine
 
 The voice engine handles real-time conversation with sub-second latency:
 
-- **Deepgram Flux** — Streaming ASR with eager end-of-turn detection
-- **LLM Director** — OpenAI or Anthropic, streaming token-by-token
-- **Cartesia Sonic** — Low-latency TTS with SSML and extended fillers
-- **Eager speculation** — Pre-generates responses before the caller finishes
-- **Soft-pause interrupts** — Yields to the caller, resumes if they stop
+- **Deepgram Flux** — streaming ASR with eager end-of-turn detection
+- **OpenAI / Anthropic** — LLM director, streaming token-by-token
+- **Cartesia Sonic** — low-latency TTS with context continuations
+- **Eager speculation** — pre-generates responses before the caller finishes (~460ms median first audio)
+- **Soft-pause interrupts** — yields to the caller, resumes if they stop
 - **Backchannel** — "mm-hmm", "right", "yeah" during caller speech
+- **Tool orchestration** — background intent detection + execution without blocking conversation
 
 See [packages/engine/src/README.md](packages/engine/src/README.md) for architecture docs.
 

@@ -6,8 +6,8 @@ Mimic powers voice calls. When a caller speaks, Mimic transcribes their speech i
 
 1. **Caller speaks** — audio flows into Deepgram Flux, which emits partial transcripts in real time.
 2. **Eager EOT** — when Flux signals an early end-of-turn (`EagerEndOfTurn`), Mimic starts generating a response and pre-synthesizing audio via a dedicated spec TTS session before the caller has fully finished. It may also fire backchannel tokens ("mm-hmm", "right") so the caller feels heard.
-3. **Caller finishes** — Flux emits the final `EndOfTurn`. If the eager draft is ready and the transcript hasn't diverged, pre-generated audio flushes immediately. If the transcript changed, a promotion classifier (Groq 70B) races against fresh generation to decide whether the eager draft is still usable.
-4. **Agent responds** — the LLM response streams token-by-token into TTS (Inworld), which streams audio chunks back to the caller.
+3. **Caller finishes** — Flux emits the final `EndOfTurn`. If the eager draft is ready and the transcript hasn't diverged, pre-generated audio flushes immediately. If the transcript changed, a promotion classifier races against fresh generation to decide whether the eager draft is still usable.
+4. **Agent responds** — the LLM response streams token-by-token into TTS (Cartesia Sonic), which streams audio chunks back to the caller.
 5. **If the caller interrupts**, Mimic stops speaking, estimates what they heard via `estimateHeardPortion`, and prepares the next response with that context (partial transcript committed with an em-dash).
 6. **Tools** — when the caller triggers a tool (booking, search, etc.), a fast intent detector starts a stall while a schema-aware tool runner extracts exact arguments, executes, and appends the query/result to persistent call state.
 
@@ -106,7 +106,7 @@ tool_pending: bookMeeting
 
 When a tool is pending, the Director stalls naturally. When a result or tool error arrives, it is appended to `tool_results`; the Director uses conversation history to avoid repeating already-spoken facts.
 
-**Transport:** Built-in `web_search` routes through `WebSearcher` (OpenAI Responses API). Custom tools route through a Redis pub/sub socket (`tool-transport.ts` → `requestToolExecutionOverSocket`) so SDK clients can execute tools locally without exposing secrets to the server.
+**Transport:** Built-in `web_search` routes through `WebSearcher` (OpenAI Responses API). Custom tools route through a WebSocket callback bridge so SDK clients can execute tools locally without exposing secrets to the server.
 
 ## CallMachine States
 
@@ -286,7 +286,7 @@ The control block is a per-turn `<context>` injection that gives the LLM situati
 
 Event-driven XState actor that fires short acknowledgement tokens while the caller is still speaking. Gates on min speech duration (~3s), refractory period (~4s), min word count (4), and low EOT confidence (<0.35 — avoids firing near end-of-thought). Suppresses after interrupted outcomes. Tokens: `mm-hmm`, `right`, `yeah`, `got-it`, `okay`, `uh-huh`, `sure`, `i-see`.
 
-Classifier uses Groq (small model, JSON schema) to pick the appropriate token or skip.
+Classifier uses a fast background model (JSON schema) to pick the appropriate token or skip.
 
 ## Background Intelligence
 
@@ -309,19 +309,19 @@ Source Readable → SentenceChunker → TtsSynthesis → FrameAlign → PauseGat
 
 Sources: token Readable (fresh/first/proactive), PCM Readable (presynthesized — skips TTS).
 
-Two Inworld TTS speaker instances are created per call: **primary** (used by the live turn pipeline) and **spec** (used by the eager pipeline for speculative synthesis). This prevents contention between live and speculative audio.
+Two Cartesia TTS speaker instances are created per call: **primary** (used by the live turn pipeline) and **spec** (used by the eager pipeline for speculative synthesis). This prevents contention between live and speculative audio.
 
 ## External Services
 
-| Area              | Service                     | Notes                                                                  |
-| ----------------- | --------------------------- | ---------------------------------------------------------------------- |
-| ASR               | Deepgram Flux (WebSocket)   | `flux-general-en`, eager EOT + standard EOT thresholds                 |
-| TTS               | Inworld (WebSocket)         | 48kHz PCM, dual sessions (primary + spec)                              |
-| Voice Director    | Groq or Cerebras            | Feature-flagged via `voice-director-use-groq`                          |
-| Background models | Groq                        | Backchannel, tool intent, eager validation, entity extraction, summary |
-| Web search        | OpenAI Responses API        | `web_search` tool type                                                 |
-| Custom tools      | Redis pub/sub               | SDK socket bridge (`requestToolExecutionOverSocket`)                   |
-| VAD               | Silero v5 (local ONNX/WASM) | ~32ms frames at 16kHz, no cloud dependency                             |
+| Area              | Service                      | Notes                                                                  |
+| ----------------- | ---------------------------- | ---------------------------------------------------------------------- |
+| ASR               | Deepgram Flux (WebSocket)    | `flux-general-en`, eager EOT + standard EOT thresholds                 |
+| TTS               | Cartesia Sonic (WebSocket)   | 48kHz PCM, dual sessions (primary + spec), context continuations       |
+| Voice Director    | OpenAI or Anthropic          | Configurable via `MIMIC_DIRECTOR_PROVIDER` env                         |
+| Background models | OpenAI                       | Backchannel, tool intent, eager validation, entity extraction, summary |
+| Web search        | OpenAI Responses API         | `web_search` tool type                                                 |
+| Custom tools      | WebSocket callback bridge    | SDK executes tools locally, results returned over WS                   |
+| VAD               | Silero v5 (local ONNX/WASM)  | ~32ms frames at 16kHz, no cloud dependency                             |
 
 ## Folder Guide
 
@@ -347,14 +347,14 @@ mimic/
 
   audio/                          — speech and synthesis
     deepgram-transcriber.ts       — Deepgram Flux WebSocket + caller-turn events
-    tts-session.ts                — Inworld TTS WebSocket session lifecycle (connect, context creation, reconnect)
-    tts-speaker.ts                — text → PCM synthesis via Inworld TTS
+    tts-session.ts                — Cartesia TTS WebSocket session lifecycle (connect, context creation, reconnect)
+    tts-speaker.ts                — text → PCM synthesis via Cartesia Sonic
     tts-sanitizer.ts              — LLM text cleanup, speech tag repair/validation, [end-call] extraction
     listen-transcriber.ts         — passive listen-only transcriber (no director/TTS)
     vad.ts                        — Silero VAD v5 via onnxruntime-web WASM
     audio-resample.ts             — PCM16 ↔ Float32 conversion + linear resampling
     ws-utils.ts                   — WebSocket construction, error normalization, awaitOpen
-    transport-schemas.ts          — Zod schemas for Deepgram Flux + Inworld TTS wire formats
+    transport-schemas.ts          — Zod schemas for Deepgram Flux + Cartesia TTS wire formats
     types.ts                      — AudioTransport, ListenTranscriber, transcriber interfaces
     streams/
       pipeline.ts                 — per-turn pipeline builder
@@ -369,12 +369,12 @@ mimic/
 
   intelligence/                   — LLM and tools
     director.ts                   — LLM streaming chat, history management, commit variants
-    director-provider.ts          — Groq / Cerebras model selection (feature-flagged)
+    director-provider.ts          — OpenAI / Anthropic model selection
     eager-machine.ts              — speculation state machine
     eager-promotion-classifier.ts — spec→final transcript matching (conservative, Groq)
     tools/supervisor-machine.ts   — tool supervisor, spawns per-invocation child actors
     tools/invocation-machine.ts   — per-tool lifecycle (detecting/awaiting_args/executing/ready/claimed/delivered)
-    tools/watcher.ts              — Groq Llama 3.3 70B: execute/not-ready/none per utterance
+    tools/watcher.ts              — tool intent classifier: execute/not-ready/none per utterance
     tool-runner.ts                — shared ToolDefinition type
     tool-transport.ts             — web search + SDK socket tool execution routing
     web-searcher.ts               — OpenAI Responses API web search
@@ -384,7 +384,7 @@ mimic/
 
   backchannel/                    — active listening
     engine.ts                     — backchannel state machine (gates, classifier, fire)
-    classifier.ts                 — Groq token classifier (PII-safe logging)
+    classifier.ts                 — backchannel token classifier
     clips.ts                      — pre-loaded PCM backchannel clips
     types.ts                      — BackchannelCallerTurnEvent, BackchannelTurnOutcome
 
@@ -394,6 +394,6 @@ mimic/
     prompt-turns.ts               — CallTurn + formatTurnsForPrompt
     streaming-types.ts            — DirectorStreamEvent + EagerAudioSink
     audio-pacing.ts               — chunk sizing, fade, heard-portion estimation
-    voice-persona.ts              — Aurora/Arlo persona configs + Inworld voice IDs
+    voice-persona.ts              — Aurora/Arlo persona configs + Cartesia voice IDs
     async-utils.ts                — withTimeout, isAbortLikeError, safeInvoke
 ```

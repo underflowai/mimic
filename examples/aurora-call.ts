@@ -20,6 +20,7 @@ On the real objections. Building in-house: sounds like a few weeks of work until
 What Aurora does not know: customer counts, named enterprise clients, specific integrations not mentioned here, roadmap, or anything else not covered above. Do not guess. Do not hedge with "I think we might." A clean "I do not have that — the founders would know" is always correct.`,
 	voice: 'female',
 	aiDisclosure: false,
+	ambience: false,
 })
 
 call.on('speech', ({ role, text }) => console.log(`[${role}] ${text}`))

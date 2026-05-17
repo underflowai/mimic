@@ -47,9 +47,20 @@ export interface ExtractionInput {
 	successCondition?: SuccessCondition
 }
 
-function isTypedSchema(results: Record<string, unknown>): results is Record<string, TypedField> {
-	const first = Object.values(results)[0]
-	return first !== null && typeof first === 'object' && 'type' in (first as Record<string, unknown>)
+function normalizeToTypedSchema(results: Record<string, unknown>): Record<string, TypedField> {
+	const typed: Record<string, TypedField> = {}
+	for (const [key, value] of Object.entries(results)) {
+		if (value !== null && typeof value === 'object' && 'type' in (value as Record<string, unknown>)) {
+			typed[key] = value as TypedField
+		} else {
+			typed[key] = {
+				type: 'string',
+				description: typeof value === 'string' ? value : String(value ?? key),
+				nullable: true,
+			}
+		}
+	}
+	return typed
 }
 
 function buildJsonSchema(results: Record<string, TypedField>): Record<string, unknown> {
@@ -159,7 +170,7 @@ export async function extractCallResult(
 		'Transcript:', formatTranscript(input.transcript),
 	].join('\n')
 
-	const useStructured = isTypedSchema(input.results)
+	const typedResults = normalizeToTypedSchema(input.results)
 
 	const response = await client.chat.completions.create({
 		model: 'gpt-4o',
@@ -167,18 +178,14 @@ export async function extractCallResult(
 			{ role: 'system', content: SYSTEM_PROMPT },
 			{ role: 'user', content: userPrompt },
 		],
-		...(useStructured
-			? {
-					response_format: {
-						type: 'json_schema',
-						json_schema: {
-							name: 'extraction_result',
-							strict: true,
-							schema: buildJsonSchema(input.results as Record<string, TypedField>),
-						},
-					},
-				}
-			: { response_format: { type: 'json_object' } }),
+		response_format: {
+			type: 'json_schema',
+			json_schema: {
+				name: 'extraction_result',
+				strict: true,
+				schema: buildJsonSchema(typedResults),
+			},
+		},
 	})
 
 	const content = response.choices[0]?.message.content ?? '{}'

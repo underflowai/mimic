@@ -24,7 +24,9 @@ import type { CallOptions, MimicOptions, ToolInput } from './types.js'
  *   to: '+15551234567',
  *   goal: 'Confirm the appointment',
  *   tools: { checkCalendar },
- *   extract: { confirmed: 'whether the appointment was confirmed' },
+ *   extract: z.object({
+ *     confirmed: z.boolean().describe('whether the appointment was confirmed'),
+ *   }),
  * })
  *
  * call.on('speech', ({ role, text }) => console.log(`[${role}] ${text}`))
@@ -76,7 +78,9 @@ export class Mimic {
 	 *   to: '+15551234567',
 	 *   goal: 'Confirm the appointment',
 	 *   tools: { checkCalendar },
-	 *   extract: { confirmed: 'whether confirmed' },
+ *   extract: z.object({
+ *     confirmed: z.boolean().describe('whether confirmed'),
+ *   }),
 	 * })
 	 *
 	 * // Option A: stream events

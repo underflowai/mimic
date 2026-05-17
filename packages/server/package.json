@@ -8,16 +8,13 @@
 	"types": "./build/index.d.ts",
 	"exports": {
 		".": {
-			"import": {
-				"types": "./src/index.ts",
-				"production": "./build/index.js",
-				"default": "./src/index.ts"
-			}
+			"types": "./build/index.d.ts",
+			"import": "./build/index.js",
+			"default": "./build/index.js"
 		}
 	},
 	"files": [
-		"build/",
-		"README.md"
+		"build/"
 	],
 	"scripts": {
 		"start": "tsx src/serve.ts",
@@ -25,7 +22,7 @@
 		"dev": "tsx watch src/serve.ts",
 		"dev:worker": "tsx watch src/worker.ts",
 		"build": "tsc -b tsconfig.lib.json",
-		"typecheck": "tsc -b --noEmit",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "drizzle-kit migrate",
 		"db:push": "drizzle-kit push"

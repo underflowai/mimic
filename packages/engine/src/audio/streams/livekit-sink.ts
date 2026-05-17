@@ -38,6 +38,19 @@ interface LiveKitSinkOptions extends WritableOptions {
 	label: string
 }
 
+function toAlignedPcm16(chunk: Buffer, context: { label?: string; prefix?: string }): Buffer | null {
+	if (chunk.byteLength === 0) return null
+	if (chunk.byteLength % 2 === 0) return chunk
+
+	const trimmedLength = chunk.byteLength - 1
+	log.warn(
+		{ ...context, byteLength: chunk.byteLength, trimmedLength },
+		'dropping trailing odd byte from PCM16 chunk',
+	)
+	if (trimmedLength <= 0) return null
+	return chunk.subarray(0, trimmedLength)
+}
+
 /**
  * Construct the call-scoped transport. Callers pass in the LiveKit
  * `AudioSource` they already created and published on a
@@ -50,15 +63,18 @@ export function createLiveKitTransport(options: LiveKitTransportOptions): AudioT
 	let sinkCounter = 0
 	let activeSink: LiveKitWritable | null = null
 
-	function bufferToFrame(chunk: Buffer): AudioFrame {
-		const samples = new Int16Array(chunk.byteLength / 2)
-		samples.set(new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2))
+	function bufferToFrame(chunk: Buffer): AudioFrame | null {
+		const aligned = toAlignedPcm16(chunk, { prefix })
+		if (!aligned) return null
+		const samples = new Int16Array(aligned.byteLength / 2)
+		samples.set(new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2))
 		return new AudioFrame(samples, ttsSampleRate, 1, samples.length)
 	}
 
 	async function captureFrame(chunk: Buffer): Promise<void> {
 		if (audioSource.closed) return
 		const frame = bufferToFrame(chunk)
+		if (!frame) return
 		try {
 			await audioSource.captureFrame(frame)
 		} catch (err) {
@@ -115,9 +131,11 @@ class LiveKitWritable extends Writable implements AudioSink {
 		this.#label = options.label
 	}
 
-	#framesFromBuffer(chunk: Buffer): AudioFrame {
-		const samples = new Int16Array(chunk.byteLength / 2)
-		samples.set(new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2))
+	#framesFromBuffer(chunk: Buffer): AudioFrame | null {
+		const aligned = toAlignedPcm16(chunk, { label: this.#label })
+		if (!aligned) return null
+		const samples = new Int16Array(aligned.byteLength / 2)
+		samples.set(new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2))
 		return new AudioFrame(samples, ttsSampleRate, 1, samples.length)
 	}
 
@@ -135,6 +153,10 @@ class LiveKitWritable extends Writable implements AudioSink {
 			return
 		}
 		const frame = this.#framesFromBuffer(chunk)
+		if (!frame) {
+			callback()
+			return
+		}
 		this.#captureChain = this.#captureChain
 			.then(() => {
 				if (this.#cancelled || this.destroyed || this.#source.closed) return
@@ -181,6 +203,7 @@ class LiveKitWritable extends Writable implements AudioSink {
 	async writeFrameDirect(chunk: Buffer): Promise<void> {
 		if (this.#cancelled || this.#source.closed) return
 		const frame = this.#framesFromBuffer(chunk)
+		if (!frame) return
 		this.#captureChain = this.#captureChain.then(() => {
 			if (this.#cancelled || this.#source.closed) return
 			return this.#source.captureFrame(frame)

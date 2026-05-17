@@ -12,5 +12,6 @@ COPY packages/sdk/package.json packages/sdk/
 RUN pnpm install --frozen-lockfile
 
 COPY packages/ packages/
+RUN pnpm build
 
-CMD ["pnpm", "--filter", "@mimic/server", "worker"]
+CMD ["node", "packages/server/build/worker.js"]

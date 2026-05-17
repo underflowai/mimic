@@ -6,8 +6,7 @@
  * and returns the result when the call ends.
  */
 
-import { createCallOrchestrator, type CallOrchestratorConfig } from '@mimic/engine/src/orchestrator.js'
-import type { AudioTransport } from '@mimic/engine/src/audio/streams/types.js'
+import { createCallOrchestrator, type AudioTransport, type CallOrchestratorConfig } from '@mimic/engine'
 
 import { createSipDialer, type SipConfig } from './sip.js'
 

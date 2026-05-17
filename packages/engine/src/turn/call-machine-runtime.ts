@@ -419,7 +419,8 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 							directorNote: decision.directorNote,
 						})
 					})
-					.catch(() => {
+					.catch((err) => {
+						log.error({ err, transcript: input.transcript }, 'tool intent classification failed')
 						sendBack({
 							type: 'CLASSIFY_RESULT',
 							classifyId: input.classifyId,
@@ -431,7 +432,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 							toolName: null,
 							toolArgs: null,
 							missingArgs: [],
-							directorNote: null,
+							directorNote: 'Tool classification failed; continue without tool and ask for clarification if needed.',
 						})
 					})
 				return () => abortController.abort()

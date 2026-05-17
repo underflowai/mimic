@@ -65,8 +65,11 @@ export class MimicClient {
 	streamUrl(callId: string): string {
 		const url = new URL(`${this.baseUrl}/api/v1/calls/${encodeURIComponent(callId)}/stream`)
 		url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-		url.searchParams.set('token', this.apiKey)
 		return url.toString()
+	}
+
+	streamAuthPayload(): string {
+		return JSON.stringify({ type: 'auth', token: this.apiKey })
 	}
 
 	async createCall(params: {
@@ -104,6 +107,12 @@ export class MimicClient {
 
 	async getCall(id: string): Promise<ApiCall> {
 		return this.request<ApiCall>(`/api/v1/calls/${encodeURIComponent(id)}`)
+	}
+
+	async cancelCall(id: string): Promise<void> {
+		await this.request<{ id: string; status: string }>(`/api/v1/calls/${encodeURIComponent(id)}`, {
+			method: 'DELETE',
+		})
 	}
 
 	private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

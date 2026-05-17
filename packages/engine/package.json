@@ -8,30 +8,32 @@
 	"types": "./build/index.d.ts",
 	"exports": {
 		".": {
-			"import": {
-				"types": "./src/index.ts",
-				"production": "./build/index.js",
-				"default": "./src/index.ts"
-			}
+			"types": "./build/index.d.ts",
+			"import": "./build/index.js",
+			"default": "./build/index.js"
 		},
-		"./src/*": {
-			"import": {
-				"types": "./src/*",
-				"default": "./src/*"
-			}
+		"./livekit-transport": {
+			"types": "./build/livekit-transport.d.ts",
+			"import": "./build/livekit-transport.js",
+			"default": "./build/livekit-transport.js"
 		}
 	},
 	"imports": {
-		"#engine/*": "./src/*",
+		"#engine/*": {
+			"types": "./src/*",
+			"source": "./src/*",
+			"default": "./build/*"
+		},
 		"#test/*": "./test/*"
 	},
-	"files": ["build/", "README.md"],
+	"files": ["build/"],
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json",
-		"typecheck": "tsc -b --noEmit",
-		"test": "tsx --test 'src/**/*.test.ts'"
+		"typecheck": "tsc -p tsconfig.lib.json --noEmit",
+		"test": "NODE_OPTIONS='--conditions=source' tsx --test 'src/**/*.test.ts'"
 	},
 	"dependencies": {
+		"@livekit/rtc-node": "^0.13.28",
 		"openai": "^5.8.0",
 		"onnxruntime-web": "^1.22.0",
 		"p-queue": "^8.1.0",
@@ -42,13 +44,9 @@
 		"handlebars": "^4.7.8"
 	},
 	"peerDependencies": {
-		"@livekit/rtc-node": ">=0.12.0",
 		"@sentry/node": ">=9.0.0"
 	},
 	"peerDependenciesMeta": {
-		"@livekit/rtc-node": {
-			"optional": true
-		},
 		"@sentry/node": {
 			"optional": true
 		}

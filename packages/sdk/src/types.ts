@@ -282,7 +282,7 @@ export type CallResult<T extends Record<string, unknown> = Record<string, unknow
 /** @internal */
 export interface ApiCall {
 	id: string
-	status: 'pending' | 'in_progress' | 'completed' | 'failed'
+	status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
 	transcript: TranscriptEntry[] | null
 	result: Record<string, unknown> | null
 	goalAchieved: boolean | null

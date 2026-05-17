@@ -45,6 +45,7 @@ interface BackchannelContext {
 	lastTranscript: string
 	lastEotConfidence: number
 	classifyingTranscript: string
+	pendingClassifyingTranscript: string
 }
 
 type BackchannelEvent =
@@ -113,10 +114,20 @@ export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: Ba
 				event.type === 'caller_turn_event' &&
 				(event.event.type === 'update' || event.event.type === 'eager_turn') &&
 				passesGates(context, event.event.transcript, event.event.confidence),
+			hasPendingClassifyingTranscript: ({ context }) =>
+				context.pendingClassifyingTranscript.trim().length > 0,
+			shouldClassifyPendingTranscript: ({ context }) =>
+				context.pendingClassifyingTranscript.trim().length > 0 &&
+				passesGates(
+					context,
+					context.pendingClassifyingTranscript,
+					context.lastEotConfidence,
+				),
 			shouldFireClassifierToken: ({ context, event }) => {
 				if (!('output' in event)) return false
 				const token = event.output as BackchannelToken | null
 				if (!token) return false
+				if (context.pendingClassifyingTranscript.trim().length > 0) return false
 				return context.lastEotConfidence < eotConfidenceThreshold
 			},
 		},
@@ -148,11 +159,28 @@ export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: Ba
 				: context.classifyingTranscript,
 	})
 
+	const assignPendingClassifyingTranscript = backchannelSetup.assign({
+		pendingClassifyingTranscript: ({ context, event }) =>
+			event.type === 'caller_turn_event' && (event.event.type === 'update' || event.event.type === 'eager_turn')
+				? event.event.transcript
+				: context.pendingClassifyingTranscript,
+	})
+
+	const promotePendingClassifyingTranscript = backchannelSetup.assign({
+		classifyingTranscript: ({ context }) => context.pendingClassifyingTranscript,
+		pendingClassifyingTranscript: '',
+	})
+
+	const clearPendingClassifyingTranscript = backchannelSetup.assign({
+		pendingClassifyingTranscript: '',
+	})
+
 	const resetSpeech = backchannelSetup.assign({
 		speechStartedAt: 0,
 		lastTranscript: '',
 		lastEotConfidence: 0,
 		classifyingTranscript: '',
+		pendingClassifyingTranscript: '',
 	})
 
 	const applyClassifierResult = backchannelSetup.enqueueActions(({ context, event, enqueue }) => {
@@ -175,6 +203,7 @@ export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: Ba
 			lastTranscript: '',
 			lastEotConfidence: 0,
 			classifyingTranscript: '',
+			pendingClassifyingTranscript: '',
 		},
 		on: {
 			turn_outcome: [
@@ -227,21 +256,50 @@ export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: Ba
 					input: ({ context }) => ({ transcript: context.classifyingTranscript }),
 					onDone: [
 						{
+							guard: 'shouldClassifyPendingTranscript',
+							target: 'classifying',
+							reenter: true,
+							actions: promotePendingClassifyingTranscript,
+						},
+						{
+							guard: 'hasPendingClassifyingTranscript',
+							target: 'listening',
+							actions: clearPendingClassifyingTranscript,
+						},
+						{
 							guard: 'shouldFireClassifierToken',
 							target: 'refractory',
 							actions: applyClassifierResult,
 						},
 						{
 							target: 'listening',
+							actions: clearPendingClassifyingTranscript,
 						},
 					],
-					onError: {
-						target: 'listening',
-						actions: ({ event }) => {
-							classifierFailures++
-							log.warn({ err: (event as ErrorActorEvent<unknown, string>).error }, 'backchannel classifier failed')
+					onError: [
+						{
+							guard: 'shouldClassifyPendingTranscript',
+							target: 'classifying',
+							reenter: true,
+							actions: [
+								({ event }) => {
+									classifierFailures++
+									log.warn({ err: (event as ErrorActorEvent<unknown, string>).error }, 'backchannel classifier failed')
+								},
+								promotePendingClassifyingTranscript,
+							],
 						},
-					},
+						{
+							target: 'listening',
+							actions: [
+								({ event }) => {
+									classifierFailures++
+									log.warn({ err: (event as ErrorActorEvent<unknown, string>).error }, 'backchannel classifier failed')
+								},
+								clearPendingClassifyingTranscript,
+							],
+						},
+					],
 				},
 				on: {
 					caller_turn_event: [
@@ -252,7 +310,7 @@ export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: Ba
 						},
 						{
 							guard: 'isCallerTurnUpdate',
-							actions: assignUpdate,
+							actions: [assignUpdate, assignPendingClassifyingTranscript],
 						},
 					],
 				},

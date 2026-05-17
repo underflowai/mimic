@@ -1,10 +1,15 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
 
-import { loadPrompt, renderPromptTemplate } from '@mimic/engine/src/prompts.js'
-import { formatUserDateTime } from '@mimic/engine/src/intelligence/control-block-utils.js'
-import type { CallOrchestratorConfig, TurnControlBlockContext } from '@mimic/engine/src/orchestrator.js'
-import { arloPersona, auroraPersona } from '@mimic/engine/src/shared/voice-persona.js'
+import {
+	arloPersona,
+	auroraPersona,
+	formatUserDateTime,
+	loadPrompt,
+	renderPromptTemplate,
+	type CallOrchestratorConfig,
+	type TurnControlBlockContext,
+} from '@mimic/engine'
 
 export type GoalVoice = 'female' | 'male'
 
@@ -65,7 +70,7 @@ let cachedCompilerPrompt: string | null = null
 
 async function getCompilerPrompt() {
 	if (!cachedCompilerPrompt) cachedCompilerPrompt = await loadPrompt('instructions/goal-compiler')
-	return cachedCompilerPrompt
+	return cachedCompilerPrompt!
 }
 
 function defaultAgentName(voice: GoalVoice) {

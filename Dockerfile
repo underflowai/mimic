@@ -12,11 +12,10 @@ COPY packages/sdk/package.json packages/sdk/
 RUN pnpm install --frozen-lockfile
 
 COPY packages/ packages/
+RUN pnpm build
 
 EXPOSE 3000
 ENV PORT=3000
 
-# Default: API server. Override CMD for the worker.
-# API:    docker run mimic
-# Worker: docker run mimic pnpm --filter @mimic/server worker
-CMD ["pnpm", "--filter", "@mimic/server", "start"]
+# API server (includes in-process call worker by default)
+CMD ["node", "packages/server/build/serve.js"]

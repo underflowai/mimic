@@ -55,6 +55,7 @@ interface ClassifySpec {
 interface HarnessOptions {
 	tools?: ToolDefinition[]
 	classifyResults: ClassifySpec[]
+	classifyDelaysMs?: number[]
 	executionResults?: ToolTransportResult[]
 	transportDelay?: number
 	executionTimeoutMs?: number
@@ -89,10 +90,11 @@ function createTestHarness(opts: HarnessOptions) {
 	const testSupervisorMachine = toolSupervisor.provide({
 		actors: {
 			classifyAndExecute: fromCallback<ClassifyResultEvent, ClassifyAndExecuteInput>(({ sendBack, input }) => {
-				const spec = opts.classifyResults[classifyIdx]
+				const idx = classifyIdx
+				const spec = opts.classifyResults[idx]
 				classifyIdx++
 				if (!spec) return
-				sendBack({
+				const message: ClassifyResultEvent = {
 					type: 'CLASSIFY_RESULT',
 					classifyId: input.classifyId,
 					transcript: input.transcript,
@@ -104,7 +106,14 @@ function createTestHarness(opts: HarnessOptions) {
 					toolArgs: spec.toolArgs,
 					missingArgs: spec.missingArgs,
 					directorNote: spec.directorNote ?? null,
-				})
+				}
+				const delayMs = opts.classifyDelaysMs?.[idx] ?? 0
+				if (delayMs <= 0) {
+					sendBack(message)
+					return
+				}
+				const timer = setTimeout(() => sendBack(message), delayMs)
+				return () => clearTimeout(timer)
 			}),
 			toolInvocation: testInvocationMachine,
 		},
@@ -289,6 +298,62 @@ describe('tool-supervisor-machine', () => {
 		assert.equal(active.length, 1)
 		assert.equal(invState(active[0]!), 'ready')
 		assert.equal(invCtx(active[0]!).result, 'Friday is free')
+
+		actor.stop()
+	})
+
+	it('awaiting_args classification is latest-wins per task', async () => {
+		const { actor, getSupSnapshot } = createTestHarness({
+			classifyResults: [
+				{
+					needsTool: true,
+					query: 'check my calendar',
+					toolName: 'checkCalendar',
+					toolArgs: {},
+					missingArgs: ['date'],
+				},
+				{
+					needsTool: true,
+					query: 'for friday',
+					toolName: 'checkCalendar',
+					toolArgs: { date: '2026-05-15' },
+					missingArgs: [],
+				},
+				{
+					needsTool: true,
+					query: 'actually saturday',
+					toolName: 'checkCalendar',
+					toolArgs: { date: '2026-05-16' },
+					missingArgs: [],
+				},
+			],
+			classifyDelaysMs: [0, 120, 20],
+			executionResults: [{ result: 'Saturday is free' }],
+		})
+
+		actor.send({ type: 'DETECT_INTENT', transcript: 'check my calendar', turnId: 1 })
+		await delay(30)
+		let refs = getInvocationRefs(getSupSnapshot().children)
+		assert.equal(refs.length, 1)
+		assert.equal(invState(refs[0]!), 'awaiting_args')
+
+		actor.send({ type: 'DETECT_INTENT', transcript: 'for friday', turnId: 2 })
+		await delay(5)
+		actor.send({ type: 'DETECT_INTENT', transcript: 'actually saturday', turnId: 3 })
+		await delay(80)
+
+		refs = getInvocationRefs(getSupSnapshot().children)
+		const active = refs.filter((r) => invState(r) !== 'superseded' && invState(r) !== 'failed')
+		assert.equal(active.length, 1)
+		assert.equal(invState(active[0]!), 'ready')
+		assert.equal(invCtx(active[0]!).query, 'actually saturday')
+		assert.deepEqual(invCtx(active[0]!).toolArgs, { date: '2026-05-16' })
+		assert.equal(invCtx(active[0]!).result, 'Saturday is free')
+
+		// Ensure late stale classifier result cannot overwrite the settled latest result.
+		await delay(90)
+		assert.equal(invCtx(active[0]!).query, 'actually saturday')
+		assert.deepEqual(invCtx(active[0]!).toolArgs, { date: '2026-05-16' })
 
 		actor.stop()
 	})

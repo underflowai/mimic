@@ -15,5 +15,5 @@
 		"rootDir": "src",
 		"composite": true
 	},
-	"include": ["src", "test"]
+	"include": ["src"]
 }

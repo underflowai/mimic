@@ -12,16 +12,17 @@ import {
 } from '@livekit/rtc-node'
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk'
 
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import type { CallMetrics, CallOrchestrator, CallTurn } from '@mimic/engine'
-import { createLiveKitTransport } from '@mimic/engine/src/audio/streams/livekit-sink.js'
-import type { AudioTransport } from '@mimic/engine/src/audio/streams/types.js'
+import { type CallMetrics, type CallOrchestrator, type CallTurn } from '@mimic/engine'
+import { createLiveKitTransport, type AudioTransport } from '@mimic/engine/livekit-transport'
 import { createAmbienceTrack } from './ambience-track.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const AMBIENCE_FILE = join(__dirname, 'audio/office-ambience.mp3')
+const HAS_AMBIENCE_FILE = existsSync(AMBIENCE_FILE)
 
 const TTS_SAMPLE_RATE = 48000
 const ASR_SAMPLE_RATE = 16000
@@ -166,26 +167,33 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 	let sessionCompleted = false
 	let sessionTimeout: ReturnType<typeof setTimeout> | undefined
 
-	const { promise: sessionComplete, resolve: resolveSession } = Promise.withResolvers<void>()
+	const { promise: sessionComplete, resolve: resolveSession, reject: rejectSession } = Promise.withResolvers<void>()
 
 	async function completeSession() {
 		clearTimeout(sessionTimeout)
 
 		let result: OrchestratorCloseResult | null = null
+		let completionError: Error | null = null
 		if (orchestrator) {
-			result = (await orchestrator.close()) as OrchestratorCloseResult
+			try {
+				result = (await orchestrator.close()) as OrchestratorCloseResult
+			} catch (err) {
+				completionError = err instanceof Error ? err : new Error(String(err))
+				console.error(`${prefix} orchestrator.close failed:`, err)
+			}
 		}
 
 		try {
 			await onSessionEnd(result)
 		} catch (err) {
+			if (!completionError) completionError = err instanceof Error ? err : new Error(String(err))
 			console.error(`${prefix} onSessionEnd failed:`, err)
 		}
 
 		ambienceStop?.()
-		if (agentTrack) await agentTrack.close()
-		if (audioSource) await audioSource.close()
-		await room.disconnect()
+		if (agentTrack) await agentTrack.close().catch((err) => console.error(`${prefix} agentTrack.close failed:`, err))
+		if (audioSource) await audioSource.close().catch((err) => console.error(`${prefix} audioSource.close failed:`, err))
+		await room.disconnect().catch((err) => console.error(`${prefix} room.disconnect failed:`, err))
 
 		try {
 			const roomService = new RoomServiceClient(livekitUrl, livekitApiKey, livekitApiSecret)
@@ -194,6 +202,10 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			console.error(`${prefix} failed to delete room ${roomName}:`, err)
 		}
 
+		if (completionError) {
+			rejectSession(completionError)
+			return
+		}
 		resolveSession()
 	}
 
@@ -228,7 +240,7 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 		}
 
 		const ambienceConfig = agentConfig.ambience ?? { enabled: true, gain: 0.05 }
-		if (ambienceConfig.enabled) {
+		if (ambienceConfig.enabled && HAS_AMBIENCE_FILE) {
 			try {
 				const ambience = createAmbienceTrack({ filePath: AMBIENCE_FILE, gain: ambienceConfig.gain ?? 0.05 })
 				await room.localParticipant!.publishTrack(ambience.track, new TrackPublishOptions())
@@ -241,6 +253,8 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			} catch (err) {
 				console.error(`${prefix} failed to start ambience track:`, err)
 			}
+		} else if (ambienceConfig.enabled && !HAS_AMBIENCE_FILE) {
+			console.warn(`${prefix} ambience enabled but file missing at ${AMBIENCE_FILE}`)
 		}
 
 		await onReady?.()

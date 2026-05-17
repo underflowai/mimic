@@ -16,8 +16,10 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
+import { timingSafeEqual } from 'node:crypto'
 
 const KEY_PREFIX = 'mk_live_'
+const KEY_PREFIX_LENGTH = 16
 
 function hashKey(key: string) {
 	return createHash('sha256').update(key).digest('hex')
@@ -38,13 +40,19 @@ export function generateApiKey(): GeneratedKey {
 	return {
 		rawKey,
 		keyHash: hashKey(rawKey),
-		keyPrefix: rawKey.slice(0, 16),
+		keyPrefix: keyPrefixFor(rawKey),
 	}
+}
+
+export function keyPrefixFor(rawKey: string) {
+	return rawKey.slice(0, KEY_PREFIX_LENGTH)
 }
 
 /**
  * Verify a raw API key against a stored hash.
  */
 export function verifyApiKey(rawKey: string, storedHash: string): boolean {
-	return hashKey(rawKey) === storedHash
+	const computed = hashKey(rawKey)
+	if (computed.length !== storedHash.length) return false
+	return timingSafeEqual(Buffer.from(computed), Buffer.from(storedHash))
 }

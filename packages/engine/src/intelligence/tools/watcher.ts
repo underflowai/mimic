@@ -9,7 +9,9 @@
  */
 
 import OpenAI from 'openai'
+import { z } from 'zod'
 
+import { config } from '#engine/config.js'
 import { modelConfig } from '#engine/models.js'
 import { loadPrompt } from '#engine/prompts.js'
 import { createLogger } from '#engine/logger.js'
@@ -27,6 +29,15 @@ export interface WatcherDecision {
 	directorNote: string | null
 	reasoning: string
 }
+
+const watcherDecisionSchema = z.object({
+	decision: z.enum(['execute', 'not_ready', 'none']),
+	tool: z.string().nullable().optional().default(null),
+	args: z.record(z.unknown()).nullable().optional().default(null),
+	missing: z.array(z.string()).nullable().optional().default(null),
+	directorNote: z.string().nullable().optional().default(null),
+	reasoning: z.string().optional().default(''),
+})
 
 export interface ToolWatcherInput {
 	transcript: string
@@ -83,7 +94,7 @@ let openaiClient: OpenAI | null = null
 function getClient(client?: unknown) {
 	if (client && typeof client === 'object' && 'responses' in client) return client as OpenAI
 	if (!openaiClient) {
-		openaiClient = new OpenAI()
+		openaiClient = new OpenAI({ apiKey: config.mimic.openai.apiKey })
 	}
 	return openaiClient
 }
@@ -110,23 +121,36 @@ function buildArgsSchemaForTools(tools: ToolDefinition[]) {
 		}
 	}
 	const allProps: Record<string, unknown> = {}
+	const duplicateKeys = new Set<string>()
 	for (const tool of tools) {
 		const params = tool.parameters
 		if (typeof params === 'object' && params !== null && 'properties' in params) {
 			for (const [key, schema] of Object.entries((params as { properties: Record<string, unknown> }).properties)) {
-				if (!(key in allProps)) {
-					allProps[key] =
-						typeof schema === 'object' && schema !== null
-							? { ...(schema as object), type: ['string', 'null'] }
-							: { type: ['string', 'null'] }
+				if (key in allProps) {
+					duplicateKeys.add(key)
+					continue
 				}
+				allProps[key] =
+					typeof schema === 'object' && schema !== null
+						? { ...(schema as object), type: ['string', 'null'] }
+						: { type: ['string', 'null'] }
 			}
+		}
+	}
+	if (duplicateKeys.size > 0) {
+		log.warn(
+			{ duplicateKeys: Array.from(duplicateKeys.values()) },
+			'tool watcher arg names collide across tools; using permissive args schema',
+		)
+		return {
+			type: 'object' as const,
+			additionalProperties: { type: ['string', 'number', 'boolean', 'null'] as const },
 		}
 	}
 	return {
 		type: 'object' as const,
 		properties: allProps,
-		required: Object.keys(allProps),
+		required: [],
 		additionalProperties: false as const,
 	}
 }
@@ -208,7 +232,13 @@ export async function watchForToolAction(_client: unknown, input: ToolWatcherInp
 			return FALLBACK
 		}
 
-		const parsed = JSON.parse(content) as WatcherDecision
+		const parsedRaw = JSON.parse(content)
+		const parsedResult = watcherDecisionSchema.safeParse(parsedRaw)
+		if (!parsedResult.success) {
+			log.warn({ issues: parsedResult.error.issues }, 'watcher returned invalid schema')
+			return FALLBACK
+		}
+		const parsed = parsedResult.data
 		log.info(
 			{ decision: parsed.decision, tool: parsed.tool, directorNote: parsed.directorNote, reasoning: parsed.reasoning },
 			'watcher decision',

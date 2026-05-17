@@ -51,6 +51,13 @@ const worker = new Worker<CallJobData>(
 
 worker.on('failed', (job, err) => {
 	logger.error({ callId: job?.data?.callId, jobId: job?.id, err: err.message }, 'call job failed')
+	if (job?.data?.callId) {
+		void getDb()
+			.update(apiCalls)
+			.set({ status: 'failed', errorMessage: err.message, updatedAt: new Date() })
+			.where(eq(apiCalls.id, job.data.callId))
+			.catch(() => {})
+	}
 })
 
 worker.on('completed', (job) => {

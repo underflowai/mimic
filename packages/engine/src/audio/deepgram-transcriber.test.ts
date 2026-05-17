@@ -7,6 +7,8 @@ import { AutoOpenMockSocket } from '#test/support/mock-websocket.js'
 import { waitForCondition } from '#test/support/wait-for-condition.js'
 import { createDeepgramTranscriber } from './deepgram-transcriber.js'
 
+process.env.DEEPGRAM_API_KEY ??= 'test-deepgram-key'
+
 // ---------------------------------------------------------------------------
 // Unit tests (mock WebSocket — no network)
 // ---------------------------------------------------------------------------

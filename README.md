@@ -187,7 +187,7 @@ call.cancel()
 
 ### Prompt caching
 
-Same `goal + context + tools + data keys` → instant. The LLM compiles the prompt once (~30s) and reuses it for every subsequent call with the same config. Different recipients, different data values, different phone numbers all reuse the cached prompt.
+Same `goal + context + tools + data + ambience` reuses a compiled prompt. If any of those inputs change, Mimic recompiles.
 
 ## Self-hosting
 
@@ -208,7 +208,10 @@ LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
 LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_...
+REDIS_URL=redis://localhost:6379
 DATABASE_URL=postgresql://...
+# Optional (set to 1 when running a separate worker process)
+# MIMIC_DISABLE_IN_PROCESS_WORKER=1
 ```
 
 ### Run locally
@@ -216,7 +219,7 @@ DATABASE_URL=postgresql://...
 ```bash
 pnpm install
 cd packages/server
-npx drizzle-kit push
+pnpm db:migrate
 npx tsx src/scripts/create-key.ts
 pnpm start
 ```
@@ -230,6 +233,11 @@ railway up
 # Docker
 docker build -t mimic .
 docker run -p 3000:3000 --env-file .env mimic
+
+# Optional dedicated worker topology:
+# 1) set MIMIC_DISABLE_IN_PROCESS_WORKER=1 on the API container
+# 2) run a separate worker container
+docker run --env-file .env mimic pnpm --filter @mimic/server worker
 ```
 
 ## Engine

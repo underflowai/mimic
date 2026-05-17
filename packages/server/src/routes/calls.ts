@@ -1,17 +1,38 @@
 import { createHash } from 'node:crypto'
 
 import { Hono } from 'hono'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, or, sql } from 'drizzle-orm'
 
+import { publishCallEvent } from '../call-runner.js'
 import { getDb } from '../db/index.js'
-import { apiAgents, apiCalls } from '../db/schema.js'
+import { apiAgents, apiCalls, type ApiCallRow } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
-import { enqueueCall } from '../jobs/queue.js'
-import { incrementActiveCalls } from '../middleware/rate-limit.js'
+import { cancelQueuedCall, enqueueCall } from '../jobs/queue.js'
+import { MAX_CONCURRENT_CALLS } from '../middleware/rate-limit.js'
 
-function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean }): string {
-	const dataKeys = config.data ? Object.keys(config.data).sort() : []
-	const payload = JSON.stringify({ apiKeyId, goal: config.goal, context: config.context, dataKeys, tools: config.tools, results: config.results, aiDisclosure: config.aiDisclosure })
+function stableStringify(value: unknown): string {
+	if (value === null || typeof value !== 'object') {
+		return JSON.stringify(value)
+	}
+	if (Array.isArray(value)) {
+		return `[${value.map((item) => stableStringify(item)).join(',')}]`
+	}
+	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+	return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`
+}
+
+function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean; ambience?: boolean }): string {
+	const payload = stableStringify({
+		apiKeyId,
+		goal: config.goal,
+		voice: config.voice,
+		context: config.context ?? '',
+		data: config.data ?? null,
+		tools: config.tools,
+		results: config.results,
+		aiDisclosure: config.aiDisclosure,
+		ambience: config.ambience,
+	})
 	return createHash('sha256').update(payload).digest('hex')
 }
 
@@ -19,7 +40,7 @@ const calls = new Hono()
 
 calls.post('/', async (c) => {
 	const apiKey = c.get('apiKey')
-	const body = await c.req.json<{
+	let body: {
 		to: string
 		goal: string
 		agentId?: string
@@ -33,7 +54,12 @@ calls.post('/', async (c) => {
 		extract?: Record<string, unknown>
 		ambience?: boolean
 		idempotencyKey?: string
-	}>()
+	}
+	try {
+		body = await c.req.json<typeof body>()
+	} catch {
+		return c.json({ error: 'Invalid JSON body' }, 400)
+	}
 
 	if (!body.to?.trim()) return c.json({ error: 'to (phone number) is required' }, 400)
 
@@ -78,12 +104,17 @@ calls.post('/', async (c) => {
 			tools,
 			results,
 			aiDisclosure: body.aiDisclosure,
+			ambience: body.ambience,
 		})
 
 		const [cached] = await db
 			.select()
 			.from(apiAgents)
-			.where(and(eq(apiAgents.apiKeyId, apiKey.id), eq(apiAgents.configHash, configHash)))
+			.where(and(
+				eq(apiAgents.apiKeyId, apiKey.id),
+				eq(apiAgents.configHash, configHash),
+				sql`${apiAgents.systemPrompt} <> ''`,
+			))
 			.limit(1)
 
 		if (cached) {
@@ -116,19 +147,60 @@ calls.post('/', async (c) => {
 	if (body.recipient?.lastName) callContext.lastName = body.recipient.lastName
 	if (body.recipient?.email) callContext.email = body.recipient.email
 
-	const [call] = await db
-		.insert(apiCalls)
-		.values({
-			apiKeyId: apiKey.id,
-			agentId,
-			toPhone: body.to,
-			callContext,
-			idempotencyKey: body.idempotencyKey ?? null,
-		})
-		.returning()
+	const [concurrencyRow] = await db
+		.select({ activeCalls: sql<number>`count(*)::int` })
+		.from(apiCalls)
+		.where(and(
+			eq(apiCalls.apiKeyId, apiKey.id),
+			or(eq(apiCalls.status, 'pending'), eq(apiCalls.status, 'in_progress')),
+		))
 
-	if (!incrementActiveCalls(apiKey.id)) {
+	if ((concurrencyRow?.activeCalls ?? 0) >= MAX_CONCURRENT_CALLS) {
 		return c.json({ error: 'Concurrent call limit reached. Wait for active calls to complete.' }, 429)
+	}
+
+	let call: ApiCallRow | null = null
+	if (body.idempotencyKey) {
+		const [inserted] = await db
+			.insert(apiCalls)
+			.values({
+				apiKeyId: apiKey.id,
+				agentId,
+				toPhone: body.to,
+				callContext,
+				idempotencyKey: body.idempotencyKey,
+			})
+			.onConflictDoNothing({ target: [apiCalls.apiKeyId, apiCalls.idempotencyKey] })
+			.returning()
+		if (inserted) {
+			call = inserted
+		} else {
+			const [existing] = await db
+				.select()
+				.from(apiCalls)
+				.where(and(eq(apiCalls.apiKeyId, apiKey.id), eq(apiCalls.idempotencyKey, body.idempotencyKey)))
+				.limit(1)
+			if (!existing) {
+				return c.json({ error: 'Failed to create idempotent call' }, 500)
+			}
+			return c.json({ id: existing.id, status: existing.status }, 200)
+		}
+	} else {
+		const [inserted] = await db
+			.insert(apiCalls)
+			.values({
+				apiKeyId: apiKey.id,
+				agentId,
+				toPhone: body.to,
+				callContext,
+				idempotencyKey: null,
+			})
+			.returning()
+		call = inserted
+	}
+
+	if (!call) {
+		return c.json({ error: 'Failed to create call' }, 500)
 	}
 
 	// Compile goal in background if needed, then enqueue the call job
@@ -157,6 +229,8 @@ calls.post('/', async (c) => {
 		} catch (err) {
 			const errorMessage = err instanceof Error ? err.message : String(err)
 			await db.update(apiCalls).set({ status: 'failed', errorMessage }).where(eq(apiCalls.id, call.id)).catch(() => {})
+			publishCallEvent(call.id, { type: 'call_status', status: 'failed' })
+			publishCallEvent(call.id, { type: 'error', message: errorMessage })
 		}
 	})()
 
@@ -186,6 +260,42 @@ calls.get('/:id', async (c) => {
 		errorMessage: call.errorMessage,
 		recordingPath: call.recordingPath,
 	})
+})
+
+calls.delete('/:id', async (c) => {
+	const apiKey = c.get('apiKey')
+	const callId = c.req.param('id')
+	const db = getDb()
+
+	const [call] = await db
+		.select()
+		.from(apiCalls)
+		.where(and(eq(apiCalls.id, callId), eq(apiCalls.apiKeyId, apiKey.id)))
+		.limit(1)
+
+	if (!call) return c.json({ error: 'Call not found' }, 404)
+
+	if (call.status === 'completed' || call.status === 'failed' || call.status === 'cancelled') {
+		return c.json({ id: call.id, status: call.status })
+	}
+
+	await db
+		.update(apiCalls)
+		.set({
+			status: 'cancelled',
+			errorMessage: 'Call cancelled by client',
+			updatedAt: new Date(),
+		})
+		.where(and(eq(apiCalls.id, callId), eq(apiCalls.apiKeyId, apiKey.id)))
+
+	if (call.status === 'pending') {
+		await cancelQueuedCall(callId).catch(() => {})
+	}
+
+	publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })
+	publishCallEvent(callId, { type: 'error', message: 'Call cancelled by client' })
+
+	return c.json({ id: call.id, status: 'cancelled' })
 })
 
 export { calls }

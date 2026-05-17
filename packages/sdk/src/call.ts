@@ -25,16 +25,16 @@ function toCallResult<T extends Record<string, unknown>>(call: ApiCall): CallRes
 	if (call.status === 'failed') {
 		return { status: 'failed', id: call.id, error: call.errorMessage ?? 'Call failed' }
 	}
+	if (call.status === 'cancelled') {
+		return { status: 'failed', id: call.id, error: call.errorMessage ?? 'Call cancelled' }
+	}
 	return {
 		status: 'completed',
 		id: call.id,
 		goalAchieved: call.goalAchieved ?? false,
 		goalAchievedReason: call.goalAchievedReason ?? '',
 		data: (call.result ?? {}) as T,
-		transcript: (call.transcript ?? []).map((e) => ({
-			role: e.role as 'agent' | 'caller',
-			content: e.content,
-		})),
+		transcript: call.transcript ?? [],
 		duration: call.duration ?? 0,
 	}
 }
@@ -163,6 +163,9 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 	cancel() {
 		if (this.done) return
 		this.cancelled = true
+		if (this.callId) {
+			void this.client.cancelCall(this.callId).catch(() => {})
+		}
 		this.activeWs?.close()
 		this.pushEvent({ type: 'error', message: 'Call cancelled' })
 		this.complete()
@@ -199,7 +202,29 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 
 			this.callId = call.id
 
-			if (this.cancelled) return
+			if (this.cancelled) {
+				void this.client.cancelCall(call.id).catch(() => {})
+				return
+			}
+
+			if (call.status === 'completed' || call.status === 'failed' || call.status === 'cancelled') {
+				const fullCall = await this.fetchFinalCall(call.id)
+				const result = toCallResult<T>(fullCall)
+				if (result.status === 'completed') {
+					this.pushEvent({
+						type: 'done',
+						goalAchieved: result.goalAchieved,
+						goalAchievedReason: result.goalAchievedReason,
+					})
+					this.complete()
+					this.settle('resolve', result)
+				} else {
+					this.pushEvent({ type: 'error', message: result.error })
+					this.complete()
+					this.settle('reject', new CallFailedError(result.error, call.id, fullCall))
+				}
+				return
+			}
 
 			if (this.WebSocketImpl) {
 				this.connectStream(call.id)
@@ -219,10 +244,19 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 
 	private connectStream(callId: string) {
 		const url = this.client.streamUrl(callId)
+		const authPayload = this.client.streamAuthPayload()
 		const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 		const ws = new this.WebSocketImpl!(url)
 		this.activeWs = ws
 		let fallbackTriggered = false
+
+		ws.addEventListener('open', () => {
+			try {
+				ws.send(authPayload)
+			} catch {
+				tryPollFallback()
+			}
+		})
 
 		this.streamTimeout = setTimeout(() => {
 			ws.close()
@@ -231,6 +265,7 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 			this.complete()
 			this.settle('reject', err)
 		}, timeoutMs)
+		this.streamTimeout.unref?.()
 
 		const tryPollFallback = () => {
 			if (this.streamTimeout) clearTimeout(this.streamTimeout)
@@ -285,18 +320,12 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 				this.complete()
 
 				try {
-					const fullCall = await this.client.getCall(this.callId!)
+					const fullCall = await this.fetchFinalCall(this.callId!)
 					this.settle('resolve', toCallResult<T>(fullCall))
-				} catch {
-					this.settle('resolve', {
-						status: 'completed',
-						id: this.callId!,
-						goalAchieved: msg.goalAchieved,
-						goalAchievedReason: msg.goalAchievedReason,
-						data: {} as T,
-						transcript: [],
-						duration: 0,
-					})
+				} catch (err) {
+					const error = err instanceof Error ? err : new MimicError('Failed to fetch final call result')
+					this.pushEvent({ type: 'error', message: error.message })
+					this.settle('reject', error)
 				}
 				break
 			}
@@ -306,10 +335,21 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 				break
 
 			case 'call_status':
-				if (msg.status === 'failed') {
-					this.pushEvent({ type: 'error', message: 'Call failed' })
+				if (msg.status === 'failed' || msg.status === 'cancelled') {
+					const message = msg.status === 'cancelled' ? 'Call cancelled' : 'Call failed'
+					this.pushEvent({ type: 'error', message })
 					this.complete()
-					this.settle('reject', new CallFailedError('Call failed', this.callId!, msg))
+					this.settle('reject', new CallFailedError(message, this.callId!, msg))
+				} else if (msg.status === 'completed' && !this.done) {
+					this.complete()
+					try {
+						const fullCall = await this.fetchFinalCall(this.callId!)
+						this.settle('resolve', toCallResult<T>(fullCall))
+					} catch (err) {
+						const error = err instanceof Error ? err : new MimicError('Failed to fetch completed call result')
+						this.pushEvent({ type: 'error', message: error.message })
+						this.settle('reject', error)
+					}
 				}
 				break
 		}
@@ -374,6 +414,13 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 					this.pushEvent({ type: 'error', message: errMsg })
 					this.complete()
 					this.settle('reject', new CallFailedError(errMsg, callId, call))
+					return
+				}
+
+				if (call.status === 'cancelled') {
+					this.pushEvent({ type: 'error', message: call.errorMessage ?? 'Call cancelled' })
+					this.complete()
+					this.settle('reject', new CallFailedError(call.errorMessage ?? 'Call cancelled', callId, call))
 					return
 				}
 			} catch {
@@ -441,5 +488,24 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 		return new Promise((resolve) => {
 			this.waiters.push(resolve)
 		})
+	}
+
+	private async fetchFinalCall(callId: string): Promise<ApiCall> {
+		let lastError: Error | null = null
+		const retries = 8
+
+		for (let attempt = 0; attempt < retries; attempt++) {
+			try {
+				const call = await this.client.getCall(callId)
+				if (call.status !== 'pending' && call.status !== 'in_progress') {
+					return call
+				}
+			} catch (err) {
+				lastError = err instanceof Error ? err : new MimicError(String(err))
+			}
+			await sleep(250)
+		}
+
+		throw lastError ?? new MimicError('Final call result was not available in time')
 	}
 }

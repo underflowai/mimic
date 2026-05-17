@@ -55,6 +55,8 @@ export interface ToolSupervisorContext {
 	completedResults: CompletedToolResult[]
 	pendingResults: CompletedToolResult[]
 	activeDirectorNote: string | null
+	activeClassifyByTask: Record<string, string>
+	classifyAttemptByTask: Record<string, number>
 }
 
 export interface ToolSupervisorInput {
@@ -187,6 +189,20 @@ function executionSignature(toolName: string, args: Record<string, unknown>) {
 	return `${toolName}:${stableSerialize(args)}`
 }
 
+function taskKey(taskId: number) {
+	return String(taskId)
+}
+
+function setTaskMapEntry<T>(map: Record<string, T>, taskId: number, value: T): Record<string, T> {
+	return { ...map, [taskKey(taskId)]: value }
+}
+
+function removeTaskMapEntry<T>(map: Record<string, T>, taskId: number): Record<string, T> {
+	const next = { ...map }
+	delete next[taskKey(taskId)]
+	return next
+}
+
 function supersedeOverflowExecuting(children: Record<string, unknown>, currentTaskId: number) {
 	const executing = getInvocationRefs(children)
 		.filter((ref) => {
@@ -253,6 +269,8 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 		completedResults: [],
 		pendingResults: [],
 		activeDirectorNote: null,
+		activeClassifyByTask: {},
+		classifyAttemptByTask: {},
 	}),
 	states: {
 		active: {
@@ -265,8 +283,17 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 						const awaitingRef = findOldestAwaitingArgsInvocation(children)
 						if (awaitingRef) {
 							const awaiting = getInvocationContext(awaitingRef)
-							const classifyId = `classify-${event.turnId}-${awaiting.taskId}`
+							const taskId = awaiting.taskId
+							const taskClassifyKey = taskKey(taskId)
+							const nextAttempt = (context.classifyAttemptByTask[taskClassifyKey] ?? 0) + 1
+							const classifyId = `classify-${taskId}-${nextAttempt}`
+							const priorClassifyId = context.activeClassifyByTask[taskClassifyKey]
 							log.info({ taskId: awaiting.taskId, toolName: awaiting.toolName }, 'routing to awaiting invocation')
+							if (priorClassifyId) enqueue.stopChild(priorClassifyId)
+							enqueue.assign({
+								classifyAttemptByTask: setTaskMapEntry(context.classifyAttemptByTask, taskId, nextAttempt),
+								activeClassifyByTask: setTaskMapEntry(context.activeClassifyByTask, taskId, classifyId),
+							})
 							enqueue.spawnChild('classifyAndExecute', {
 								id: classifyId,
 								input: {
@@ -275,7 +302,7 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 									existingToolName: awaiting.toolName,
 									transcript: event.transcript,
 									turnId: event.turnId,
-									taskId: awaiting.taskId,
+									taskId,
 									recentTurns: event.recentTurns,
 								},
 							})
@@ -283,8 +310,13 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 						}
 
 						const taskId = context.nextTaskId
-						const classifyId = `classify-${taskId}`
+						const nextAttempt = 1
+						const classifyId = `classify-${taskId}-${nextAttempt}`
 						enqueue.assign({ nextTaskId: context.nextTaskId + 1 })
+						enqueue.assign({
+							classifyAttemptByTask: setTaskMapEntry(context.classifyAttemptByTask, taskId, nextAttempt),
+							activeClassifyByTask: setTaskMapEntry(context.activeClassifyByTask, taskId, classifyId),
+						})
 
 						enqueue.spawnChild('toolInvocation', {
 							id: `tool-${taskId}`,
@@ -313,8 +345,17 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 				CLASSIFY_RESULT: {
 					actions: toolSupervisorSetup.enqueueActions(({ context, event, enqueue, self }) => {
 						if (event.type !== 'CLASSIFY_RESULT') return
-						enqueue.assign({ activeDirectorNote: event.directorNote })
+						const taskClassifyKey = taskKey(event.taskId)
+						const activeClassifyId = context.activeClassifyByTask[taskClassifyKey]
 						enqueue.stopChild(event.classifyId)
+						if (activeClassifyId !== event.classifyId) {
+							// Stale classify result (superseded by newer transcript for this task).
+							return
+						}
+						enqueue.assign({
+							activeClassifyByTask: removeTaskMapEntry(context.activeClassifyByTask, event.taskId),
+						})
+						enqueue.assign({ activeDirectorNote: event.directorNote })
 						const ref = findInvocationByTaskId(self.getSnapshot().children, event.taskId)
 						if (!ref) {
 							log.error({ taskId: event.taskId }, 'CLASSIFY_RESULT for unknown invocation')
@@ -507,9 +548,12 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 				},
 
 				INVOCATION_FAILED: {
-					actions: toolSupervisorSetup.enqueueActions(({ event, enqueue }) => {
+					actions: toolSupervisorSetup.enqueueActions(({ context, event, enqueue }) => {
 						if (event.type !== 'INVOCATION_FAILED') return
 						enqueue.assign({ activeDirectorNote: null })
+						enqueue.assign({
+							activeClassifyByTask: removeTaskMapEntry(context.activeClassifyByTask, event.taskId),
+						})
 						enqueue.stopChild(`tool-${event.taskId}`)
 					}),
 				},
@@ -536,9 +580,12 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 				},
 
 				INVOCATION_SUPERSEDED: {
-					actions: toolSupervisorSetup.enqueueActions(({ event, enqueue }) => {
+					actions: toolSupervisorSetup.enqueueActions(({ context, event, enqueue }) => {
 						if (event.type !== 'INVOCATION_SUPERSEDED') return
 						enqueue.assign({ activeDirectorNote: null })
+						enqueue.assign({
+							activeClassifyByTask: removeTaskMapEntry(context.activeClassifyByTask, event.taskId),
+						})
 						enqueue.stopChild(`tool-${event.taskId}`)
 					}),
 				},
@@ -556,7 +603,13 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 								ref.send({ type: 'SUPERSEDE' })
 							}
 						}
-						enqueue.assign({ activeDirectorNote: null, pendingResults: [], executedSignatures: [] })
+						enqueue.assign({
+							activeDirectorNote: null,
+							pendingResults: [],
+							executedSignatures: [],
+							activeClassifyByTask: {},
+							classifyAttemptByTask: {},
+						})
 					}),
 				},
 			},

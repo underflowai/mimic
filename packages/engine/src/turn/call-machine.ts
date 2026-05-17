@@ -573,7 +573,7 @@ export const callMachine = callMachineSetup.createMachine({
 	}),
 	on: {
 		allocate_turn_id: { actions: callMachineSetup.assign({ nextTurnId: ({ context }) => context.nextTurnId + 1 }) },
-		close: { actions: callMachineSetup.assign({ isClosing: true }) },
+		close: { actions: ['cancelEager', callMachineSetup.assign({ isClosing: true })] },
 		cancel_eager_from_turn: { actions: 'cancelEager' },
 		eager_promotion_metrics: {
 			actions: {

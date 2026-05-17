@@ -43,10 +43,10 @@ const call = mimic.call<{ confirmed: boolean; notes: string }>({
 	to: '+15551234567',
 	goal: 'Confirm the appointment for tomorrow at 2pm with Dr. Smith',
 	tools: { checkCalendar, reschedule },
-	extract: {
-		confirmed: 'whether the appointment was confirmed',
-		notes: 'any notes from the conversation',
-	},
+	extract: z.object({
+		confirmed: z.boolean().describe('whether the appointment was confirmed'),
+		notes: z.string().describe('any notes from the conversation'),
+	}),
 })
 
 // ── Stream events ──────────────────────────────────────────────────────

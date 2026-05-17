@@ -379,7 +379,12 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 			log.info({ code, reason: reasonStr }, 'connection closed')
 			ws.removeEventListener('message', onMessage)
 			ws.removeEventListener('close', onClose)
-			if (socket === ws) socket = null
+			if (socket === ws) {
+				socket = null
+				// Drop any unsent coalesced caller audio. Reusing this data after
+				// reconnect can splice stale pre-drop audio into the new stream.
+				resetBufferedAudio()
+			}
 			resolveCloseWaiter()
 			settleConfigureFailure('Deepgram socket closed before configure ack')
 			if (!ctx().isClosing && code !== 1000) return attemptReconnect()
@@ -413,6 +418,8 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	}
 
 	function applyReconnectSuccess(ws: WebSocket) {
+		// Ensure reconnection starts with a clean coalescing buffer.
+		resetBufferedAudio()
 		socket = ws
 		lifecycle.send({ type: 'reconnect_succeeded' })
 		log.info('reconnected successfully')

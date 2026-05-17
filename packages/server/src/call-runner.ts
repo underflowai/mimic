@@ -8,9 +8,7 @@
 
 import { eq } from 'drizzle-orm'
 
-import { config } from '@mimic/engine/src/config.js'
-import { createCallOrchestrator } from '@mimic/engine/src/orchestrator.js'
-import type { AudioTransport } from '@mimic/engine/src/audio/streams/types.js'
+import { config, createCallOrchestrator, type AudioTransport } from '@mimic/engine'
 import { createVoiceAgent } from '@mimic/transport-livekit'
 
 import { getDb } from './db/index.js'
@@ -24,17 +22,17 @@ import OpenAI from 'openai'
 import { childLogger } from './logger.js'
 import { randomUUID } from 'node:crypto'
 import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
-import { decrementActiveCalls } from './middleware/rate-limit.js'
 
 type EventCallback = (event: Record<string, unknown>) => void
 type ToolCallbackFn = (toolName: string, toolArgs: Record<string, unknown>, callbackId: string) => Promise<{ result: string } | { error: string }>
 
 export interface ToolHandler {
+	registered: boolean
 	unregister: () => void
 }
 
 const activeCallSubscribers = new Map<string, Set<EventCallback>>()
-const activeToolHandlers = new Map<string, ToolCallbackFn>()
+const activeToolHandlers = new Map<string, { connectionId: string; handler: ToolCallbackFn }>()
 
 export function subscribeToCall(callId: string, callback: EventCallback): () => void {
 	let subs = activeCallSubscribers.get(callId)
@@ -49,10 +47,24 @@ export function subscribeToCall(callId: string, callback: EventCallback): () => 
 	}
 }
 
-export function registerToolHandler(callId: string, handler: ToolCallbackFn): ToolHandler {
-	activeToolHandlers.set(callId, handler)
+export function registerToolHandler(callId: string, handler: ToolCallbackFn, connectionId: string): ToolHandler {
+	const existing = activeToolHandlers.get(callId)
+	if (existing && existing.connectionId !== connectionId) {
+		return {
+			registered: false,
+			unregister: () => {},
+		}
+	}
+
+	activeToolHandlers.set(callId, { connectionId, handler })
 	return {
-		unregister: () => activeToolHandlers.delete(callId),
+		registered: true,
+		unregister: () => {
+			const current = activeToolHandlers.get(callId)
+			if (current?.connectionId === connectionId) {
+				activeToolHandlers.delete(callId)
+			}
+		},
 	}
 }
 
@@ -66,11 +78,15 @@ function broadcast(callId: string, event: Record<string, unknown>) {
 	}
 }
 
+export function publishCallEvent(callId: string, event: Record<string, unknown>) {
+	broadcast(callId, event)
+}
+
 async function executeToolViaWebSocket(callId: string, toolName: string, toolArgs: Record<string, unknown>): Promise<{ result: string } | { error: string }> {
-	const handler = activeToolHandlers.get(callId)
-	if (!handler) return { error: 'No SDK tool handler connected' }
+	const entry = activeToolHandlers.get(callId)
+	if (!entry) return { error: 'No SDK tool handler connected' }
 	const callbackId = randomUUID()
-	return handler(toolName, toolArgs, callbackId)
+	return entry.handler(toolName, toolArgs, callbackId)
 }
 
 function agentRowToConfig(row: ApiAgentRow): AgentConfig {
@@ -92,11 +108,27 @@ async function updateCall(callId: string, updates: Partial<ApiCallRow>) {
 	await db.update(apiCalls).set({ ...updates, updatedAt: new Date() }).where(eq(apiCalls.id, callId))
 }
 
+async function getCallStatus(callId: string): Promise<ApiCallRow['status'] | null> {
+	const db = getDb()
+	const [call] = await db
+		.select({ status: apiCalls.status })
+		.from(apiCalls)
+		.where(eq(apiCalls.id, callId))
+		.limit(1)
+	return call?.status ?? null
+}
+
 export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 	const callId = call.id
 	childLogger({ callId, toPhone: call.toPhone }).info('starting call')
 
 	try {
+		const currentStatus = await getCallStatus(callId)
+		if (currentStatus === 'cancelled') {
+			childLogger({ callId }).info('call already cancelled before worker started')
+			return
+		}
+
 		await updateCall(callId, { status: 'in_progress' })
 		broadcast(callId, { type: 'call_status', status: 'in_progress' })
 
@@ -187,8 +219,18 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 			connectServices: () => orchestratorRef!.connectServices(),
 			async onSessionEnd(result: { turns: Array<{ role: string; content: string }>; durationSeconds: number } | null) {
 				if (!result) return
+				const statusBeforeFinalize = await getCallStatus(callId)
+				if (statusBeforeFinalize === 'cancelled') {
+					childLogger({ callId }).info('skipping completion write because call was cancelled')
+					return
+				}
 
-				const transcript: TranscriptEntry[] = result.turns.map((turn) => ({
+				const transcript = result.turns.map((turn) => ({
+					role: turn.role === 'agent' ? 'agent' : 'caller',
+					content: turn.content,
+				}))
+
+				const extractionTranscript: TranscriptEntry[] = result.turns.map((turn) => ({
 					role: turn.role === 'agent' ? 'assistant' : 'user',
 					content: turn.content,
 				}))
@@ -196,7 +238,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 				const openai = new OpenAI({ apiKey: config.mimic.openai.apiKey })
 				const extraction = await extractCallResult(openai, {
 					goal: agent.goal,
-					transcript,
+					transcript: extractionTranscript,
 					results: agent.results as Record<string, unknown>,
 					successCondition: agent.successCondition as Parameters<typeof extractCallResult>[1]['successCondition'],
 				})
@@ -238,10 +280,14 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		const errorMessage = err instanceof Error ? err.message : String(err)
 		childLogger({ callId, errorMessage }).error('call failed')
 
+		const currentStatus = await getCallStatus(callId)
+		if (currentStatus === 'cancelled') {
+			broadcast(callId, { type: 'call_status', status: 'cancelled' })
+			return
+		}
+
 		await updateCall(callId, { status: 'failed', errorMessage }).catch(() => {})
 		broadcast(callId, { type: 'call_status', status: 'failed' })
 		broadcast(callId, { type: 'error', message: errorMessage })
-	} finally {
-		decrementActiveCalls(call.apiKeyId)
 	}
 }

@@ -5,6 +5,9 @@ export type {
 	CommittedTurnInfo,
 	TurnControlBlockContext,
 } from './orchestrator.js'
+export { config } from './config.js'
+export { loadPrompt, renderPromptTemplate } from './prompts.js'
+export type { AudioTransport } from './audio/streams/types.js'
 
 export type { CallMetrics } from './shared/metrics.js'
 export type { CallTurn } from './shared/prompt-turns.js'

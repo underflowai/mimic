@@ -115,7 +115,10 @@ export async function createVoiceActivityDetector(config?: VadConfig) {
 
 	function processAudio(pcm16: Buffer) {
 		if (!active) return
-		const samples = convertPcm16BufferToFloat32Samples(pcm16)
+		const alignedPcm16 =
+			pcm16.byteLength % 2 === 0 ? pcm16 : pcm16.subarray(0, Math.max(0, pcm16.byteLength - 1))
+		if (alignedPcm16.byteLength === 0) return
+		const samples = convertPcm16BufferToFloat32Samples(alignedPcm16)
 		queue = queue
 			.then(() => consumeFrames(samples))
 			.catch((err: unknown) => {

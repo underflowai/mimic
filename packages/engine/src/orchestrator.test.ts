@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+process.env.OPENAI_API_KEY ??= 'test-openai-key'
+
 // ---------------------------------------------------------------------------
 // Orchestrator lifecycle
 // ---------------------------------------------------------------------------

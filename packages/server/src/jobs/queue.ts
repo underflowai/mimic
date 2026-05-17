@@ -77,6 +77,13 @@ export async function enqueueCall(data: CallJobData) {
 	})
 }
 
+export async function cancelQueuedCall(callId: string) {
+	const job = await getQueue().getJob(callId)
+	if (job) {
+		await job.remove()
+	}
+}
+
 export async function shutdownQueue() {
 	await _queue?.close()
 	_connection?.disconnect()

@@ -8,10 +8,21 @@ const mimicFluxEagerEotThreshold = 0.3
 const mimicFluxEotTimeoutMs = 2000
 const mimicFluxAudioChunkTargetMs = 80
 
+function parseDirectorProvider(raw: string | undefined): MimicDirectorProvider {
+	if (!raw) return 'openai'
+	const normalized = raw.trim().toLowerCase()
+	if (normalized === 'openai' || normalized === 'anthropic') return normalized
+	throw new Error(
+		`MIMIC_DIRECTOR_PROVIDER must be "openai" or "anthropic" (received "${raw}")`,
+	)
+}
+
 export const config = {
 	mimic: {
 		director: {
-			defaultProvider: 'openai' as MimicDirectorProvider,
+			get defaultProvider(): MimicDirectorProvider {
+				return parseDirectorProvider(getEnv('MIMIC_DIRECTOR_PROVIDER'))
+			},
 			defaultOpenaiModel: 'gpt-5-chat-latest',
 			defaultAnthropicModel: 'claude-haiku-4-5',
 		},

@@ -8,32 +8,21 @@
 	"types": "./build/index.d.ts",
 	"exports": {
 		".": {
-			"import": {
-				"types": "./src/index.ts",
-				"production": "./build/index.js",
-				"default": "./src/index.ts"
-			}
+			"types": "./build/index.d.ts",
+			"import": "./build/index.js",
+			"default": "./build/index.js"
 		}
 	},
 	"files": [
-		"build/",
-		"README.md"
+		"build/"
 	],
 	"engines": {
 		"node": ">=22.0.0"
 	},
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json",
-		"typecheck": "tsc -b --noEmit",
+		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"test": "tsx --test 'src/**/*.test.ts'"
-	},
-	"peerDependencies": {
-		"zod": "^3.0.0"
-	},
-	"peerDependenciesMeta": {
-		"zod": {
-			"optional": true
-		}
 	},
 	"devDependencies": {
 		"@types/node": "^22.15.0",
@@ -42,6 +31,7 @@
 		"zod": "^3.25.0"
 	},
 	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.29.0"
+		"@modelcontextprotocol/sdk": "^1.29.0",
+		"zod": "^3.25.0"
 	}
 }

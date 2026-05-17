@@ -244,13 +244,19 @@ describe('eot confidence gate', () => {
 
 	it('allows when confidence stays low during LLM call', async () => {
 		let resolveClassify!: (v: BackchannelToken | null) => void
+		let classifyCount = 0
 
 		const { fired, start, update } = createTestEngine({
 			eotConfidenceThreshold: 0.3,
-			classifyResult: () =>
-				new Promise((r) => {
-					resolveClassify = r
-				}),
+			classifyResult: () => {
+				classifyCount++
+				if (classifyCount === 1) {
+					return new Promise((r) => {
+						resolveClassify = r
+					})
+				}
+				return Promise.resolve('right' as BackchannelToken)
+			},
 		})
 
 		start()
@@ -259,8 +265,9 @@ describe('eot confidence gate', () => {
 
 		update('Caller continues speaking with low confidence.', 0.08)
 
-		resolveClassify('right')
-		await wait(50)
+		resolveClassify('mm-hmm')
+		await wait(80)
+		assert.equal(classifyCount, 2)
 		assert.equal(fired.length, 1)
 		assert.equal(fired[0], 'right')
 	})
@@ -313,9 +320,45 @@ describe('in-flight guard', () => {
 		assert.equal(classifyCalls.length, 1, 'second call should be blocked')
 
 		resolveFirst('right')
-		await wait(50)
+		await wait(80)
+		assert.equal(classifyCalls.length, 2, 'latest transcript should classify after first completes')
 		assert.equal(fired.length, 1)
-		assert.equal(fired[0], 'right')
+		assert.equal(fired[0], 'yeah')
+	})
+
+	it('drops stale classify result when a newer transcript arrives', async () => {
+		const classifyCalls: string[] = []
+		let resolveFirst!: (v: BackchannelToken | null) => void
+		let callCount = 0
+
+		const { fired, start, update } = createTestEngine({
+			classifyResult: (transcript) => {
+				classifyCalls.push(transcript)
+				callCount++
+				if (callCount === 1) {
+					return new Promise((r) => {
+						resolveFirst = r
+					})
+				}
+				return Promise.resolve('yeah' as BackchannelToken)
+			},
+		})
+
+		start()
+		update('Initial transcript that becomes stale.', 0.9)
+		await wait(10)
+		update('Newest transcript should win after first classify.', 0.9)
+		await wait(10)
+
+		resolveFirst('right')
+		await wait(80)
+
+		assert.deepEqual(classifyCalls, [
+			'Initial transcript that becomes stale.',
+			'Newest transcript should win after first classify.',
+		])
+		assert.equal(fired.length, 1)
+		assert.equal(fired[0], 'yeah')
 	})
 })
 

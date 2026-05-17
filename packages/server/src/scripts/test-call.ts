@@ -14,10 +14,8 @@ for (const line of envFile.split('\n')) {
 	if (eqIdx > 0) process.env[trimmed.slice(0, eqIdx)] = trimmed.slice(eqIdx + 1)
 }
 
-import { config } from '@mimic/engine/src/config.js'
-import { createCallOrchestrator } from '@mimic/engine/src/orchestrator.js'
+import { config, createCallOrchestrator, type AudioTransport } from '@mimic/engine'
 import { createVoiceAgent } from '@mimic/transport-livekit'
-import type { AudioTransport } from '@mimic/engine/src/audio/streams/types.js'
 
 import { createSipDialer } from '../sip.js'
 import { compileGoal, buildOrchestratorConfigFromAgent } from '../goal-compiler.js'

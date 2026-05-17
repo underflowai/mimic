@@ -20,6 +20,11 @@ export function sanitizeForTts(text: string) {
 	const { cleaned, restore } = protectTtsTags(out)
 	out = removeMd(cleaned, { useImgAltText: true })
 	out = restore(out)
+	// remove-markdown can leave trailing emphasis markers in some edge cases
+	// (for example "***bold italic***" -> "bold italic*"). Strip leading/
+	// trailing markdown emphasis artifacts while keeping regular punctuation.
+	out = out.replace(/(^|\s)[*_]+(?=\S)/g, '$1')
+	out = out.replace(/(?<=\S)[*_]+(?=\s|$)/g, '')
 	out = stripUnsupportedAngleBracketTags(out)
 	out = stripInlineJsonObjects(out)
 	out = out.replace(/\n{2,}/g, '\n')

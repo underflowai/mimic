@@ -12,5 +12,23 @@
 	},
 	"engines": {
 		"node": ">=22.0.0"
-	}
+	},
+	"version": "1.0.0",
+	"description": "Attach a voice agent to your existing tools and make phone calls.",
+	"main": "index.js",
+	"directories": {
+		"example": "examples"
+	},
+	"devDependencies": {},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/underflowai/mimic.git"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"bugs": {
+		"url": "https://github.com/underflowai/mimic/issues"
+	},
+	"homepage": "https://github.com/underflowai/mimic#readme"
 }

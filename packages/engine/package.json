@@ -29,11 +29,11 @@
 	"files": ["build/"],
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json && node -e \"const{cpSync}=require('fs');cpSync('src/prompts','build/prompts',{recursive:true});cpSync('src/backchannel/audio','build/backchannel/audio',{recursive:true});try{cpSync('src/audio/silero_vad_v5.onnx','build/audio/silero_vad_v5.onnx')}catch{}\"",
+		"prepare": "pnpm run build",
 		"typecheck": "tsc -p tsconfig.lib.json --noEmit",
 		"test": "NODE_OPTIONS='--conditions=source' tsx --test 'src/**/*.test.ts'"
 	},
 	"dependencies": {
-		"@livekit/rtc-node": "^0.13.28",
 		"openai": "^5.8.0",
 		"onnxruntime-web": "^1.22.0",
 		"p-queue": "^8.1.0",
@@ -44,6 +44,7 @@
 		"handlebars": "^4.7.8"
 	},
 	"peerDependencies": {
+		"@livekit/rtc-node": ">=0.13.25 <0.14.0",
 		"@sentry/node": ">=9.0.0"
 	},
 	"peerDependenciesMeta": {
@@ -52,6 +53,7 @@
 		}
 	},
 	"devDependencies": {
+		"@livekit/rtc-node": "^0.13.28",
 		"@types/node": "^22.15.0",
 		"pino-pretty": "^13.0.0",
 		"tsx": "^4.21.0",

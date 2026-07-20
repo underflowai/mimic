@@ -2,12 +2,16 @@ import { createHash } from 'node:crypto'
 
 import { Hono } from 'hono'
 import { and, eq, or, sql } from 'drizzle-orm'
+import { RoomServiceClient } from 'livekit-server-sdk'
 
-import { publishCallEvent } from '../call-runner.js'
+import { config } from '@mimic/engine'
+
+import { publishCallEvent } from '../call-bus.js'
 import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls, type ApiCallRow } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
 import { cancelQueuedCall, enqueueCall } from '../jobs/queue.js'
+import { childLogger } from '../logger.js'
 import { MAX_CONCURRENT_CALLS } from '../middleware/rate-limit.js'
 
 function stableStringify(value: unknown): string {
@@ -290,6 +294,20 @@ calls.delete('/:id', async (c) => {
 
 	if (call.status === 'pending') {
 		await cancelQueuedCall(callId).catch(() => {})
+	}
+
+	if (call.status === 'in_progress') {
+		// Deleting the room ends the SIP leg and the agent session; the worker
+		// sees the cancelled status and skips the completion write.
+		try {
+			const roomService = new RoomServiceClient(config.livekit.url, config.livekit.apiKey, config.livekit.apiSecret)
+			await roomService.deleteRoom(`mimic-call-${callId}`)
+		} catch (err) {
+			// Room may already be gone (call ended between status read and here).
+			childLogger({ callId, err: err instanceof Error ? err.message : String(err) }).warn(
+				'failed to delete LiveKit room during cancel',
+			)
+		}
 	}
 
 	publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })

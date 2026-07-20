@@ -3,6 +3,7 @@ import { createNodeWebSocket } from '@hono/node-ws'
 import { eq } from 'drizzle-orm'
 
 import { app } from './app.js'
+import { shutdownCallBus } from './call-bus.js'
 import { runCall } from './call-runner.js'
 import { getDb } from './db/index.js'
 import { apiAgents, apiCalls } from './db/schema.js'
@@ -54,6 +55,7 @@ if (worker) {
 const shutdown = async (signal: string) => {
 	logger.info({ signal }, 'shutting down server')
 	await worker?.close().catch((err) => logger.error({ err }, 'failed to close worker'))
+	await shutdownCallBus().catch(() => {})
 	server.close(() => process.exit(0))
 }
 

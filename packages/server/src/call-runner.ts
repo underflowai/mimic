@@ -3,91 +3,26 @@
  *
  * Dials a phone number via SIP, spawns a voice agent in the LiveKit room,
  * waits for the call to end, extracts results, and updates the DB.
- * Streams events to any connected WebSocket subscribers.
+ * Streams events to any connected WebSocket subscribers via the Redis call bus.
  */
 
+import { randomUUID } from 'node:crypto'
+
 import { eq } from 'drizzle-orm'
+import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
+import OpenAI from 'openai'
 
 import { config, createCallOrchestrator, type AudioTransport } from '@mimic/engine'
 import { createVoiceAgent } from '@mimic/transport-livekit'
 
+import { executeToolViaBus, publishCallEvent } from './call-bus.js'
 import { getDb } from './db/index.js'
 import { apiCalls, type ApiAgentRow, type ApiCallRow } from './db/schema.js'
 import { buildOrchestratorConfigFromAgent, type AgentConfig } from './goal-compiler.js'
-import { extractCallResult, type TranscriptEntry } from './result-extractor.js'
+import { childLogger } from './logger.js'
+import { extractCallResult, type ToolCallRecord, type TranscriptEntry } from './result-extractor.js'
 import { createSipDialer } from './sip.js'
 import { deliverWebhook } from './webhook.js'
-
-import OpenAI from 'openai'
-import { childLogger } from './logger.js'
-import { randomUUID } from 'node:crypto'
-import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
-
-type EventCallback = (event: Record<string, unknown>) => void
-type ToolCallbackFn = (toolName: string, toolArgs: Record<string, unknown>, callbackId: string) => Promise<{ result: string } | { error: string }>
-
-export interface ToolHandler {
-	registered: boolean
-	unregister: () => void
-}
-
-const activeCallSubscribers = new Map<string, Set<EventCallback>>()
-const activeToolHandlers = new Map<string, { connectionId: string; handler: ToolCallbackFn }>()
-
-export function subscribeToCall(callId: string, callback: EventCallback): () => void {
-	let subs = activeCallSubscribers.get(callId)
-	if (!subs) {
-		subs = new Set()
-		activeCallSubscribers.set(callId, subs)
-	}
-	subs.add(callback)
-	return () => {
-		subs!.delete(callback)
-		if (subs!.size === 0) activeCallSubscribers.delete(callId)
-	}
-}
-
-export function registerToolHandler(callId: string, handler: ToolCallbackFn, connectionId: string): ToolHandler {
-	const existing = activeToolHandlers.get(callId)
-	if (existing && existing.connectionId !== connectionId) {
-		return {
-			registered: false,
-			unregister: () => {},
-		}
-	}
-
-	activeToolHandlers.set(callId, { connectionId, handler })
-	return {
-		registered: true,
-		unregister: () => {
-			const current = activeToolHandlers.get(callId)
-			if (current?.connectionId === connectionId) {
-				activeToolHandlers.delete(callId)
-			}
-		},
-	}
-}
-
-function broadcast(callId: string, event: Record<string, unknown>) {
-	const subs = activeCallSubscribers.get(callId)
-	if (!subs) return
-	for (const cb of subs) {
-		try {
-			cb(event)
-		} catch {}
-	}
-}
-
-export function publishCallEvent(callId: string, event: Record<string, unknown>) {
-	broadcast(callId, event)
-}
-
-async function executeToolViaWebSocket(callId: string, toolName: string, toolArgs: Record<string, unknown>): Promise<{ result: string } | { error: string }> {
-	const entry = activeToolHandlers.get(callId)
-	if (!entry) return { error: 'No SDK tool handler connected' }
-	const callbackId = randomUUID()
-	return entry.handler(toolName, toolArgs, callbackId)
-}
 
 function agentRowToConfig(row: ApiAgentRow): AgentConfig {
 	return {
@@ -130,7 +65,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		}
 
 		await updateCall(callId, { status: 'in_progress' })
-		broadcast(callId, { type: 'call_status', status: 'in_progress' })
+		publishCallEvent(callId, { type: 'call_status', status: 'in_progress' })
 
 		const dialer = createSipDialer({
 			livekitUrl: config.livekit.url,
@@ -157,6 +92,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 
 		let orchestratorRef: Awaited<ReturnType<typeof createCallOrchestrator>> | null = null
 		let egressId: string | null = null
+		const toolCallRecords: ToolCallRecord[] = []
 
 		const ambienceEnabled = (agent.ambience as boolean | null) !== false
 		const recordingEnabled = Boolean(process.env.RECORDING_S3_BUCKET)
@@ -205,11 +141,20 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					...orchestratorConfig,
 					callId,
 					audioTransport: transport,
-					executeTool: async (params: { toolName: string; toolArgs: Record<string, unknown> }) => executeToolViaWebSocket(callId, params.toolName, params.toolArgs),
+					executeTool: async (params: { toolName: string; toolArgs: Record<string, unknown> }) => {
+						const outcome = await executeToolViaBus(callId, randomUUID(), params.toolName, params.toolArgs)
+						toolCallRecords.push({
+							name: params.toolName,
+							input: params.toolArgs,
+							output: 'result' in outcome ? outcome.result : outcome.error,
+							success: !('error' in outcome),
+						})
+						return outcome
+					},
 					onTurnCommitted(turn) {
-						broadcast(callId, { type: 'speech', role: 'agent', text: turn.assistantResponse })
+						publishCallEvent(callId, { type: 'speech', role: 'agent', text: turn.assistantResponse })
 						if (turn.userTranscript) {
-							broadcast(callId, { type: 'speech', role: 'caller', text: turn.userTranscript })
+							publishCallEvent(callId, { type: 'speech', role: 'caller', text: turn.userTranscript })
 						}
 					},
 				})
@@ -240,12 +185,14 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					goal: agent.goal,
 					transcript: extractionTranscript,
 					results: agent.results as Record<string, unknown>,
+					toolCalls: toolCallRecords,
 					successCondition: agent.successCondition as Parameters<typeof extractCallResult>[1]['successCondition'],
 				})
 
 				await updateCall(callId, {
 					status: 'completed',
 					transcript: transcript as unknown as ApiCallRow['transcript'],
+					toolCalls: toolCallRecords as unknown as ApiCallRow['toolCalls'],
 					result: extraction.result as unknown as ApiCallRow['result'],
 					goalAchieved: extraction.goalAchieved,
 					goalAchievedReason: extraction.goalAchievedReason,
@@ -253,7 +200,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					recordingPath: egressId ? `call-recordings/${callId}.ogg` : null,
 				})
 
-				broadcast(callId, {
+				publishCallEvent(callId, {
 					type: 'done',
 					goalAchieved: extraction.goalAchieved,
 					goalAchievedReason: extraction.goalAchievedReason,
@@ -282,12 +229,12 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 
 		const currentStatus = await getCallStatus(callId)
 		if (currentStatus === 'cancelled') {
-			broadcast(callId, { type: 'call_status', status: 'cancelled' })
+			publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })
 			return
 		}
 
 		await updateCall(callId, { status: 'failed', errorMessage }).catch(() => {})
-		broadcast(callId, { type: 'call_status', status: 'failed' })
-		broadcast(callId, { type: 'error', message: errorMessage })
+		publishCallEvent(callId, { type: 'call_status', status: 'failed' })
+		publishCallEvent(callId, { type: 'error', message: errorMessage })
 	}
 }

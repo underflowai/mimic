@@ -5,6 +5,7 @@ WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY packages/engine/package.json packages/engine/
+COPY packages/engine/scripts/prepare.mjs packages/engine/scripts/
 COPY packages/server/package.json packages/server/
 COPY packages/transport-livekit/package.json packages/transport-livekit/
 COPY packages/sdk/package.json packages/sdk/

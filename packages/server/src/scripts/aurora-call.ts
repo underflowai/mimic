@@ -1,6 +1,6 @@
 /**
  * One-off: place an outbound call with a custom goal.
- * Usage: npx tsx src/scripts/aurora-call.ts +14152839118
+ * Usage: npx tsx src/scripts/aurora-call.ts +15551234567
  */
 
 import { readFileSync } from 'node:fs'

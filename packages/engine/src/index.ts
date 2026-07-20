@@ -19,7 +19,7 @@ export type { CallTurn } from './shared/prompt-turns.js'
 export type { CommittedTurn, TurnOutcome } from './turn/types.js'
 export type { InterruptContext } from './intelligence/types.js'
 
-export { arloPersona, auroraPersona } from './shared/voice-persona.js'
+export { arloPersona, auroraPersona, voicePersonas } from './shared/voice-persona.js'
 export type { VoicePersona } from './shared/voice-persona.js'
 
 export { loadBackchannelClips } from './backchannel/clips.js'

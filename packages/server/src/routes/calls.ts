@@ -25,7 +25,21 @@ function stableStringify(value: unknown): string {
 	return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`
 }
 
-function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: string; context?: string; data?: Record<string, unknown>; tools: unknown[]; results: unknown; aiDisclosure?: boolean; ambience?: boolean }): string {
+function hashPromptConfig(
+	apiKeyId: string,
+	config: {
+		goal: string
+		voice: string
+		context?: string
+		data?: Record<string, unknown>
+		tools: unknown[]
+		results: unknown
+		aiDisclosure?: boolean
+		ambience?: boolean
+		persona?: { systemPrompt: string; agentName?: string }
+		webhook?: string
+	},
+): string {
 	const payload = stableStringify({
 		apiKeyId,
 		goal: config.goal,
@@ -36,6 +50,10 @@ function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: strin
 		results: config.results,
 		aiDisclosure: config.aiDisclosure,
 		ambience: config.ambience,
+		// Only present in persona mode so pre-existing config hashes (and
+		// their cached compiled agents) stay valid.
+		...(config.persona && { persona: config.persona }),
+		...(config.webhook && { webhook: config.webhook }),
 	})
 	return createHash('sha256').update(payload).digest('hex')
 }
@@ -58,6 +76,16 @@ calls.post('/', async (c) => {
 		extract?: Record<string, unknown>
 		ambience?: boolean
 		idempotencyKey?: string
+		/**
+		 * Self-call mode: supply the voice agent's system prompt directly and
+		 * skip goal compilation entirely. For callers that maintain their own
+		 * persona (e.g. a personal agent phoning its own user), compilation
+		 * would only dilute the identity and add latency. `goal` is still
+		 * required — the result extractor uses it as its rubric.
+		 */
+		persona?: { systemPrompt: string; agentName?: string }
+		/** Optional completion webhook (event: call.completed) for this agent config. */
+		webhook?: string
 	}
 	try {
 		body = await c.req.json<typeof body>()
@@ -92,6 +120,17 @@ calls.post('/', async (c) => {
 	} else {
 		if (!body.goal?.trim()) return c.json({ error: 'goal is required' }, 400)
 
+		const personaPrompt = body.persona?.systemPrompt?.trim() ?? ''
+		if (body.persona && !personaPrompt) {
+			return c.json({ error: 'persona.systemPrompt must not be empty' }, 400)
+		}
+		if (personaPrompt.length > 48_000) {
+			return c.json({ error: 'persona.systemPrompt exceeds 48000 characters' }, 400)
+		}
+		if (body.webhook && !/^https?:\/\//.test(body.webhook)) {
+			return c.json({ error: 'webhook must be an http(s) URL' }, 400)
+		}
+
 		const voice = body.voice ?? 'female'
 		const tools = (body.tools ?? []).map((t) => ({
 			...t,
@@ -109,6 +148,10 @@ calls.post('/', async (c) => {
 			results,
 			aiDisclosure: body.aiDisclosure,
 			ambience: body.ambience,
+			...(personaPrompt && {
+				persona: { systemPrompt: personaPrompt, agentName: body.persona?.agentName },
+			}),
+			...(body.webhook && { webhook: body.webhook }),
 		})
 
 		const [cached] = await db
@@ -123,6 +166,27 @@ calls.post('/', async (c) => {
 
 		if (cached) {
 			agentId = cached.id
+		} else if (personaPrompt) {
+			// Persona mode: the caller owns the prompt. Store it as-is, ready
+			// to dial — no compilation, no [AGENT_NAME] templating.
+			const [inserted] = await db
+				.insert(apiAgents)
+				.values({
+					apiKeyId: apiKey.id,
+					name: body.goal.slice(0, 80) || 'persona agent',
+					goal: body.goal,
+					voice,
+					context: body.context ?? '',
+					tools,
+					results,
+					configHash,
+					systemPrompt: personaPrompt,
+					agentName: body.persona?.agentName?.trim() || (voice === 'male' ? 'Arlo' : 'Aurora'),
+					ambience: body.ambience ?? true,
+					webhook: body.webhook ?? null,
+				})
+				.returning()
+			agentId = inserted.id
 		} else {
 			// Create a placeholder agent row — compile in background
 			const [placeholder] = await db
@@ -139,6 +203,7 @@ calls.post('/', async (c) => {
 					systemPrompt: '',
 					agentName: voice === 'male' ? 'Arlo' : 'Aurora',
 					ambience: body.ambience ?? true,
+					webhook: body.webhook ?? null,
 				})
 				.returning()
 			agentId = placeholder.id

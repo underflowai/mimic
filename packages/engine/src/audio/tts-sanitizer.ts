@@ -1,7 +1,7 @@
 /**
  * TTS text sanitizer
  *
- * Cleans Director LLM output before it reaches the Cartesia Sonic 3.5 TTS WebSocket.
+ * Cleans Director LLM output before it reaches the Cartesia Sonic 3.6 TTS WebSocket.
  *   1. Strip markdown via remove-markdown
  *   2. Preserve Cartesia-supported SSML tags: <break>, <spell>
  *   3. Strip unsupported angle-bracket tags (including <emotion>, <speed>, <volume>)
@@ -51,7 +51,7 @@ export function speechTagTextCanStream(text: string) {
 
 // ── Internals ───────────────────────────────────────────────────────
 
-/** SSML tags that Cartesia Sonic 3.5 supports. */
+/** SSML tags that Cartesia Sonic 3.6 supports. */
 const supportedSsmlTagNames = /^(break|spell)$/i
 
 /**

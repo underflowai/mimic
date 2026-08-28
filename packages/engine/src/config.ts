@@ -1,6 +1,6 @@
 export type MimicDirectorProvider = 'openai' | 'anthropic'
 
-const mimicCartesiaTtsModel = 'sonic-3.5'
+const mimicCartesiaTtsModel = 'sonic-3.6'
 const mimicCartesiaApiVersion = '2026-03-01'
 
 const mimicFluxEotThreshold = 0.5

@@ -9,14 +9,14 @@ export const auroraPersona: VoicePersona = {
 	id: 'aurora',
 	firstName: 'Aurora',
 	lastName: 'Brooks',
-	ttsVoiceId: 'f786b574-daa5-4673-aa0c-cbe3e8534c02',
+	ttsVoiceId: 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4',
 }
 
 export const arloPersona: VoicePersona = {
 	id: 'arlo',
 	firstName: 'Arlo',
 	lastName: 'Brooks',
-	ttsVoiceId: 'a5136bf9-224c-4d76-b823-52bd5efcffcc',
+	ttsVoiceId: '47c38ca4-5f35-497b-b1a3-415245fb35e1',
 }
 
 export const voicePersonas = {

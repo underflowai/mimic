@@ -40,7 +40,7 @@ export interface CreateTtsSpeakerOptions {
 
 export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 	const createConn = options.createWebSocket ?? createDefaultWebSocket
-	const voiceId = options.voiceId ?? 'f786b574-daa5-4673-aa0c-cbe3e8534c02'
+	const voiceId = options.voiceId ?? 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4'
 
 	const session =
 		options.session ??

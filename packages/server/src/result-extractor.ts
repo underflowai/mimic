@@ -185,7 +185,8 @@ export async function extractCallResult(client: OpenAI, input: ExtractionInput):
 	const { model, reasoningEffort } = models.resultExtractor
 	const response = await client.chat.completions.create({
 		model,
-		reasoning_effort: reasoningEffort,
+		// openai@5.23 types lack 'none'; the API accepts it (verified 2026-09-30).
+		reasoning_effort: reasoningEffort as OpenAI.ReasoningEffort,
 		messages: [
 			{ role: 'system', content: await getSystemPrompt() },
 			{ role: 'user', content: userPrompt },

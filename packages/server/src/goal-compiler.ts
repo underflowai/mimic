@@ -262,7 +262,8 @@ export async function compileGoal(input: GoalCompilerInput, openai = new OpenAI(
 	// Reasoning models reject `temperature`, so none is sent.
 	const result = await openai.chat.completions.create({
 		model,
-		reasoning_effort: reasoningEffort,
+		// openai@5.23 types lack 'none'; the API accepts it (verified 2026-09-30).
+		reasoning_effort: reasoningEffort as OpenAI.ReasoningEffort,
 		max_completion_tokens: maxOutputTokens,
 		response_format: compiledGoalFormat,
 		messages: [

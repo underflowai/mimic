@@ -17,7 +17,11 @@ app.get(
 	'/api/v1/calls/:id/stream',
 	upgradeWebSocket((c) => {
 		const callId = c.req.param('id') ?? ''
-		return handleStreamUpgrade(callId)
+		// Clients that can set upgrade headers (Node `ws`, server-side code) may
+		// authenticate with a Bearer header instead of the first-frame auth message.
+		const header = c.req.header('authorization')
+		const headerToken = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined
+		return handleStreamUpgrade(callId, headerToken)
 	}),
 )
 

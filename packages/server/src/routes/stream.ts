@@ -45,16 +45,28 @@ function flushPendingCallsForConnection(connectionId: string, reason: string) {
 	}
 }
 
-export function handleStreamUpgrade(callId: string) {
+export function handleStreamUpgrade(callId: string, headerToken?: string) {
 	let toolHandler: ToolHandler | null = null
 	let unsubscribe: (() => void) | null = null
 	let wsRef: { send: (data: string) => void; close: () => void } | null = null
 	let authenticated = false
+	let authInFlight = false
 	let authTimeout: ReturnType<typeof setTimeout> | null = null
 	const connectionId = randomUUID()
 
 	async function authenticateAndBind(token: string) {
-		if (authenticated) return
+		// A client may send both a Bearer header and a first-frame auth message;
+		// only the first one gets to bind the connection.
+		if (authenticated || authInFlight) return
+		authInFlight = true
+		try {
+			await bind(token)
+		} finally {
+			authInFlight = false
+		}
+	}
+
+	async function bind(token: string) {
 		const ws = wsRef
 		if (!ws) return
 		if (!callId.trim()) {
@@ -150,6 +162,7 @@ export function handleStreamUpgrade(callId: string) {
 				ws.send(JSON.stringify({ type: 'error', message: 'WebSocket auth timeout' }))
 				ws.close()
 			}, authTimeoutMs)
+			if (headerToken) void authenticateAndBind(headerToken)
 		},
 
 		onMessage(event: { data: unknown }, _ws: unknown) {

@@ -12,6 +12,13 @@ declare module 'hono' {
 }
 
 export const authMiddleware = createMiddleware(async (c, next) => {
+	// WebSocket upgrades (the call stream) authenticate themselves: browsers and
+	// the SDK can't set headers on `new WebSocket(url)`, so the stream route
+	// accepts a first-frame `{ type: 'auth', token }` and closes on timeout.
+	if (c.req.header('upgrade')?.toLowerCase() === 'websocket') {
+		return await next()
+	}
+
 	const header = c.req.header('authorization')
 	if (!header?.startsWith('Bearer ')) {
 		return c.json({ error: 'Missing or malformed Authorization header' }, 401)

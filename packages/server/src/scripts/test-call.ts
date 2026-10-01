@@ -1,6 +1,6 @@
 /**
  * Test: place an outbound call locally.
- * Usage: npx tsx src/scripts/test-call.ts +14152839118
+ * Usage: npx tsx src/scripts/test-call.ts +15551234567
  */
 
 import { readFileSync } from 'node:fs'

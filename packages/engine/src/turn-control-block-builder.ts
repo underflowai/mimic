@@ -60,6 +60,11 @@ function appendSharedSignals(parts: string[], ctx: TurnControlBlockContext, text
 		parts.push(textQualityBlock)
 	} else {
 		appendTranscriptQualityGuidance(parts)
+		// Compiled agents get opener guidance from their textQualityBlock;
+		// this is the fallback for uncompiled prompts.
+		parts.push(
+			'Open with a short reactive clause (four words or fewer) — "Yeah, so—", "Okay—", "Oh, right—" — then the substance. Vary it.',
+		)
 	}
 	appendToolLifecycleGuidance(parts, {
 		toolDefinitions: ctx.toolDefinitions,

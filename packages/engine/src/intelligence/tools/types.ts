@@ -6,3 +6,46 @@ export interface TranscriptToolEvent {
 	confidence?: number
 	recordedAtMs: number
 }
+
+// ---------------------------------------------------------------------------
+// Verified-actions audit trail
+// ---------------------------------------------------------------------------
+
+/** Where a WRITE argument's value was corroborated. */
+export interface ToolEvidenceSpan {
+	arg: string
+	value: string
+	/** `read_result:<toolName>` or `caller_turn`. */
+	source: string
+	/** The exact quote containing the value. */
+	quote: string
+}
+
+export type ToolAuditEvent =
+	| {
+			phase: 'proposed'
+			toolName: string
+			args: Record<string, unknown> | null
+			decision: 'execute' | 'not_ready'
+			missingArgs: string[]
+			atMs: number
+	  }
+	| {
+			phase: 'gate'
+			toolName: string
+			args: Record<string, unknown>
+			allowed: boolean
+			reason: string | null
+			evidence: ToolEvidenceSpan[]
+			atMs: number
+	  }
+	| {
+			phase: 'executed'
+			toolName: string
+			args: Record<string, unknown>
+			ok: boolean
+			result: string | null
+			error: string | null
+			elapsedMs: number
+			atMs: number
+	  }

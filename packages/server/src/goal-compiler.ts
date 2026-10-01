@@ -11,6 +11,14 @@ import {
 	type TurnControlBlockContext,
 } from '@mimic/engine'
 
+import {
+	agentSpecLlmFieldsSchema,
+	buildAgentContractBlock,
+	buildAgentSpec,
+	lintAgentSpec,
+	type AgentSpec,
+} from './agent-spec.js'
+
 export type GoalVoice = 'female' | 'male'
 
 export interface GoalToolDefinition {
@@ -18,6 +26,8 @@ export interface GoalToolDefinition {
 	description: string
 	kind: 'read' | 'write'
 	parameters: Record<string, unknown>
+	/** WRITE tools require explicit caller confirmation unless set to false. */
+	requiresConfirmation?: boolean
 }
 
 export interface GoalRecipient {
@@ -46,17 +56,21 @@ export interface CompiledGoal {
 	systemPrompt: string
 	turnControlBlock?: string
 	agentName: string
+	/** Machine-checkable contract sidecar (improvements.md §6.3). */
+	agentSpec: AgentSpec
+	/** Compile-time lint findings — the prompt not satisfying its own spec. */
+	specLintWarnings: string[]
 }
 
-export interface AgentConfig extends CompiledGoal {
+export interface AgentConfig extends Omit<CompiledGoal, 'agentSpec' | 'specLintWarnings'> {
 	goal: string
 	recipient?: GoalRecipient
 	voice: GoalVoice
 	context: GoalContext
-	data?: GoalData
 	tools: GoalToolDefinition[]
 	results: GoalResults
 	aiDisclosure: boolean
+	agentSpec?: AgentSpec | null
 }
 
 const compiledGoalSchema = z.object({
@@ -64,6 +78,7 @@ const compiledGoalSchema = z.object({
 	speechTags: z.string().min(1),
 	turnControlBlock: z.string().min(1),
 	agentName: z.string().min(1),
+	agentSpec: agentSpecLlmFieldsSchema.default({}),
 })
 
 let cachedCompilerPrompt: string | null = null
@@ -132,6 +147,28 @@ function normalizeContext(context: GoalContext): string {
 	return entries.map(([key, value]) => `${key}: ${value}`).join('\n')
 }
 
+/**
+ * Compile-time view of the data payload: keys and shape only. Values are
+ * masked so the compiled prompt can be cached across calls that share the
+ * same data keys — the actual values are injected per call via the runtime
+ * `<data>` block (see `buildDataBlock`).
+ */
+function describeDataShape(value: unknown): string {
+	if (isConstrainedField(value)) return 'value with a fixed list of valid options (both provided at call time)'
+	if (Array.isArray(value)) return 'list (items provided at call time)'
+	if (value !== null && typeof value === 'object') {
+		return `object with fields ${Object.keys(value as Record<string, unknown>).join(', ')} (values provided at call time)`
+	}
+	return 'value provided at call time'
+}
+
+function describeDataKeys(data: GoalData): string {
+	const entries = Object.entries(data)
+	if (entries.length === 0) return 'No structured data provided.'
+	return entries.map(([key, value]) => `${key}: ${describeDataShape(value)}`).join('\n')
+}
+
+/** Runtime rendering of the data payload with actual values. */
 function normalizeData(data: GoalData): string {
 	const entries = Object.entries(data)
 	if (entries.length === 0) return 'No structured data provided.'
@@ -197,7 +234,11 @@ function buildCompilerInput(input: GoalCompilerInput) {
 		normalizeContext(input.context),
 	]
 	if (input.data && Object.keys(input.data).length > 0) {
-		parts.push('', 'Structured data (to confirm/collect):', normalizeData(input.data))
+		parts.push(
+			'',
+			'Structured data fields (to confirm/collect). Values are NOT available now — the runtime injects them into a <data> block during the call:',
+			describeDataKeys(input.data),
+		)
 	}
 	parts.push('', 'Tools available:', formatTools(input.tools))
 	parts.push('', 'Results (what to extract/collect):', formatObjectBlock(input.results))
@@ -240,10 +281,15 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 	// across voices without recompilation
 	const templatePrompt = systemPrompt.replaceAll(agentName, '[AGENT_NAME]')
 
+	const agentSpec = buildAgentSpec(parsed.agentSpec, input.tools)
+	const specLintWarnings = lintAgentSpec(agentSpec, input, parsed.compiledPrompt)
+
 	return {
 		systemPrompt: templatePrompt,
 		turnControlBlock: parsed.turnControlBlock,
 		agentName,
+		agentSpec,
+		specLintWarnings,
 	}
 }
 
@@ -259,17 +305,30 @@ function resolveRecipient(agent: AgentConfig, callContext?: Record<string, strin
 	return { firstName, lastName, email }
 }
 
-function buildOpeningContextBlock(userTimezone?: string, recipient?: ReturnType<typeof resolveRecipient>) {
+/** Renders the per-call data values the compiled prompt references by key. */
+function buildDataBlock(callData?: GoalData | null): string | null {
+	if (!callData || Object.keys(callData).length === 0) return null
+	return ['<data>', normalizeData(callData), '</data>'].join('\n')
+}
+
+function buildOpeningContextBlock(
+	userTimezone?: string,
+	recipient?: ReturnType<typeof resolveRecipient>,
+	dataBlock?: string | null,
+	contractBlock?: string | null,
+) {
 	const parts: string[] = ['<context>']
 	parts.push(`now: ${formatUserDateTime(userTimezone)}`)
 	if (recipient?.firstName) parts.push(`callerFirstName: ${recipient.firstName}`)
 	if (recipient?.lastName) parts.push(`callerLastName: ${recipient.lastName}`)
 	if (recipient?.email) parts.push(`callerEmail: ${recipient.email}`)
 	parts.push('</context>')
+	if (dataBlock) parts.push(dataBlock)
+	if (contractBlock) parts.push(contractBlock)
 	return parts.join('\n')
 }
 
-function buildTurnControlBlock(ctx: TurnControlBlockContext) {
+function buildTurnControlBlock(ctx: TurnControlBlockContext, dataBlock?: string | null, contractBlock?: string | null) {
 	const hasToolResults = ctx.toolResults && ctx.toolResults.length > 0
 
 	const sections: string[] = []
@@ -281,6 +340,9 @@ function buildTurnControlBlock(ctx: TurnControlBlockContext) {
 	if (ctx.recipient?.email) lateParts.push(`callerEmail: ${ctx.recipient.email}`)
 	lateParts.push('</context>')
 	sections.push(lateParts.join('\n'))
+
+	if (dataBlock) sections.push(dataBlock)
+	if (contractBlock) sections.push(contractBlock)
 
 	if (hasToolResults) {
 		sections.push('<tool_results>')
@@ -296,10 +358,13 @@ function buildTurnControlBlock(ctx: TurnControlBlockContext) {
 export function buildOrchestratorConfigFromAgent(
 	agent: AgentConfig,
 	callContext?: Record<string, string>,
+	callData?: GoalData | null,
 ): { orchestratorConfig: Omit<CallOrchestratorConfig, 'audioTransport'> } {
 	const persona = agent.voice === 'male' ? arloPersona : auroraPersona
 	const userTimezone = callContext?.userTimezone
 	const recipient = resolveRecipient(agent, callContext)
+	const dataBlock = buildDataBlock(callData)
+	const contractBlock = buildAgentContractBlock(agent.agentSpec)
 	return {
 		orchestratorConfig: {
 			persona,
@@ -307,10 +372,11 @@ export function buildOrchestratorConfigFromAgent(
 			maxCompletionTokens: 384,
 			userFirstName: resolveFirstName(agent, callContext),
 			recipient,
-			buildOpeningBlock: () => buildOpeningContextBlock(userTimezone, recipient),
-			buildTurnControlBlock,
+			buildOpeningBlock: () => buildOpeningContextBlock(userTimezone, recipient, dataBlock, contractBlock),
+			buildTurnControlBlock: (ctx) => buildTurnControlBlock(ctx, dataBlock, contractBlock),
 			textQualityBlock: agent.turnControlBlock ?? undefined,
 			tools: agent.tools.length > 0 ? agent.tools : undefined,
+			mustVerify: agent.agentSpec?.mustVerify?.length ? agent.agentSpec.mustVerify : undefined,
 		},
 	}
 }

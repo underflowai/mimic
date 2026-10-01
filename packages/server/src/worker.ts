@@ -14,6 +14,7 @@ import { Worker } from 'bullmq'
 import { Redis } from 'ioredis'
 
 import { logger } from './logger.js'
+import { shutdownCallBus } from './call-bus.js'
 import { getDb } from './db/index.js'
 import { apiAgents, apiCalls } from './db/schema.js'
 import { runCall } from './call-runner.js'
@@ -86,6 +87,7 @@ const shutdown = async (signal: string) => {
 	logger.info({ signal }, 'shutting down gracefully')
 	await Promise.allSettled([
 		worker.close(),
+		shutdownCallBus(),
 		new Promise((resolve) => healthServer.close(resolve)),
 	])
 	process.exit(0)

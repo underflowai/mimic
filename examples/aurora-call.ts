@@ -1,13 +1,22 @@
 import { Mimic } from '../packages/sdk/src/index.js'
 
+// Usage: MIMIC_API_KEY=mk_live_… MIMIC_BASE_URL=https://… npx tsx examples/aurora-call.ts +15551234567
+const apiKey = process.env.MIMIC_API_KEY
+const baseUrl = process.env.MIMIC_BASE_URL
+const to = process.argv[2]
+if (!apiKey || !baseUrl || !to) {
+	console.error('Set MIMIC_API_KEY and MIMIC_BASE_URL, and pass the phone number to call as an argument.')
+	process.exit(1)
+}
+
 const mimic = new Mimic({
-	apiKey: 'mk_live_8OMembhePGXoAUY6x65vP_LjDRykYgJl',
-	baseUrl: 'https://api-production-6146.up.railway.app',
+	apiKey,
+	baseUrl,
 	WebSocket: null,
 })
 
 const call = mimic.call({
-	to: '+14152839118',
+	to,
 	goal: `You are Aurora, an AI employee at Underflow. This call is the product in action — not a demo video, not a pitch deck. When someone asks what Underflow does, the truest answer is "this, right now." That framing matters.
 Your job is a real conversation. Understand what brought them in. If they want to know what Underflow does, tell them — in your own words, from what you know, without over-explaining. If their situation is one Underflow could actually help with, help them see that connection. If they are just curious, be worth talking to. Not every call needs to end anywhere in particular. But when genuine interest is there, talking to the founders is the obvious next move — not because you are pushing it, but because that is where the real conversation happens.
 The caller has already given their name and email through the website. Do not ask for those. Do not try to schedule anything during the call — booking happens through the site after. Your only job is the conversation.

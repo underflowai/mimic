@@ -62,6 +62,20 @@ export interface MimicTool {
 	description: string
 	schema: ZodType
 	run: (input: unknown) => Promise<string> | string
+	/**
+	 * READ tools look things up; WRITE tools change state in the real
+	 * world (book, cancel, charge, send). WRITE tools are held behind
+	 * the verification gate: the agent must read the values back and
+	 * get explicit caller confirmation before they fire.
+	 * Defaults to `'read'`.
+	 */
+	kind?: 'read' | 'write'
+	/**
+	 * For WRITE tools: require explicit caller confirmation before
+	 * execution. Defaults to `true` for WRITE tools. Set `false` only
+	 * for writes that are trivially reversible.
+	 */
+	requiresConfirmation?: boolean
 }
 
 /**
@@ -73,7 +87,10 @@ export type ToolInput = MimicTool
 export interface ToolSchema {
 	name: string
 	description: string
-	parameters: Record<string, string>
+	/** JSON Schema object describing the tool's arguments. */
+	parameters: Record<string, unknown>
+	kind: 'read' | 'write'
+	requiresConfirmation?: boolean
 }
 
 // ── Call options ───────────────────────────────────────────────────────

@@ -24,7 +24,8 @@ import { classifyEagerPromotion } from './intelligence/eager-promotion-classifie
 import { createWebSearcher } from './intelligence/tools/web-searcher.js'
 import type { InterruptContext } from './intelligence/types.js'
 import { createOrchestratorRuntime } from './orchestrator-runtime.js'
-import { createCallMetrics, publishCallSummary } from './shared/metrics.js'
+import { createCallEventRecorder } from './replay/event-log.js'
+import { createCallMetrics, publishCallSummary, withEventRecording } from './shared/metrics.js'
 import { auroraPersona, type VoicePersona } from './shared/voice-persona.js'
 import {
 	createTurnControlBlockBuilder,
@@ -80,7 +81,10 @@ export interface CallOrchestratorConfig {
 	tools?: import('./intelligence/tools/runner.js').ToolDefinition[]
 	executeTool?: import('./intelligence/tools/transport.js').ToolExecutor
 	maxCompletionTokens?: number
-	endCallEnabled?: boolean
+	/** AgentSpec fields that must be read back and confirmed before WRITE tools may use them. */
+	mustVerify?: string[]
+	/** Observer for the verified-actions audit trail (proposed → gate → executed). */
+	onToolEvent?: (event: import('./intelligence/tools/types.js').ToolAuditEvent) => void
 }
 
 export async function createCallOrchestrator(originalConfig: CallOrchestratorConfig) {
@@ -115,9 +119,11 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		model: directorModel,
 		systemPrompt: callConfig.systemPrompt,
 		maxCompletionTokens: callConfig.maxCompletionTokens,
+		supportsPredictedOutputs: directorProvider === 'openai',
 	})
 	const webSearcher = createWebSearcher(openai)
-	const metrics = createCallMetrics()
+	const eventRecorder = createCallEventRecorder()
+	const metrics = withEventRecording(createCallMetrics(), eventRecorder.record)
 	const events = new EventEmitter()
 
 	// ------------------------------------------------------------------
@@ -216,12 +222,16 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		getDirectorTurns: () => director.listTurns(),
 		tools: callConfig.tools,
 		executeTool: callConfig.executeTool,
-		// Silence watchdog exhausted its check-in budget. Emit the hangup
-		// event so the transport layer (createVoiceAgent) can tear down the
-		// LiveKit room — that disconnect flow also triggers our own
-		// `shutdownCoordinator.close()` via the regular session-end path,
+		recordEvent: eventRecorder.record,
+		mustVerify: callConfig.mustVerify,
+		onToolEvent: callConfig.onToolEvent,
+		// The call should end — either the silence watchdog exhausted its
+		// check-in budget or the agent emitted [end-call] after its goodbye.
+		// Emit the hangup event so the transport layer (createVoiceAgent) can
+		// tear down the LiveKit room — that disconnect flow also triggers our
+		// own `shutdownCoordinator.close()` via the regular session-end path,
 		// which closes the caller out of the room at the same time.
-		onSilenceHangup: () => {
+		onHangupRequest: () => {
 			events.emit('hangupRequested')
 		},
 	})
@@ -284,6 +294,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		ensureBackchannelEngine,
 		buildOpeningBlock: () => callConfig.buildOpeningBlock(),
 		getCallKeyterms: () => callConfig.keyterms,
+		prepareGreeting: (openingBlock) => callMachineRuntime.prepareGreeting(openingBlock),
 	})
 
 	// ------------------------------------------------------------------
@@ -319,7 +330,13 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		getBriefingTurnCount: () => turnCount,
 		snapshotMetrics: () => metrics.snapshot(),
 		summarizeMetrics: () => metrics.summarize(),
-		publishMetrics: (snapshot, durationSeconds) => publishCallSummary(snapshot, durationSeconds),
+		listEvents: () => eventRecorder.snapshot(),
+		publishMetrics: (snapshot, durationSeconds) => {
+			const budgetViolations = publishCallSummary(snapshot, durationSeconds)
+			if (budgetViolations.length > 0) {
+				log.warn({ budgetViolations }, 'call exceeded latency budgets')
+			}
+		},
 	})
 
 	// ------------------------------------------------------------------

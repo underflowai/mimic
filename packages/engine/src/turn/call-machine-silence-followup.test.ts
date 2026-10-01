@@ -84,7 +84,7 @@ function createDeps(overrides?: LooseOverrides): CallMachineRuntimeDeps {
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		onHangupRequest: mock.fn(),
 		...(rest as Partial<CallMachineRuntimeDeps>),
 	} satisfies CallMachineRuntimeDeps
 }
@@ -308,11 +308,11 @@ describe('silence watchdog', () => {
 
 	it('escalates retries to closing guidance then hangs up immediately after the closing turn commits', async () => {
 		const holder: { current?: ReturnType<typeof createCallMachineRuntime> } = {}
-		const onSilenceHangup = mock.fn<() => void>()
+		const onHangupRequest = mock.fn<(source: 'silence' | 'end_call_tag') => void>()
 		const buildControlBlock = buildControlBlockMock()
 		const engine = createCallMachineRuntime(
 			createDeps({
-				onSilenceHangup,
+				onHangupRequest,
 				buildControlBlock,
 				onPlaybackComplete: autoPlayback(holder),
 			}),
@@ -335,7 +335,8 @@ describe('silence watchdog', () => {
 		}
 
 		assert.equal(engine.actor.getSnapshot().context.silenceFollowUpCount, 3)
-		assert.equal(onSilenceHangup.mock.calls.length, 1)
+		assert.equal(onHangupRequest.mock.calls.length, 1)
+		assert.equal(onHangupRequest.mock.calls[0]?.arguments[0], 'silence')
 		engine.stop()
 	})
 

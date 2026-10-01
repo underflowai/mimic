@@ -46,6 +46,18 @@ recap or summary. If the caller volunteered a value and the agent
 used it naturally in a later sentence and the caller did not correct
 it, that counts as implicit confirmation.
 
+The input may include a "Values requiring read-back verification
+(agent contract)" section listing specific fields for this agent.
+Those fields are verification-sensitive regardless of the generic
+categories above — apply the same read-back-and-confirm rule to them
+before any WRITE tool uses their values.
+
+Tools labeled [WRITE, confirmation required] additionally need the
+caller's explicit go-ahead for the action itself — the transcript
+must show the caller agreeing to the change (a clear "yes" to a
+readback or to "want me to book that?"), not merely mentioning a
+value in passing.
+
 READ tools do not require verification. Looking someone up by a
 potentially misheard phone number is fine — the result will reveal
 if it was wrong.

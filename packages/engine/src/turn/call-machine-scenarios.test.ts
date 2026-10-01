@@ -130,7 +130,7 @@ function createDeps(overrides?: LooseOverrides, transportRef?: { current: FakeAu
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		onHangupRequest: mock.fn(),
 		...(rest as Partial<CallMachineRuntimeDeps>),
 	} satisfies CallMachineRuntimeDeps
 	return deps
@@ -701,6 +701,60 @@ describe('scenario: opening turn commit payload', () => {
 
 		const commitPayload = mockFn(deps.director.commitTurn).mock.calls[0]?.arguments[0] as { kind: string }
 		assert.equal(commitPayload.kind, 'greeting')
+
+		engine.stop()
+	})
+})
+
+// ---------------------------------------------------------------------------
+// 16. Pre-synthesized greeting — prepared during setup, flushed on pickup
+// ---------------------------------------------------------------------------
+
+describe('scenario: pre-synthesized greeting', () => {
+	it('prepareGreeting captures audio; first turn flushes it without regenerating', async () => {
+		const deps = createDeps()
+		const engine = createCallMachineRuntime(deps)
+
+		const prepared = await engine.prepareGreeting('Hello opening block')
+		assert.ok(prepared, 'greeting should be prepared')
+		assert.equal(prepared.agentResponse, 'Here are the rates.')
+		assert.equal(mockFn(deps.director.streamDraftTokenized).mock.calls.length, 1)
+
+		const turnId = engine.actor.getSnapshot().context.nextTurnId
+		const outcomePromise = waitForOutcome(engine, turnId)
+		engine.sendToCallMachine({ type: 'start_first_turn', openingBlock: 'Hello opening block', prepared })
+		const outcome = await outcomePromise
+
+		assert.equal(outcome.kind, 'committed')
+		if (outcome.kind !== 'committed') return
+		assert.equal(outcome.turn.agentResponse, 'Here are the rates.')
+		// No second generation: the turn replayed the buffered audio.
+		assert.equal(mockFn(deps.director.streamDraftTokenized).mock.calls.length, 1)
+		const commitPayload = mockFn(deps.director.commitTurn).mock.calls[0]?.arguments[0] as { kind: string }
+		assert.equal(commitPayload.kind, 'greeting')
+
+		engine.stop()
+	})
+
+	it('prepareGreeting resolves null when generation produces no text', async () => {
+		const deps = createDeps({
+			director: {
+				streamDraftTokenized: mock.fn((t: string) => ({
+					userTranscript: t,
+					events: (async function* () {
+						return ''
+					})(),
+				})),
+				commitTurn: mock.fn(),
+				commitToolCall: mock.fn(),
+				commitToolResult: mock.fn(),
+				listTurns: () => [],
+			} as never as CallMachineRuntimeDeps['director'],
+		})
+		const engine = createCallMachineRuntime(deps)
+
+		const prepared = await engine.prepareGreeting('Hello!')
+		assert.equal(prepared, null)
 
 		engine.stop()
 	})

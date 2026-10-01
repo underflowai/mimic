@@ -8,6 +8,7 @@ import { config } from '#engine/config.js'
 import { sanitizeForTranscript } from '../audio/tts-sanitizer.js'
 import type { InterruptContext } from '../intelligence/types.js'
 import { estimateHeardPortion } from '../shared/audio-pacing.js'
+import { isFillerOrAssentOnly } from '../shared/filler-speech.js'
 import type { SoftPauseOutcome, SoftPauseSource, TurnTiming } from '../shared/metrics.js'
 import { commitActorLogic, type CommitActorDeps, type CommitActorOutput } from './actors/commit-actor.js'
 import { playbackWaitActor } from './actors/playback-wait-actor.js'
@@ -47,6 +48,8 @@ export interface TurnActorInput {
 	generationStartedAt: number
 	lastTurnCompleteAt: number
 	callerVadEndAt: number
+	/** Adaptive-physics widening of the soft-pause escalation timer. */
+	substantiveSpeechExtraMs?: number
 	runTurnDeps: RunTurnActorDeps
 	commitDeps: CommitActorDeps
 	getAudioSenderSnapshot: () => { sentMs: number; confirmedWordsPlayed: number }
@@ -66,6 +69,16 @@ export interface TurnActorContext {
 	abort: AbortController | null
 	pausedAt: number
 	softPauseSource: SoftPauseSource
+	/** Set when a long soft-pause triggered restart-don't-resume; the
+	 * executing state re-invokes the pipeline with this strategy. */
+	restartStrategy: RunTurnStrategyInput | null
+	/** True once the turn restarted from a pause — stream events from the
+	 * restart pipeline must not overwrite the original draft text. */
+	restartedFromPause: boolean
+	/** Latest Flux partial for the utterance that triggered the current soft-pause. */
+	callerPartialTranscript: string
+	/** Times the substantive-speech timer was rearmed because the partial was pure filler/assent. */
+	fillerHoldCount: number
 	vadSpeechStartAt: number
 	firstAudioAt: number | null
 	draftMs: number
@@ -84,6 +97,7 @@ type TurnActorEvent =
 	| { type: 'interrupt'; reason: InterruptReason }
 	| { type: 'caller_turn_start' }
 	| { type: 'caller_turn_resumed' }
+	| { type: 'caller_update'; transcript: string }
 	| { type: 'playback_confirmed' }
 	| { type: 'vad_speech_start' }
 	| { type: 'vad_speech_end' }
@@ -111,6 +125,49 @@ function hasResource(config: InterruptConfig, resource: InterruptResource) {
 
 function softPauseDurationMs(context: TurnActorContext) {
 	return context.pausedAt > 0 ? Date.now() - context.pausedAt : 0
+}
+
+/** Maximum consecutive filler-only rearm cycles of the substantive-speech timer. */
+const maxFillerHolds = 2
+
+/**
+ * Restart-don't-resume. Below this pause duration, resuming buffered audio
+ * mid-sentence still sounds natural; past it, the conversational thread is
+ * broken — discard the buffer and re-speak from the last sentence boundary.
+ */
+const restartPauseMs = 700
+
+/** Spoken lead-in for restarted audio. Never committed to the transcript —
+ * the original draft text is preserved through the restart. */
+const restartConnective = 'So — as I was saying:'
+
+/**
+ * Text the restarted pipeline should speak, or null when a plain resume is
+ * the better move (nothing heard yet, everything heard, or empty draft).
+ * The heard portion is estimated from the playback tracker, then walked
+ * back to the last sentence boundary so the restart begins cleanly.
+ */
+function computeRestartText(context: TurnActorContext): string | null {
+	const fullDraft = sanitizeForTranscript(context.draftResponse)
+	if (!fullDraft) return null
+	const { sentMs, confirmedWordsPlayed } = context.input.getAudioSenderSnapshot()
+	const heardPortion = estimateHeardPortion(fullDraft, sentMs, confirmedWordsPlayed)
+	// Nothing heard: a resume already replays from the start (the whole
+	// draft is still buffered) — no need to re-synthesize.
+	if (!heardPortion) return null
+	if (heardPortion.length >= fullDraft.length) return null
+
+	let boundary = 0
+	for (let i = heardPortion.length - 1; i >= 0; i--) {
+		const c = fullDraft[i]
+		if (c === '.' || c === '!' || c === '?') {
+			boundary = i + 1
+			break
+		}
+	}
+	const remainder = fullDraft.slice(boundary).trim()
+	if (!remainder) return null
+	return `${restartConnective} ${remainder}`
 }
 
 const turnActorSetup = setup({
@@ -147,24 +204,57 @@ const turnActorSetup = setup({
 			_params: { source: SoftPauseSource; outcome: SoftPauseOutcome; durationMs: number },
 		) => {},
 		onSubstantiveSpeechTimeout: (_, _params: { vadSpeechStartAt: number }) => {},
+		onFillerHold: (_, _params: { transcript: string; durationMs: number }) => {},
 		recordShortResumedBarge: () => {},
 		resetPauseState: () => {},
 		flushPausedBuffer: () => {},
+		/** Tear down the paused pipeline's audio path (restart-don't-resume):
+		 * drop buffered frames and destroy the sink so the restarted pipeline
+		 * starts on a clean transport sink. */
+		discardActiveTurn: () => {},
 	},
 	delays: {
-		substantiveSpeechMs: config.mimic.substantiveSpeechMs,
+		substantiveSpeechMs: ({ context }) =>
+			config.mimic.substantiveSpeechMs + (context.input.substantiveSpeechExtraMs ?? 0),
 		yieldWindowMs: config.mimic.yieldWindowMs,
 		playbackTimeoutMs: 5000,
 	},
 	guards: {
 		isCallEnded: ({ event }) => isCallEndedInterrupt(event as TurnActorEvent),
+		// Content-aware escalation: when the substantive-speech timer fires
+		// but everything the caller has said during this pause is filler or
+		// assent ("yeah", "mm-hmm okay"), they are backchanneling, not taking
+		// the turn — hold the pause instead of interrupting. Capped so a
+		// caller chanting assent cannot pin the agent in soft-pause forever.
+		// An empty partial (ASR has not caught up) escalates as before.
+		holdSoftPauseForFillerSpeech: ({ context }) =>
+			context.fillerHoldCount < maxFillerHolds && isFillerOrAssentOnly(context.callerPartialTranscript),
+		// Restart-don't-resume: past `restartPauseMs` of pause, resuming
+		// buffered audio mid-sentence sounds broken — re-speak instead.
+		// One restart per turn: after a restart the heard-portion estimate
+		// no longer maps onto the original draft, so later pauses resume.
+		shouldRestartFromPause: ({ context }) =>
+			!context.restartedFromPause &&
+			softPauseDurationMs(context) >= restartPauseMs &&
+			computeRestartText(context) !== null,
 	},
 })
 
 const assignOnAudioStarted = turnActorSetup.assign({
-	agentResponse: ({ event }) => (event.type === 'audio_started' ? event.agentResponse : ''),
-	draftResponse: ({ event }) => (event.type === 'audio_started' ? event.agentResponse : ''),
-	endCallRequested: ({ event }) => event.type === 'audio_started' && event.endCallRequested === true,
+	// After a pause restart, the pipeline speaks connective + remainder —
+	// the committed text must stay the original full draft.
+	agentResponse: ({ context, event }) => {
+		if (context.restartedFromPause) return context.agentResponse
+		return event.type === 'audio_started' ? event.agentResponse : ''
+	},
+	draftResponse: ({ context, event }) => {
+		if (context.restartedFromPause) return context.draftResponse
+		return event.type === 'audio_started' ? event.agentResponse : ''
+	},
+	endCallRequested: ({ context, event }) => {
+		if (context.restartedFromPause) return context.endCallRequested
+		return event.type === 'audio_started' && event.endCallRequested === true
+	},
 })
 
 const assignOnFirstAudioSent = turnActorSetup.assign({
@@ -172,18 +262,39 @@ const assignOnFirstAudioSent = turnActorSetup.assign({
 })
 
 const assignOnStreamDone = turnActorSetup.assign({
-	firstAudioAt: ({ event }) => (event.type === 'stream_done' ? event.result.firstAudioAt : null),
+	// Restarted turns keep the original generation's timing and text; only
+	// draftMs (total wall time) tracks the restarted pipeline.
+	firstAudioAt: ({ context, event }) => {
+		if (event.type !== 'stream_done') return null
+		if (context.restartedFromPause && context.firstAudioAt !== null) return context.firstAudioAt
+		return event.result.firstAudioAt
+	},
 	draftMs: ({ event }) => (event.type === 'stream_done' ? event.result.draftMs : 0),
-	ttsFirstByteMs: ({ event }) => (event.type === 'stream_done' ? event.result.ttsFirstByteMs : null),
-	ttftMs: ({ event }) => (event.type === 'stream_done' ? event.result.ttftMs : null),
-	ttcMs: ({ event }) => (event.type === 'stream_done' ? event.result.ttcMs : null),
+	ttsFirstByteMs: ({ context, event }) => {
+		if (event.type !== 'stream_done') return null
+		if (context.restartedFromPause && context.ttsFirstByteMs !== null) return context.ttsFirstByteMs
+		return event.result.ttsFirstByteMs
+	},
+	ttftMs: ({ context, event }) => {
+		if (event.type !== 'stream_done') return null
+		if (context.restartedFromPause && context.ttftMs !== null) return context.ttftMs
+		return event.result.ttftMs
+	},
+	ttcMs: ({ context, event }) => {
+		if (event.type !== 'stream_done') return null
+		if (context.restartedFromPause && context.ttcMs !== null) return context.ttcMs
+		return event.result.ttcMs
+	},
 	agentResponse: ({ context, event }) => {
 		if (event.type !== 'stream_done') return context.agentResponse
+		if (context.restartedFromPause) return context.agentResponse
 		const result = event.result as StreamResultPayload
 		return result.agentResponse || context.agentResponse
 	},
-	endCallRequested: ({ context, event }) =>
-		event.type === 'stream_done' ? event.result.endCallRequested : context.endCallRequested,
+	endCallRequested: ({ context, event }) => {
+		if (context.restartedFromPause) return context.endCallRequested
+		return event.type === 'stream_done' ? event.result.endCallRequested : context.endCallRequested
+	},
 })
 
 const assignVadSpeechStart = turnActorSetup.assign({ vadSpeechStartAt: () => Date.now() })
@@ -201,15 +312,56 @@ function recordSoftPauseMetrics(outcome: SoftPauseOutcome) {
 function enterSoftPause(source: SoftPauseSource) {
 	return turnActorSetup.enqueueActions(({ enqueue }) => {
 		enqueue('onSuspendAudio')
-		enqueue.assign({ pausedAt: () => Date.now(), softPauseSource: source })
+		// Reset the partial transcript so the filler-hold guard only judges
+		// speech from the utterance that triggered this pause.
+		enqueue.assign({
+			pausedAt: () => Date.now(),
+			softPauseSource: source,
+			callerPartialTranscript: '',
+			fillerHoldCount: 0,
+		})
 	})
 }
+
+const holdSoftPauseForFiller = turnActorSetup.enqueueActions(({ context, enqueue }) => {
+	enqueue({
+		type: 'onFillerHold',
+		params: { transcript: context.callerPartialTranscript, durationMs: softPauseDurationMs(context) },
+	})
+	enqueue.assign({ fillerHoldCount: ({ context: ctx }) => ctx.fillerHoldCount + 1 })
+})
 
 const resumeFromSoftPause = turnActorSetup.enqueueActions(({ enqueue }) => {
 	enqueue('flushPausedBuffer')
 	enqueue(recordSoftPauseMetrics('resumed'))
 	enqueue('recordShortResumedBarge')
 	enqueue.assign({
+		pausedAt: 0,
+		softPauseSource: 'unknown',
+		lastVadSpeechEndAt: () => Date.now(),
+	})
+})
+
+/**
+ * Restart-don't-resume: tear down the paused pipeline (abort generation,
+ * cut TTS, discard buffered audio and sink) and re-enter `executing` with a
+ * fixed-text strategy speaking connective + remainder from the last
+ * sentence boundary. The guard guarantees `computeRestartText` is non-null.
+ */
+const restartFromSoftPause = turnActorSetup.enqueueActions(({ context, enqueue }) => {
+	const restartText = computeRestartText(context)!
+	context.abort?.abort()
+	enqueue('interruptTts')
+	enqueue('discardActiveTurn')
+	enqueue(recordSoftPauseMetrics('restarted'))
+	enqueue.assign({
+		restartStrategy: {
+			kind: 'fixed_text',
+			text: restartText,
+			transcript: context.userTranscript,
+		},
+		restartedFromPause: true,
+		abort: null,
 		pausedAt: 0,
 		softPauseSource: 'unknown',
 		lastVadSpeechEndAt: () => Date.now(),
@@ -408,6 +560,10 @@ function buildTurnRuntimeCore() {
 		abort: null,
 		pausedAt: 0,
 		softPauseSource: 'unknown' as SoftPauseSource,
+		restartStrategy: null as RunTurnStrategyInput | null,
+		restartedFromPause: false,
+		callerPartialTranscript: '',
+		fillerHoldCount: 0,
 		vadSpeechStartAt: 0,
 	}
 }
@@ -517,6 +673,18 @@ export const turnActorMachine = turnActorSetup.createMachine({
 	id: 'turnActor',
 	initial: 'executing',
 	context: ({ input }) => buildInitialContext(input),
+	on: {
+		// Flux partials for the caller's current utterance — consulted by the
+		// soft-pause filler-hold guard. Tracked machine-wide; entering a
+		// soft-pause clears the field so the guard only judges speech from
+		// the utterance that triggered the pause.
+		caller_update: {
+			actions: turnActorSetup.assign({
+				callerPartialTranscript: ({ context, event }) =>
+					event.type === 'caller_update' ? event.transcript : context.callerPartialTranscript,
+			}),
+		},
+	},
 	states: {
 		executing: {
 			entry: ['resetPauseState', turnActorSetup.assign({ abort: () => new AbortController() })],
@@ -524,7 +692,8 @@ export const turnActorMachine = turnActorSetup.createMachine({
 				id: 'runTurnPipeline',
 				src: 'runTurnPipeline',
 				input: ({ context }): RunTurnActorInput => ({
-					strategy: context.input.strategy,
+					// A pause restart re-enters executing with a fixed-text strategy.
+					strategy: context.restartStrategy ?? context.input.strategy,
 					turnId: context.turnId,
 					signal: context.abort!.signal,
 					generationAbort: context.abort!,
@@ -568,7 +737,20 @@ export const turnActorMachine = turnActorSetup.createMachine({
 					},
 				},
 				softPaused: {
-					after: { substantiveSpeechMs: { target: '#turnActor.done', actions: interruptFromSubstantiveTimeout } },
+					after: {
+						substantiveSpeechMs: [
+							// Pure filler/assent so far ("yeah", "mm-hmm") — the caller is
+							// backchanneling, not taking the turn. Rearm the timer and keep
+							// the pause; vad_speech_end resumes playback as usual.
+							{
+								guard: 'holdSoftPauseForFillerSpeech',
+								target: 'softPaused',
+								reenter: true,
+								actions: holdSoftPauseForFiller,
+							},
+							{ target: '#turnActor.done', actions: interruptFromSubstantiveTimeout },
+						],
+					},
 					on: {
 						// Flux TurnResumed confirms the caller is still mid-utterance.
 						// Reenter to rearm the substantiveSpeechMs timer — without this
@@ -576,6 +758,14 @@ export const turnActorMachine = turnActorSetup.createMachine({
 						// is actively speaking.
 						caller_turn_resumed: { target: 'softPaused', reenter: true },
 						vad_speech_end: [
+							// Long pause: the thread is broken — discard the buffered
+							// remainder and re-speak from the last sentence boundary.
+							{
+								guard: 'shouldRestartFromPause',
+								target: '#turnActor.executing',
+								reenter: true,
+								actions: restartFromSoftPause,
+							},
 							{
 								guard: ({ context }) => context.draftMs > 0,
 								target: '#turnActor.awaitingPlayback',

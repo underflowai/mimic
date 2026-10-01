@@ -8,6 +8,27 @@
       "when": 1778976416804,
       "tag": "0000_safe_jamie_braddock",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1783795188534,
+      "tag": "0001_salty_master_chief",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783824986015,
+      "tag": "0002_event-log-path",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783825609702,
+      "tag": "0003_agent-spec-evals-audit",
+      "breakpoints": true
     }
   ]
 }

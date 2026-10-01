@@ -16,7 +16,9 @@ import {
 
 import { eagerMachine, type EagerMachineActor } from '../intelligence/eager-machine.js'
 import { toolSupervisor, type ToolSupervisorActor } from '../intelligence/tools/supervisor-machine.js'
-import { selectStrategy, type EagerStateValue, type TurnStrategy } from './strategy.js'
+import type { TurnTunables } from './conversation-physics.js'
+import { classifyExpectedReply, type ExpectedReply } from './expected-reply.js'
+import { selectStrategy, type EagerStateValue, type PreparedGreeting, type TurnStrategy } from './strategy.js'
 import {
 	turnActorMachine,
 	type CommitActorDeps,
@@ -39,8 +41,14 @@ export type {
 } from './turn-actor.js'
 export type { InterruptReason } from './types.js'
 
-/** Silence watchdog — fixed idle delay before each follow-up check. */
-const silenceIdleMs = 6_000
+/** Silence watchdog — idle delay before each follow-up check, by the reply
+ * shape the agent's last committed turn invites. A closed question earns a
+ * quick check-in; an open question earns thinking room. */
+const silenceIdleMsByReply: Record<ExpectedReply, number> = {
+	short: 5_000,
+	neutral: 6_000,
+	long: 9_000,
+}
 /** Maximum number of silence follow-up turns before closing guidance is used. */
 const maxSilenceFollowUps = 3
 
@@ -71,15 +79,20 @@ export interface CallMachineContext {
 	pendingTurnComplete: PendingTurnComplete | null
 	pendingSilenceClosing: boolean
 	silenceFollowUpCount: number
+	/** Reply shape the last committed agent turn invites (question-aware boundaries). */
+	expectedReply: ExpectedReply
 	runTurnDeps: RunTurnActorDeps | null
 	commitDeps: CommitActorDeps | null
 	getAudioSenderSnapshot: (() => { sentMs: number; confirmedWordsPlayed: number }) | null
+	getTurnTunables: (() => TurnTunables) | null
 }
 
 export interface CallMachineInput {
 	runTurnDeps: RunTurnActorDeps
 	commitDeps: CommitActorDeps
 	getAudioSenderSnapshot: () => { sentMs: number; confirmedWordsPlayed: number }
+	/** Live per-caller physics knobs (adaptive conversation physics). */
+	getTurnTunables?: () => TurnTunables
 }
 
 type TurnCompleteEvent = {
@@ -92,7 +105,7 @@ type TurnCompleteEvent = {
 
 type CallEvent =
 	| TurnCompleteEvent
-	| { type: 'start_first_turn'; openingBlock: string }
+	| { type: 'start_first_turn'; openingBlock: string; prepared?: PreparedGreeting }
 	| { type: 'interrupt'; reason: InterruptReason }
 	| { type: 'caller_turn_start' }
 	| { type: 'caller_update'; transcript: string; confidence: number }
@@ -176,7 +189,8 @@ const callMachineSetup = setup({
 		commitToolResultToDirector: (_, _params: { toolName: string; result: string }) => {},
 	},
 	delays: {
-		silenceIdleMs,
+		silenceIdleMs: ({ context }) =>
+			silenceIdleMsByReply[context.expectedReply] + (context.getTurnTunables?.().silenceWatchdogExtraMs ?? 0),
 	},
 	guards: {
 		isInterruptedOutcome: ({ event }) => extractDoneOutcome(event).kind === 'interrupted',
@@ -247,6 +261,7 @@ function buildPromotedEagerStrategy(
 		ttsPromise: eagerSnapshot.context.ttsPromise,
 		triggerSynthesisStart: eagerSnapshot.context.triggerSynthesisStart,
 		generationStartedAt: eagerSnapshot.context.eagerStartedAt,
+		endCallRequested: eagerDraft.endCallRequested,
 	}
 }
 
@@ -451,6 +466,11 @@ function handleTurnDone(enqueue: CallEnqueue, context: CallMachineContext, raw: 
 	if (context.pendingSilenceClosing && raw.kind === 'committed') {
 		enqueue({ type: 'requestCallHangup', params: { source: 'silence' } })
 	}
+	// Question-aware boundaries: what the agent just said shapes how the
+	// engine waits for the reply (watchdog delay, early-commit guard).
+	enqueue.assign({
+		expectedReply: raw.kind === 'committed' ? classifyExpectedReply(raw.turn.agentResponse) : 'neutral',
+	})
 	enqueue.assign(updateAfterTurnDone(context, raw))
 }
 
@@ -478,6 +498,7 @@ function turnActorInputFromContext(context: CallMachineContext) {
 		generationStartedAt: context.pendingStrategy.generationStartedAt,
 		lastTurnCompleteAt: context.lastTurnCompleteAt,
 		callerVadEndAt: context.callerVadEndAt,
+		substantiveSpeechExtraMs: context.getTurnTunables?.().substantiveSpeechExtraMs ?? 0,
 		runTurnDeps: context.runTurnDeps,
 		commitDeps: context.commitDeps,
 		getAudioSenderSnapshot: context.getAudioSenderSnapshot ?? (() => ({ sentMs: 0, confirmedWordsPlayed: 0 })),
@@ -567,9 +588,11 @@ export const callMachine = callMachineSetup.createMachine({
 		pendingTurnComplete: null,
 		pendingSilenceClosing: false,
 		silenceFollowUpCount: 0,
+		expectedReply: 'neutral',
 		runTurnDeps: input?.runTurnDeps ?? null,
 		commitDeps: input?.commitDeps ?? null,
 		getAudioSenderSnapshot: input?.getAudioSenderSnapshot ?? null,
+		getTurnTunables: input?.getTurnTunables ?? null,
 	}),
 	on: {
 		allocate_turn_id: { actions: callMachineSetup.assign({ nextTurnId: ({ context }) => context.nextTurnId + 1 }) },
@@ -659,7 +682,7 @@ export const callMachine = callMachineSetup.createMachine({
 						if (event.type !== 'start_first_turn') return
 						enqueue.assign({
 							pendingStrategy: () => ({
-								strategy: { kind: 'first_turn', openingBlock: event.openingBlock },
+								strategy: { kind: 'first_turn', openingBlock: event.openingBlock, prepared: event.prepared },
 								turnId: context.nextTurnId,
 								userTranscript: '',
 								generationStartedAt: Date.now(),
@@ -801,6 +824,14 @@ export const callMachine = callMachineSetup.createMachine({
 						callMachineSetup.assign({ callerActive: true }),
 						sendTo('turnActor', { type: 'caller_turn_start' }),
 					],
+				},
+				// Forward Flux partials so the turn actor's soft-pause escalation
+				// can distinguish filler/assent from substantive speech.
+				caller_update: {
+					actions: sendTo('turnActor', ({ event }) => ({
+						type: 'caller_update' as const,
+						transcript: event.type === 'caller_update' ? event.transcript : '',
+					})),
 				},
 				caller_turn_resumed: {
 					actions: [

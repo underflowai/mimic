@@ -85,7 +85,7 @@ export function createMockRuntimeDeps(options = {}) {
         webSearcher: { search: mock.fn(async () => null) },
         getCallerDateTime: () => undefined,
         getDirectorTurns: () => [],
-        onSilenceHangup: mock.fn(),
+        onHangupRequest: mock.fn(),
         ...options.overrides,
     };
     return { deps, transport };

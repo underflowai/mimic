@@ -37,8 +37,23 @@ export function sanitizeForTranscript(text: string) {
 		.trim()
 }
 
+/**
+ * Extract control tags from LLM output before it reaches TTS.
+ *
+ * `[end-call]` (also `[end call]`, `[endcall]`, `[hang-up]`, `[hangup]`)
+ * signals that the agent considers the conversation over. The tag is
+ * removed from the spoken text and surfaced as `endCallRequested`; the
+ * turn pipeline carries the flag through commit, where CallMachine
+ * requests a hangup once the goodbye has finished playing.
+ */
 export function extractTtsControlTags(text: string) {
-	return { text, endCallRequested: false }
+	let endCallRequested = false
+	const cleaned = text.replace(endCallTagRe, (match) => {
+		endCallRequested = true
+		// Preserve word separation when the tag sits mid-sentence.
+		return match.startsWith(' ') && match.endsWith(' ') ? ' ' : ''
+	})
+	return { text: cleaned, endCallRequested }
 }
 
 /**
@@ -50,6 +65,9 @@ export function speechTagTextCanStream(text: string) {
 }
 
 // ── Internals ───────────────────────────────────────────────────────
+
+/** Matches the `[end-call]` control tag and its common variants. */
+const endCallTagRe = /\s*\[\s*(?:end[\s-]?call|hang[\s-]?up)\s*\]\s*/gi
 
 /** SSML tags that Cartesia Sonic 3.5 supports. */
 const supportedSsmlTagNames = /^(break|spell)$/i

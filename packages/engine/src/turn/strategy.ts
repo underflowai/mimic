@@ -12,6 +12,18 @@
 
 import type { EagerAudioSink } from '../intelligence/types.js'
 
+/**
+ * Greeting synthesized during call setup (SIP dial / room join), before the
+ * caller picked up. The first turn flushes this buffered PCM instead of
+ * running LLM + TTS after pickup.
+ */
+export interface PreparedGreeting {
+	agentResponse: string
+	sink: EagerAudioSink
+	ttsPromise: Promise<void> | null
+	endCallRequested: boolean
+}
+
 export type TurnStrategy =
 	| { kind: 'discard'; reason: 'closing' | 'backchannel_handled' }
 	| { kind: 'defer'; reason: 'soft_paused' }
@@ -23,16 +35,32 @@ export type TurnStrategy =
 			ttsPromise: Promise<void> | null
 			triggerSynthesisStart: (() => void) | null
 			generationStartedAt: number
+			endCallRequested?: boolean
 	  }
 	| {
 			kind: 'fresh'
 			transcript: string
 			controlBlock: string
 			racingPromotion?: boolean
+			/** Eager draft text passed as an OpenAI predicted output while racing promotion. */
+			predictedDraft?: string
 	  }
 	| {
 			kind: 'first_turn'
 			openingBlock: string
+			/** When present, the greeting audio is already synthesized — flush it. */
+			prepared?: PreparedGreeting
+	  }
+	| {
+			/**
+			 * Synthesize a known text verbatim — no LLM. Used by
+			 * restart-don't-resume: after a long soft-pause the buffered
+			 * remainder is discarded and the turn re-speaks from the last
+			 * sentence boundary with a restart connective.
+			 */
+			kind: 'fixed_text'
+			text: string
+			transcript: string
 	  }
 
 export type EagerStateValue = 'idle' | 'eagerGenerating' | 'ready' | 'validating'
@@ -45,6 +73,7 @@ export interface EagerSnapshot {
 			agentResponse: string
 			userTranscript: string
 			controlBlock: string
+			endCallRequested: boolean
 		} | null
 		eagerGeneratedAt: number
 		sink: EagerAudioSink | null
@@ -104,6 +133,7 @@ export function selectStrategy(input: CallerCompleteInput, world: WorldSnapshot)
 				ttsPromise: ctx.ttsPromise,
 				triggerSynthesisStart: ctx.triggerSynthesisStart,
 				generationStartedAt: ctx.eagerStartedAt,
+				endCallRequested: ctx.eagerDraft.endCallRequested,
 			} as const
 		}
 		return {
@@ -111,6 +141,7 @@ export function selectStrategy(input: CallerCompleteInput, world: WorldSnapshot)
 			transcript: input.transcript,
 			controlBlock: input.controlBlock,
 			racingPromotion: true,
+			predictedDraft: ctx.eagerDraft?.agentResponse,
 		} as const
 	}
 
@@ -129,6 +160,7 @@ export function selectStrategy(input: CallerCompleteInput, world: WorldSnapshot)
 			transcript: input.transcript,
 			controlBlock: input.controlBlock,
 			racingPromotion: true,
+			predictedDraft: eager.context.eagerDraft?.agentResponse,
 		} as const
 	}
 

@@ -47,6 +47,8 @@ export interface ToolWatcherInput {
 	existingToolName?: string
 	existingToolArgs?: Record<string, unknown>
 	transcriptEvents?: TranscriptToolEvent[]
+	/** AgentSpec fields that must be read back and confirmed before any WRITE tool fires. */
+	mustVerify?: string[]
 	signal?: AbortSignal
 }
 
@@ -59,7 +61,8 @@ async function getSystemPrompt() {
 function formatToolSchemas(tools: ToolDefinition[]): string {
 	return tools
 		.map((t) => {
-			const kindLabel = t.kind === 'write' ? ' [WRITE]' : ' [READ]'
+			const writeLabel = t.requiresConfirmation === false ? ' [WRITE]' : ' [WRITE, confirmation required]'
+			const kindLabel = t.kind === 'write' ? writeLabel : ' [READ]'
 			const params =
 				typeof t.parameters === 'object' && t.parameters !== null && 'properties' in t.parameters
 					? Object.entries((t.parameters as { properties: Record<string, unknown> }).properties)
@@ -187,6 +190,13 @@ export async function watchForToolAction(_client: unknown, input: ToolWatcherInp
 
 	const userParts: string[] = []
 	userParts.push('## Available tools\n' + formatToolSchemas(input.tools))
+	if (input.mustVerify && input.mustVerify.length > 0) {
+		userParts.push(
+			'\n## Values requiring read-back verification (agent contract)\n' +
+				'These specific values MUST be read back by the agent and confirmed by the caller before any WRITE tool uses them:\n' +
+				input.mustVerify.map((field) => `- ${field}`).join('\n'),
+		)
+	}
 	if (input.existingToolName && input.existingToolArgs) {
 		const argsStr = Object.entries(input.existingToolArgs)
 			.filter(([, v]) => v != null && v !== '')

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { and, eq } from 'drizzle-orm'
 
-import { registerToolHandler, subscribeToCall, type ToolHandler } from '../call-runner.js'
+import { registerToolHandler, subscribeToCall, type ToolHandler } from '../call-bus.js'
 import { keyPrefixFor, verifyApiKey } from '../auth.js'
 import { getDb } from '../db/index.js'
 import { apiCalls, apiKeys, type ApiKeyRow } from '../db/schema.js'
@@ -83,7 +83,7 @@ export function handleStreamUpgrade(callId: string) {
 			} catch {}
 		})
 
-		toolHandler = registerToolHandler(
+		toolHandler = await registerToolHandler(
 			callId,
 			async (toolName, toolArgs, callbackId) => {
 				return new Promise((resolve) => {
@@ -116,6 +116,15 @@ export function handleStreamUpgrade(callId: string) {
 			},
 			connectionId,
 		)
+
+		if (!wsRef) {
+			// Socket closed while registration was in flight — undo it.
+			toolHandler.unregister()
+			toolHandler = null
+			unsubscribe?.()
+			unsubscribe = null
+			return
+		}
 
 		if (!toolHandler.registered) {
 			unsubscribe?.()

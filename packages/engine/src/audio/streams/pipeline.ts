@@ -116,7 +116,10 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 					agentResponseOnResolve('')
 				},
 			)
-			const chunker = createSentenceChunkerTransform()
+			// First boundary at a clause break: the TTS transform sends its
+			// first batch per boundary, so first audio costs ~3 words of
+			// synthesis instead of a full sentence.
+			const chunker = createSentenceChunkerTransform({ firstClauseFlush: true })
 			ttsHandle = createTtsSynthesisTransform({
 				tts: deps.tts,
 				sanitize: deps.sanitize,

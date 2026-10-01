@@ -19,6 +19,8 @@ export interface EagerPreparedResult {
 	sink: EagerAudioSink
 	triggerSynthesisStart: (() => void) | null
 	ttsPromise: Promise<void> | null
+	/** Set when the draft contained the `[end-call]` control tag (stripped from `agentResponse`). */
+	endCallRequested?: boolean
 }
 
 export interface ValidationResult {
@@ -35,6 +37,7 @@ export interface EagerMachineContext {
 		agentResponse: string
 		userTranscript: string
 		controlBlock: string
+		endCallRequested: boolean
 	} | null
 	eagerStartedAt: number
 	eagerGeneratedAt: number
@@ -157,6 +160,7 @@ const assignEagerDraft = eagerMachineSetup.assign({
 			agentResponse: output.agentResponse,
 			userTranscript: output.userTranscript,
 			controlBlock: output.controlBlock,
+			endCallRequested: output.endCallRequested === true,
 		}
 	},
 	eagerGeneratedAt: () => Date.now(),

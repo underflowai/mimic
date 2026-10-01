@@ -2,12 +2,17 @@ import { createHash } from 'node:crypto'
 
 import { Hono } from 'hono'
 import { and, eq, or, sql } from 'drizzle-orm'
+import { RoomServiceClient } from 'livekit-server-sdk'
 
-import { publishCallEvent } from '../call-runner.js'
+import { config } from '@mimic/engine'
+
+import { publishCallEvent } from '../call-bus.js'
 import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls, type ApiCallRow } from '../db/schema.js'
+import { generateEvals } from '../eval-generator.js'
 import { compileGoal } from '../goal-compiler.js'
 import { cancelQueuedCall, enqueueCall } from '../jobs/queue.js'
+import { childLogger } from '../logger.js'
 import { MAX_CONCURRENT_CALLS } from '../middleware/rate-limit.js'
 
 function stableStringify(value: unknown): string {
@@ -27,7 +32,9 @@ function hashPromptConfig(apiKeyId: string, config: { goal: string; voice: strin
 		goal: config.goal,
 		voice: config.voice,
 		context: config.context ?? '',
-		data: config.data ?? null,
+		// Only the data KEYS shape the compiled prompt — values are injected at
+		// runtime, so calls that differ only in values share one compile.
+		dataKeys: config.data ? Object.keys(config.data).sort() : null,
 		tools: config.tools,
 		results: config.results,
 		aiDisclosure: config.aiDisclosure,
@@ -49,7 +56,14 @@ calls.post('/', async (c) => {
 		data?: Record<string, unknown>
 		recipient?: { firstName: string; lastName?: string; email?: string }
 		aiDisclosure?: boolean
-		tools?: Array<{ name: string; description: string; parameters: Record<string, string> }>
+		tools?: Array<{
+			name: string
+			description: string
+			/** JSON Schema object, or a legacy flat key→description map. */
+			parameters: Record<string, unknown>
+			kind?: 'read' | 'write'
+			requiresConfirmation?: boolean
+		}>
 		results?: Record<string, unknown>
 		extract?: Record<string, unknown>
 		ambience?: boolean
@@ -91,7 +105,7 @@ calls.post('/', async (c) => {
 		const voice = body.voice ?? 'female'
 		const tools = (body.tools ?? []).map((t) => ({
 			...t,
-			kind: 'read' as const,
+			kind: t.kind ?? ('read' as const),
 			parameters: t.parameters ?? {},
 		}))
 		const results = body.results ?? body.extract ?? {}
@@ -159,6 +173,8 @@ calls.post('/', async (c) => {
 		return c.json({ error: 'Concurrent call limit reached. Wait for active calls to complete.' }, 429)
 	}
 
+	const callData = body.data && Object.keys(body.data).length > 0 ? body.data : null
+
 	let call: ApiCallRow | null = null
 	if (body.idempotencyKey) {
 		const [inserted] = await db
@@ -168,6 +184,7 @@ calls.post('/', async (c) => {
 				agentId,
 				toPhone: body.to,
 				callContext,
+				callData,
 				idempotencyKey: body.idempotencyKey,
 			})
 			.onConflictDoNothing({ target: [apiCalls.apiKeyId, apiCalls.idempotencyKey] })
@@ -193,6 +210,7 @@ calls.post('/', async (c) => {
 				agentId,
 				toPhone: body.to,
 				callContext,
+				callData,
 				idempotencyKey: null,
 			})
 			.returning()
@@ -207,22 +225,42 @@ calls.post('/', async (c) => {
 	void (async () => {
 		try {
 			if (needsCompilation) {
-				const compiled = await compileGoal({
+				const compilerInput = {
 					goal: body.goal!,
-					voice: body.voice ?? 'female',
+					voice: body.voice ?? ('female' as const),
 					context: body.context ?? '',
 					data: body.data,
 					recipient: body.recipient,
-					tools: (body.tools ?? []).map((t) => ({ ...t, kind: 'read' as const, parameters: t.parameters ?? {} })),
+					tools: (body.tools ?? []).map((t) => ({
+						...t,
+						kind: t.kind ?? ('read' as const),
+						parameters: t.parameters ?? {},
+					})),
 					results: body.results ?? body.extract ?? {},
 					aiDisclosure: body.aiDisclosure,
-				})
+				}
+				const compiled = await compileGoal(compilerInput)
+
+				if (compiled.specLintWarnings.length > 0) {
+					childLogger({ agentId, warnings: compiled.specLintWarnings }).warn('agent spec lint warnings')
+				}
 
 				await db.update(apiAgents).set({
 					systemPrompt: compiled.systemPrompt,
 					turnControlBlock: compiled.turnControlBlock ?? null,
 					agentName: compiled.agentName,
+					agentSpec: compiled.agentSpec,
 				}).where(eq(apiAgents.id, agentId))
+
+				// Eval suite generation rides behind the compile; a failure here
+				// never blocks the call.
+				void generateEvals(compilerInput, compiled.agentSpec)
+					.then((evals) => db.update(apiAgents).set({ evals }).where(eq(apiAgents.id, agentId)))
+					.catch((err) =>
+						childLogger({ agentId, err: err instanceof Error ? err.message : String(err) }).warn(
+							'eval generation failed',
+						),
+					)
 			}
 
 			await enqueueCall({ callId: call.id, agentId })
@@ -290,6 +328,20 @@ calls.delete('/:id', async (c) => {
 
 	if (call.status === 'pending') {
 		await cancelQueuedCall(callId).catch(() => {})
+	}
+
+	if (call.status === 'in_progress') {
+		// Deleting the room ends the SIP leg and the agent session; the worker
+		// sees the cancelled status and skips the completion write.
+		try {
+			const roomService = new RoomServiceClient(config.livekit.url, config.livekit.apiKey, config.livekit.apiSecret)
+			await roomService.deleteRoom(`mimic-call-${callId}`)
+		} catch (err) {
+			// Room may already be gone (call ended between status read and here).
+			childLogger({ callId, err: err instanceof Error ? err.message : String(err) }).warn(
+				'failed to delete LiveKit room during cancel',
+			)
+		}
 	}
 
 	publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })

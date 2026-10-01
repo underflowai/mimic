@@ -13,6 +13,12 @@ export interface DirectorConfig {
 	systemPrompt: string
 	maxRecentMessages?: number
 	maxCompletionTokens?: number
+	/**
+	 * Provider supports the OpenAI predicted-outputs parameter. When set,
+	 * racing-fresh generations pass the eager draft as a prediction so
+	 * regeneration is fast exactly when it agrees with the draft.
+	 */
+	supportsPredictedOutputs?: boolean
 }
 
 // ── Re-exports ───────────────────────────────────────────────────────

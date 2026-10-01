@@ -3,12 +3,16 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { describe, it } from 'node:test'
 
-import { createSentenceChunkerTransform, type SentenceChunkEvent } from './sentence-chunker.js'
+import {
+	createSentenceChunkerTransform,
+	type SentenceChunkerOptions,
+	type SentenceChunkEvent,
+} from './sentence-chunker.js'
 
-async function runChunker(tokens: string[]): Promise<SentenceChunkEvent[]> {
+async function runChunker(tokens: string[], options?: SentenceChunkerOptions): Promise<SentenceChunkEvent[]> {
 	const events: SentenceChunkEvent[] = []
 	const source = Readable.from(tokens, { objectMode: true })
-	const chunker = createSentenceChunkerTransform()
+	const chunker = createSentenceChunkerTransform(options)
 
 	const collector = new (await import('node:stream')).Writable({
 		objectMode: true,
@@ -153,6 +157,76 @@ describe('createSentenceChunkerTransform', () => {
 	it('ignores empty string tokens', async () => {
 		const events = await runChunker(['Hello', '', ' world.'])
 		assert.equal(joinDeltas(events), 'Hello world.')
+		assert.equal(countBoundaries(events), 1)
+	})
+})
+
+describe('firstClauseFlush', () => {
+	it('emits the first boundary at a comma instead of waiting for the sentence', async () => {
+		const events = await runChunker(['Yeah, so the appointment is confirmed for Monday.'], { firstClauseFlush: true })
+		const sentences = sentencesFromEvents(events)
+		assert.equal(sentences[0], 'Yeah,')
+		assert.equal(sentences[1], ' so the appointment is confirmed for Monday.')
+		assert.equal(joinDeltas(events), 'Yeah, so the appointment is confirmed for Monday.')
+	})
+
+	it('splits only the first clause — later commas stay inside sentences', async () => {
+		const events = await runChunker(['Okay, sure thing. After that, we can talk more, and more.'], {
+			firstClauseFlush: true,
+		})
+		const sentences = sentencesFromEvents(events)
+		assert.equal(sentences[0], 'Okay,')
+		assert.equal(sentences[1], ' sure thing.')
+		assert.equal(sentences[2], ' After that, we can talk more, and more.')
+	})
+
+	it('handles a clause char landing at the end of a token', async () => {
+		const events = await runChunker(['Yeah,', ' so anyway that works fine'], { firstClauseFlush: true })
+		const sentences = sentencesFromEvents(events)
+		assert.equal(sentences[0], 'Yeah,')
+		assert.equal(sentences[1], ' so anyway that works fine')
+	})
+
+	it('does not treat commas inside numbers as clause breaks', async () => {
+		const events = await runChunker(['Around 1,', '000 people came to the show'], { firstClauseFlush: true })
+		assert.equal(joinDeltas(events), 'Around 1,000 people came to the show')
+		const sentences = sentencesFromEvents(events)
+		// "came" contains word chars beyond the digits, so the scan continues
+		// and no false boundary lands inside the number.
+		assert.ok(!sentences[0]?.endsWith('1,'))
+	})
+
+	it('a complete first sentence still wins over a clause break', async () => {
+		const events = await runChunker(['Hi. How are you, my friend?'], { firstClauseFlush: true })
+		const sentences = sentencesFromEvents(events)
+		assert.equal(sentences[0], 'Hi.')
+		assert.equal(sentences[1], ' How are you, my friend?')
+	})
+
+	it('gives up clause scanning after the scan limit', async () => {
+		const long = 'this opening clause just keeps going without any punctuation at all until eventually, it breaks.'
+		const events = await runChunker([long], { firstClauseFlush: true })
+		// The comma appears past the 48-char scan limit — no clause boundary.
+		const sentences = sentencesFromEvents(events)
+		assert.equal(sentences.length, 1)
+		assert.equal(joinDeltas(events), long)
+	})
+
+	it('does not clause-split when a leading fragment lacks word chars', async () => {
+		const events = await runChunker([', so yes that works for me'], { firstClauseFlush: true })
+		const sentences = sentencesFromEvents(events)
+		assert.ok(sentences[0] !== ',')
+	})
+
+	it('splits at an em dash', async () => {
+		const events = await runChunker(['Oh nice \u2014 so we can go ahead and book it.'], { firstClauseFlush: true })
+		const sentences = sentencesFromEvents(events)
+		assert.equal(sentences[0], 'Oh nice \u2014')
+		assert.equal(sentences[1], ' so we can go ahead and book it.')
+	})
+
+	it('default chunker behavior is unchanged when option is off', async () => {
+		const events = await runChunker(['Yeah, so the appointment is confirmed for Monday.'])
 		assert.equal(countBoundaries(events), 1)
 	})
 })

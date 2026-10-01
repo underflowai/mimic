@@ -11,7 +11,9 @@
 
 import * as telemetry from '#engine/telemetry.js'
 
-export type BargeOutcome = 'interrupted' | 'short_resumed' | 'timeout'
+import { evaluateLatencyBudgets, type LatencyBudgetViolation } from './latency-budgets.js'
+
+export type BargeOutcome = 'interrupted' | 'short_resumed' | 'timeout' | 'filler_held'
 
 export interface BargeEvent {
 	outcome: BargeOutcome
@@ -62,6 +64,7 @@ export type SoftPauseSource = 'deepgram_turn_start' | 'yield_timer' | 'unknown'
  */
 export type SoftPauseOutcome =
 	| 'resumed' // VAD speech end: caller stopped talking, agent resumes
+	| 'restarted' // long pause: buffered audio discarded, re-synthesized from sentence boundary
 	| 'escalated_to_interrupt' // substantive speech timeout: caller kept talking
 	| 'deferred' // handleTurnComplete while in softPaused
 	| 'interrupted' // external interrupt (call_ended, caller_substantive_speech)
@@ -272,7 +275,62 @@ export function createCallMetrics() {
 
 export type Metrics = ReturnType<typeof createCallMetrics>
 
-export function publishCallSummary(snapshot: CallMetrics, durationSeconds: number) {
+/**
+ * Wrap a metrics object so every recording also lands in the call event
+ * log. Keeps the event log complete (turn timings, barges, speculation,
+ * soft pauses) without touching any recording call site.
+ */
+export function withEventRecording(
+	metrics: Metrics,
+	record: (type: string, data?: Record<string, unknown>) => void,
+): Metrics {
+	return {
+		get turnTimings() {
+			return metrics.turnTimings
+		},
+		get bargeEvents() {
+			return metrics.bargeEvents
+		},
+		get speculationEvents() {
+			return metrics.speculationEvents
+		},
+		get softPauseEvents() {
+			return metrics.softPauseEvents
+		},
+		get turnOutcomes() {
+			return metrics.turnOutcomes
+		},
+		get discardedTurns() {
+			return metrics.discardedTurns
+		},
+		recordTurnTiming(timing) {
+			record('turn_timing', { ...timing })
+			metrics.recordTurnTiming(timing)
+		},
+		recordBarge(event) {
+			record('barge', { ...event })
+			metrics.recordBarge(event)
+		},
+		recordSpeculation(event) {
+			record('speculation', { ...event })
+			metrics.recordSpeculation(event)
+		},
+		recordSoftPause(event) {
+			record('soft_pause', { ...event })
+			metrics.recordSoftPause(event)
+		},
+		recordTurnOutcome(outcome) {
+			metrics.recordTurnOutcome(outcome)
+		},
+		incrementDiscarded() {
+			metrics.incrementDiscarded()
+		},
+		snapshot: () => metrics.snapshot(),
+		summarize: () => metrics.summarize(),
+	}
+}
+
+export function publishCallSummary(snapshot: CallMetrics, durationSeconds: number): LatencyBudgetViolation[] {
 	telemetry.metrics.count('mimic.call.completed')
 	telemetry.metrics.distribution('mimic.call.duration_seconds', durationSeconds, { unit: 'second' })
 	telemetry.metrics.gauge('mimic.call.turns', snapshot.turnTimings.length)
@@ -328,4 +386,12 @@ export function publishCallSummary(snapshot: CallMetrics, durationSeconds: numbe
 		const avg = Math.round(vadEndToFirstAudio.reduce((a, b) => a + b, 0) / vadEndToFirstAudio.length)
 		telemetry.metrics.distribution('mimic.call.vad_end_to_first_audio_avg_ms', avg, { unit: 'millisecond' })
 	}
+
+	const violations = evaluateLatencyBudgets(snapshot.turnTimings)
+	for (const violation of violations) {
+		telemetry.metrics.count('mimic.latency_budget.violation', 1, {
+			attributes: { stage: violation.stage, percentile: violation.percentile },
+		})
+	}
+	return violations
 }

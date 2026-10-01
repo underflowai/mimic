@@ -45,6 +45,8 @@ export interface ExtractionInput {
 	results: Record<string, unknown> | Record<string, TypedField>
 	toolCalls?: ToolCallRecord[]
 	successCondition?: SuccessCondition
+	/** AgentSpec success criteria — every one must hold for goalAchieved=true. */
+	successCriteria?: string[]
 }
 
 function normalizeToTypedSchema(results: Record<string, unknown>): Record<string, TypedField> {
@@ -163,6 +165,13 @@ export async function extractCallResult(
 		'Goal:', input.goal, '',
 		'Result schema:', formatResults(input.results), '',
 		'Tool calls:', formatToolCalls(input.toolCalls ?? []), '',
+		...(input.successCriteria && input.successCriteria.length > 0
+			? [
+					'Success criteria (from the agent contract — goalAchieved is true ONLY if every one of these holds):',
+					...input.successCriteria.map((c) => `- ${c}`),
+					'',
+				]
+			: []),
 		deterministic
 			? `Deterministic goal decision: goalAchieved=${deterministic.value}, reason: ${deterministic.reason}`
 			: 'Deterministic goal decision: none (use your judgment)',

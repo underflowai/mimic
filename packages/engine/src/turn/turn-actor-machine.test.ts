@@ -143,9 +143,11 @@ function createControllablePipeline() {
 interface TestMachineConfig {
 	commitResult?: CommittedTurn | null
 	commitError?: boolean
+	delays?: { substantiveSpeechMs?: number; yieldWindowMs?: number }
+	onCommitInput?: (input: unknown) => void
 }
 
-function createTestMachine(pipeline: ReturnType<typeof createControllablePipeline>, config?: TestMachineConfig) {
+function createTestMachine(pipeline: { logic: ReturnType<typeof createControllablePipeline>['logic'] }, config?: TestMachineConfig) {
 	const actionCalls: string[] = []
 
 	const commitDeferred = createDeferred<{ committedTurn: CommittedTurn } | null>()
@@ -154,7 +156,8 @@ function createTestMachine(pipeline: ReturnType<typeof createControllablePipelin
 		actors: {
 			runTurnPipeline: pipeline.logic,
 			playbackWait: playbackWaitActor,
-			commitActor: fromPromise(async () => {
+			commitActor: fromPromise(async ({ input }) => {
+				config?.onCommitInput?.(input)
 				if (config?.commitError) throw new Error('commit failed')
 				return commitDeferred.promise
 			}),
@@ -205,10 +208,13 @@ function createTestMachine(pipeline: ReturnType<typeof createControllablePipelin
 			flushPausedBuffer: () => {
 				actionCalls.push('flushPausedBuffer')
 			},
+			discardActiveTurn: () => {
+				actionCalls.push('discardActiveTurn')
+			},
 		},
 		delays: {
-			substantiveSpeechMs: 20,
-			yieldWindowMs: 10,
+			substantiveSpeechMs: config?.delays?.substantiveSpeechMs ?? 20,
+			yieldWindowMs: config?.delays?.yieldWindowMs ?? 10,
 		},
 	})
 
@@ -216,7 +222,7 @@ function createTestMachine(pipeline: ReturnType<typeof createControllablePipelin
 }
 
 function startActor(
-	pipeline: ReturnType<typeof createControllablePipeline>,
+	pipeline: { logic: ReturnType<typeof createControllablePipeline>['logic'] },
 	input?: Partial<TurnActorInput>,
 	config?: TestMachineConfig,
 ) {
@@ -743,5 +749,143 @@ describe('TurnActor machine', () => {
 			const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
 			assert.equal((final.output as TurnOutcome).kind, 'committed')
 		})
+	})
+})
+
+// ---------------------------------------------------------------------------
+// Restart-don't-resume — long pauses re-synthesize from the sentence boundary
+// ---------------------------------------------------------------------------
+
+function createRecordingPipeline() {
+	const inputs: RunTurnActorInput[] = []
+	let sendBack: PipelineSendBack | null = null
+	const readies = [createDeferred<PipelineSendBack>(), createDeferred<PipelineSendBack>()]
+
+	const logic = fromCallback<RunTurnActorEvent, RunTurnActorInput>(({ sendBack: sb, input }) => {
+		sendBack = sb
+		readies[inputs.length]?.resolve(sb)
+		inputs.push(input)
+	})
+
+	return {
+		logic,
+		inputs,
+		firstReady: readies[0].promise,
+		secondReady: readies[1].promise,
+		get sendBack() {
+			return sendBack!
+		},
+	}
+}
+
+describe('restart-don\u2019t-resume after long pauses', () => {
+	const fullDraft = 'First sentence is done. Second sentence continues here.'
+	const restartText = 'So \u2014 as I was saying: Second sentence continues here.'
+
+	function startPausableActor(config?: TestMachineConfig) {
+		const pipeline = createRecordingPipeline()
+		const commitInputs: Array<{ agentResponse: string }> = []
+		const { actor, actionCalls, commitDeferred } = startActor(
+			pipeline,
+			{
+				// Four confirmed words heard = exactly the first sentence.
+				getAudioSenderSnapshot: () => ({ sentMs: 2000, confirmedWordsPlayed: 4 }),
+			},
+			{
+				// Keep the substantive-speech escalation out of the way — these
+				// tests advance mocked time far past the default 20ms delay.
+				delays: { substantiveSpeechMs: 60_000 },
+				onCommitInput: (input) => commitInputs.push(input as { agentResponse: string }),
+				...config,
+			},
+		)
+		return { pipeline, actor, actionCalls, commitDeferred, commitInputs }
+	}
+
+	it('re-invokes the pipeline with connective + remainder and commits the original draft', async (t) => {
+		t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+		const { pipeline, actor, actionCalls, commitDeferred, commitInputs } = startPausableActor()
+
+		await pipeline.firstReady
+		pipeline.sendBack({ type: 'audio_started', agentResponse: fullDraft })
+		await waitFor(actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+
+		actor.send({ type: 'caller_turn_start' })
+		await waitFor(actor, (s) => matchesState(s, 'executing.softPaused'), waitOpts)
+
+		// Pause stretches past the restart threshold before the caller stops.
+		t.mock.timers.tick(750)
+		actor.send({ type: 'vad_speech_end' })
+
+		await pipeline.secondReady
+		assert.equal(pipeline.inputs.length, 2)
+		const restartStrategy = pipeline.inputs[1].strategy
+		assert.equal(restartStrategy.kind, 'fixed_text')
+		if (restartStrategy.kind === 'fixed_text') {
+			assert.equal(restartStrategy.text, restartText)
+		}
+		assert.ok(actionCalls.includes('discardActiveTurn'))
+		assert.ok(actionCalls.includes('interruptTts'))
+		assert.ok(!actionCalls.includes('flushPausedBuffer'))
+
+		// Drive the restarted pipeline to completion — the restart text must
+		// never replace the original draft in the commit.
+		pipeline.sendBack({ type: 'audio_started', agentResponse: restartText })
+		await waitFor(actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+		pipeline.sendBack({ type: 'stream_done', result: { ...defaultStreamResult(), agentResponse: restartText } })
+		await waitFor(actor, (s) => matchesState(s, 'awaitingPlayback'), waitOpts)
+		actor.send({ type: 'playback_confirmed' })
+		await waitFor(actor, (s) => matchesState(s, 'committing'), waitOpts)
+
+		assert.equal(commitInputs.length, 1)
+		assert.equal(commitInputs[0].agentResponse, fullDraft)
+
+		commitDeferred.resolve({ committedTurn: { ...defaultCommittedTurn(), agentResponse: fullDraft } })
+		const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
+		assert.equal((final.output as TurnOutcome).kind, 'committed')
+	})
+
+	it('short pauses still resume the buffered audio', async (t) => {
+		t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+		const { pipeline, actor, actionCalls } = startPausableActor()
+
+		await pipeline.firstReady
+		pipeline.sendBack({ type: 'audio_started', agentResponse: fullDraft })
+		await waitFor(actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+
+		actor.send({ type: 'caller_turn_start' })
+		await waitFor(actor, (s) => matchesState(s, 'executing.softPaused'), waitOpts)
+
+		t.mock.timers.tick(300)
+		actor.send({ type: 'vad_speech_end' })
+		await waitFor(actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+
+		assert.equal(pipeline.inputs.length, 1)
+		assert.ok(actionCalls.includes('flushPausedBuffer'))
+		assert.ok(!actionCalls.includes('discardActiveTurn'))
+	})
+
+	it('does not restart when nothing was heard yet', async (t) => {
+		t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 })
+		const pipeline = createRecordingPipeline()
+		const { actor, actionCalls } = startActor(
+			pipeline,
+			{ getAudioSenderSnapshot: () => ({ sentMs: 0, confirmedWordsPlayed: 0 }) },
+			{ delays: { substantiveSpeechMs: 60_000 } },
+		)
+
+		await pipeline.firstReady
+		pipeline.sendBack({ type: 'audio_started', agentResponse: fullDraft })
+		await waitFor(actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+
+		actor.send({ type: 'caller_turn_start' })
+		await waitFor(actor, (s) => matchesState(s, 'executing.softPaused'), waitOpts)
+
+		t.mock.timers.tick(900)
+		actor.send({ type: 'vad_speech_end' })
+		await waitFor(actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+
+		assert.equal(pipeline.inputs.length, 1)
+		assert.ok(actionCalls.includes('flushPausedBuffer'))
 	})
 })

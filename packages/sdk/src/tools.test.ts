@@ -35,7 +35,7 @@ describe('tool()', () => {
 // ---------------------------------------------------------------------------
 
 describe('introspectTools', () => {
-	it('extracts parameter descriptions from Zod .describe()', () => {
+	it('emits real JSON Schema with types, descriptions, and required list', () => {
 		const checkCalendar = tool({
 			description: 'Check available slots',
 			parameters: z.object({
@@ -49,18 +49,51 @@ describe('introspectTools', () => {
 		assert.equal(schemas.length, 1)
 		assert.equal(schemas[0]!.name, 'checkCalendar')
 		assert.equal(schemas[0]!.description, 'Check available slots')
-		assert.ok(schemas[0]!.parameters.date.includes('The date to check'))
-		assert.ok(schemas[0]!.parameters.limit.includes('Max results'))
+		assert.equal(schemas[0]!.kind, 'read')
+
+		const params = schemas[0]!.parameters as {
+			type: string
+			properties: Record<string, { type: string; description?: string }>
+			required?: string[]
+		}
+		assert.equal(params.type, 'object')
+		assert.equal(params.properties.date.type, 'string')
+		assert.equal(params.properties.date.description, 'The date to check')
+		assert.equal(params.properties.limit.type, 'number')
+		assert.deepEqual(params.required, ['date'])
 	})
 
-	it('uses field name when no .describe() is set', () => {
+	it('carries enum constraints into the schema', () => {
 		const t = tool({
-			description: 'Simple',
-			parameters: z.object({ query: z.string() }),
+			description: 'Set status',
+			parameters: z.object({ status: z.enum(['open', 'closed']) }),
 			run: async () => 'ok',
 		})
-		const schemas = introspectTools({ simple: t })
-		assert.equal(schemas[0]!.parameters.query, 'query')
+		const params = introspectTools({ t })[0]!.parameters as {
+			properties: Record<string, { enum?: string[] }>
+		}
+		assert.deepEqual(params.properties.status.enum, ['open', 'closed'])
+	})
+
+	it('marks write tools and defaults requiresConfirmation to true', () => {
+		const book = tool({
+			description: 'Book it',
+			kind: 'write',
+			parameters: z.object({ date: z.string() }),
+			run: async () => 'ok',
+		})
+		const cancel = tool({
+			description: 'Cancel it',
+			kind: 'write',
+			requiresConfirmation: false,
+			parameters: z.object({ id: z.string() }),
+			run: async () => 'ok',
+		})
+
+		const schemas = introspectTools({ book, cancel })
+		assert.equal(schemas[0]!.kind, 'write')
+		assert.equal(schemas[0]!.requiresConfirmation, true)
+		assert.equal(schemas[1]!.requiresConfirmation, false)
 	})
 
 	it('handles multiple tools', () => {

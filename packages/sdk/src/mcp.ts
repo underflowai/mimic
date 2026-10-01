@@ -24,21 +24,11 @@ import { z } from 'zod'
 
 import type { MimicTool, ToolInput } from './types.js'
 
-/** @internal Convert MCP JSON Schema to a fake ZodType that passes our introspection. */
-function mcpSchemaToDescription(schema: Record<string, unknown>): Record<string, string> {
-	const properties = (schema.properties ?? {}) as Record<string, { type?: string; description?: string }>
-	const required = new Set((schema.required ?? []) as string[])
-	const result: Record<string, string> = {}
-
-	for (const [key, prop] of Object.entries(properties)) {
-		const parts: string[] = []
-		if (prop.type) parts.push(prop.type)
-		if (prop.description) parts.push(`— ${prop.description}`)
-		if (!required.has(key)) parts.push('(optional)')
-		result[key] = parts.join(' ') || key
-	}
-
-	return result
+/** MCP annotation hints → read/write classification. Conservative: anything that isn't declared read-only counts as a write unless it's clearly a query. */
+function classifyMcpTool(annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }): 'read' | 'write' {
+	if (annotations?.readOnlyHint === true) return 'read'
+	if (annotations?.readOnlyHint === false || annotations?.destructiveHint === true) return 'write'
+	return 'read'
 }
 
 function createMcpTool(
@@ -46,6 +36,7 @@ function createMcpTool(
 	toolName: string,
 	description: string,
 	inputSchema: Record<string, unknown>,
+	annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean },
 ): MimicTool {
 	const zodSchema = z.record(z.unknown())
 
@@ -53,6 +44,7 @@ function createMcpTool(
 		__mimicTool: true,
 		description,
 		schema: zodSchema,
+		kind: classifyMcpTool(annotations),
 		async run(input: unknown) {
 			const args = (input ?? {}) as Record<string, unknown>
 			const result = await client.callTool({ name: toolName, arguments: args })
@@ -63,7 +55,8 @@ function createMcpTool(
 				.join('\n')
 			return text || JSON.stringify(result.content)
 		},
-		_mcpMeta: { toolName, inputSchema, paramDescriptions: mcpSchemaToDescription(inputSchema) },
+		// The real JSON Schema rides along so introspectTools can put it on the wire.
+		_mcpMeta: { toolName, inputSchema },
 	} as MimicTool & { _mcpMeta: unknown }
 }
 
@@ -114,6 +107,7 @@ export async function connectMcp(
 			mcpTool.name,
 			mcpTool.description ?? mcpTool.name,
 			(mcpTool.inputSchema ?? {}) as Record<string, unknown>,
+			mcpTool.annotations as { readOnlyHint?: boolean; destructiveHint?: boolean } | undefined,
 		)
 	}
 

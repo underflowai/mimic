@@ -1,0 +1,21 @@
+{"seq":0,"atMs":0,"type":"start_first_turn","data":{"hasPrepared":false,"openingBlock":"Say hi and confirm the Tuesday appointment."}}
+{"seq":1,"atMs":420,"type":"agent_first_audio","data":{"turnId":0}}
+{"seq":2,"atMs":460,"type":"turn_outcome","data":{"kind":"committed","turnId":0,"userTranscript":"","agentResponse":"Hey Dan — this is Aurora from Acme Dental.","endCallRequested":false}}
+{"seq":3,"atMs":1900,"type":"agent_playback_complete","data":{"turnId":0}}
+{"seq":4,"atMs":3000,"type":"vad_speech_start","data":{}}
+{"seq":5,"atMs":3200,"type":"caller_turn_start","data":{"transcript":"yeah"}}
+{"seq":6,"atMs":3600,"type":"caller_update","data":{"transcript":"yeah hi","confidence":0.5}}
+{"seq":7,"atMs":4100,"type":"vad_speech_end","data":{}}
+{"seq":8,"atMs":4200,"type":"caller_eager_turn","data":{"transcript":"yeah hi what's this about","confidence":0.4}}
+{"seq":9,"atMs":4700,"type":"caller_turn_complete","data":{"transcript":"yeah hi what's this about","confidence":0.9}}
+{"seq":10,"atMs":5150,"type":"agent_first_audio","data":{"turnId":1}}
+{"seq":11,"atMs":5200,"type":"turn_outcome","data":{"kind":"committed","turnId":1,"userTranscript":"yeah hi what's this about","agentResponse":"So — quick thing about your Tuesday appointment. Does two PM still work?","endCallRequested":false}}
+{"seq":12,"atMs":7600,"type":"agent_playback_complete","data":{"turnId":1}}
+{"seq":13,"atMs":8600,"type":"vad_speech_start","data":{}}
+{"seq":14,"atMs":8800,"type":"caller_turn_start","data":{"transcript":"okay"}}
+{"seq":15,"atMs":9300,"type":"vad_speech_end","data":{}}
+{"seq":16,"atMs":9400,"type":"caller_eager_turn","data":{"transcript":"okay yeah sounds good","confidence":0.4}}
+{"seq":17,"atMs":9900,"type":"caller_turn_complete","data":{"transcript":"okay yeah sounds good","confidence":0.9}}
+{"seq":18,"atMs":10350,"type":"agent_first_audio","data":{"turnId":2}}
+{"seq":19,"atMs":10400,"type":"turn_outcome","data":{"kind":"committed","turnId":2,"userTranscript":"okay yeah sounds good","agentResponse":"Great, you're all set for Tuesday. Bye now!","endCallRequested":false}}
+{"seq":20,"atMs":12000,"type":"agent_playback_complete","data":{"turnId":2}}

@@ -154,20 +154,45 @@ export function createDirector(cfg: DirectorConfig) {
 		return { userTranscript, agentResponse: trimmed }
 	}
 
-	function streamDraftTokenized(userTranscript: string, controlBlock: string, signal?: AbortSignal) {
+	function streamDraftTokenized(
+		userTranscript: string,
+		controlBlock: string,
+		signal?: AbortSignal,
+		options?: { predictedOutput?: string },
+	) {
 		const messages = buildMessages(controlBlock, userTranscript)
 		log.info({ priorTurnCount: turns.length, controlBlock }, 'control block')
+
+		const predictedOutput =
+			cfg.supportsPredictedOutputs && options?.predictedOutput?.trim() ? options.predictedOutput : null
+
+		async function createStream(withPrediction: boolean) {
+			const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
+				...completionParams,
+				messages,
+			}
+			if (withPrediction && predictedOutput) {
+				params.prediction = { type: 'content', content: predictedOutput }
+			}
+			return client.chat.completions.create(params, signal ? { signal } : undefined)
+		}
 
 		async function* events() {
 			let stream: Awaited<ReturnType<typeof client.chat.completions.create>>
 			try {
-				stream = await client.chat.completions.create(
-					{ ...completionParams, messages },
-					signal ? { signal } : undefined,
-				)
+				stream = await createStream(true)
 			} catch (err) {
 				if (signal?.aborted || isAbortLikeError(err)) return ''
-				throw err
+				if (!predictedOutput) throw err
+				// The model/endpoint may reject the prediction parameter —
+				// the turn must not die for an optional speedup.
+				log.warn({ err }, 'predicted-output request failed; retrying without prediction')
+				try {
+					stream = await createStream(false)
+				} catch (retryErr) {
+					if (signal?.aborted || isAbortLikeError(retryErr)) return ''
+					throw retryErr
+				}
 			}
 
 			let fullResponse = ''

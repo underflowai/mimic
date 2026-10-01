@@ -36,7 +36,10 @@ import type { TurnStrategy } from '../strategy.js'
 
 const log = createLogger('mimic:pipeline')
 
-export type RunTurnStrategyInput = Extract<TurnStrategy, { kind: 'presynthesized' | 'fresh' | 'first_turn' }>
+export type RunTurnStrategyInput = Extract<
+	TurnStrategy,
+	{ kind: 'presynthesized' | 'fresh' | 'first_turn' | 'fixed_text' }
+>
 
 export interface StreamResult {
 	agentResponse: string
@@ -90,6 +93,19 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 
 	function buildSource(): { source: PipelineSource; userTranscript: string; initialResponse: string } {
 		switch (strategy.kind) {
+			case 'fixed_text': {
+				// Verbatim synthesis of known text (restart-don't-resume).
+				const text = strategy.text
+				const events = (async function* () {
+					yield { type: 'token' as const, value: text }
+					return text
+				})()
+				return {
+					source: { kind: 'tokens', events },
+					userTranscript: strategy.transcript,
+					initialResponse: text,
+				}
+			}
 			case 'presynthesized':
 				return {
 					source: {
@@ -97,6 +113,7 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 						sink: strategy.sink,
 						ttsPromise: strategy.ttsPromise,
 						agentResponse: strategy.agentResponse,
+						endCallRequested: strategy.endCallRequested,
 						triggerSynthesisStart: strategy.triggerSynthesisStart,
 					},
 					userTranscript: strategy.transcript,
@@ -104,12 +121,35 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 				}
 			case 'fresh':
 			case 'first_turn': {
+				// Pre-synthesized greeting: the opening was generated during
+				// call setup — flush the buffered PCM instead of generating.
+				if (strategy.kind === 'first_turn' && strategy.prepared) {
+					const prepared = strategy.prepared
+					return {
+						source: {
+							kind: 'presynth',
+							sink: prepared.sink,
+							ttsPromise: prepared.ttsPromise,
+							agentResponse: prepared.agentResponse,
+							endCallRequested: prepared.endCallRequested,
+							triggerSynthesisStart: null,
+						},
+						userTranscript: '',
+						initialResponse: prepared.agentResponse,
+					}
+				}
 				const transcript = 'transcript' in strategy ? strategy.transcript : ''
 				const controlBlock = 'controlBlock' in strategy ? strategy.controlBlock : ''
 				const openingBlock = 'openingBlock' in strategy ? strategy.openingBlock : ''
 				const block = controlBlock || openingBlock
 				const effectiveTranscript = transcript || (strategy.kind === 'first_turn' ? '[call connected]' : '')
-				const streamResult = deps.director.streamDraftTokenized(effectiveTranscript, block, generationAbort.signal)
+				const predictedDraft = 'predictedDraft' in strategy ? strategy.predictedDraft : undefined
+				const streamResult = deps.director.streamDraftTokenized(
+					effectiveTranscript,
+					block,
+					generationAbort.signal,
+					predictedDraft ? { predictedOutput: predictedDraft } : undefined,
+				)
 				return {
 					source: { kind: 'tokens', events: streamResult.events },
 					userTranscript: transcript,

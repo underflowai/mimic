@@ -88,7 +88,7 @@ function createDeps() {
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		onHangupRequest: mock.fn(),
 	}
 
 	return { deps, streamTokenizedTranscripts, streamTokenizedBlocks }

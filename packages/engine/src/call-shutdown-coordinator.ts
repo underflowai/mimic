@@ -36,6 +36,8 @@ export interface CallShutdownResult<TTurn, TMetricsSnapshot> {
 	turnCount: number
 	durationSeconds: number
 	metrics: TMetricsSnapshot
+	/** Full per-call event log (replay/counterfactual substrate). */
+	eventLog: import('./replay/event-log.js').CallEventRecord[]
 }
 
 export interface CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot extends MetricsSnapshotLike, TSummary> {
@@ -53,6 +55,7 @@ export interface CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot extends Met
 	snapshotMetrics: () => TMetricsSnapshot
 	summarizeMetrics: () => TSummary
 	publishMetrics?: (snapshot: TMetricsSnapshot, durationSeconds: number) => void
+	listEvents?: () => import('./replay/event-log.js').CallEventRecord[]
 }
 
 export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends MetricsSnapshotLike, TSummary>(
@@ -128,6 +131,7 @@ export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends Me
 			turnCount: deps.getBriefingTurnCount(),
 			durationSeconds,
 			metrics: snapshot,
+			eventLog: deps.listEvents?.() ?? [],
 		}
 	}
 

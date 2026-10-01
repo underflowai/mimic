@@ -15,7 +15,7 @@
 	},
 	"files": ["build/"],
 	"scripts": {
-		"build": "tsc -b tsconfig.lib.json",
+		"build": "tsc -b tsconfig.lib.json && mkdir -p build/audio && cp src/audio/office-ambience.mp3 build/audio/",
 		"typecheck": "tsc -p tsconfig.json --noEmit"
 	},
 	"dependencies": {

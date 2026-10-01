@@ -1,4 +1,5 @@
 import { ZodObject, type ZodError, type ZodType } from 'zod'
+import { zodToJsonSchema } from 'zod-to-json-schema'
 
 import type { MimicTool, ToolInput, ToolSchema } from './types.js'
 
@@ -14,13 +15,14 @@ import type { MimicTool, ToolInput, ToolSchema } from './types.js'
  * import { z } from 'zod'
  * import { tool } from '@mimic/sdk'
  *
- * const checkCalendar = tool({
- *   description: 'Check available calendar slots',
+ * const bookAppointment = tool({
+ *   description: 'Book an appointment slot',
+ *   kind: 'write',
  *   parameters: z.object({
- *     date: z.string().describe('The date to check'),
+ *     date: z.string().describe('The date to book'),
  *   }),
  *   run: async ({ date }) => {
- *     return await calendar.getSlots(date)
+ *     return await calendar.book(date)
  *   },
  * })
  * ```
@@ -29,30 +31,39 @@ export function tool<T extends ZodType>(opts: {
 	description: string
 	parameters: T
 	run: (input: T extends ZodType<infer U> ? U : never) => Promise<string> | string
+	/** `'read'` (default) looks things up; `'write'` changes real-world state and is held behind the verification gate. */
+	kind?: 'read' | 'write'
+	/** For WRITE tools: require explicit caller confirmation before execution. Defaults to `true`. */
+	requiresConfirmation?: boolean
 }): MimicTool {
 	return {
 		__mimicTool: true,
 		description: opts.description,
 		schema: opts.parameters,
 		run: opts.run as (input: unknown) => Promise<string> | string,
+		kind: opts.kind,
+		requiresConfirmation: opts.requiresConfirmation,
 	}
 }
 
 // ── Schema → wire format ──────────────────────────────────────────────
 
-function describeZodField(key: string, field: ZodType): string {
-	const description = field.description
-	const isOptional = field.isOptional()
+/** Strip metadata keys the server-side validator doesn't need. */
+function cleanJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
+	const { $schema: _$schema, $ref: _$ref, definitions: _definitions, ...rest } = schema
+	return rest
+}
 
-	const parts: string[] = []
-	if (description) parts.push(description)
-	if (isOptional) parts.push('(optional)')
-
-	return parts.length > 0 ? parts.join(' ') : key
+function zodObjectToJsonSchema(schema: ZodType): Record<string, unknown> {
+	const converted = zodToJsonSchema(schema, { $refStrategy: 'none', target: 'jsonSchema7' })
+	return cleanJsonSchema(converted as Record<string, unknown>)
 }
 
 /**
  * Build tool schemas from a tools record for the API wire format.
+ * Emits real JSON Schema — parameter types, enums, required lists —
+ * so the server can validate arguments deterministically before
+ * execution.
  *
  * @example
  * ```typescript
@@ -61,19 +72,23 @@ function describeZodField(key: string, field: ZodType): string {
  */
 export function introspectTools(tools: Record<string, ToolInput>): ToolSchema[] {
 	return Object.entries(tools).map(([name, t]) => {
-		const mcpMeta = (t as { _mcpMeta?: { paramDescriptions: Record<string, string> } })._mcpMeta
-		if (mcpMeta) {
-			return { name, description: t.description, parameters: mcpMeta.paramDescriptions }
+		const kind = t.kind ?? 'read'
+		const base = {
+			name,
+			description: t.description,
+			kind,
+			...(kind === 'write' ? { requiresConfirmation: t.requiresConfirmation !== false } : {}),
 		}
 
-		const parameters: Record<string, string> = {}
-		if (t.schema instanceof ZodObject) {
-			const shape = t.schema.shape as Record<string, ZodType>
-			for (const [key, field] of Object.entries(shape)) {
-				parameters[key] = describeZodField(key, field)
-			}
+		const mcpMeta = (t as { _mcpMeta?: { inputSchema: Record<string, unknown> } })._mcpMeta
+		if (mcpMeta) {
+			return { ...base, parameters: cleanJsonSchema(mcpMeta.inputSchema) }
 		}
-		return { name, description: t.description, parameters }
+
+		if (t.schema instanceof ZodObject) {
+			return { ...base, parameters: zodObjectToJsonSchema(t.schema) }
+		}
+		return { ...base, parameters: { type: 'object' } }
 	})
 }
 

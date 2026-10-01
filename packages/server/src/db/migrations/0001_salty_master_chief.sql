@@ -1,0 +1,1 @@
+ALTER TABLE "api_calls" ADD COLUMN IF NOT EXISTS "call_data" jsonb;

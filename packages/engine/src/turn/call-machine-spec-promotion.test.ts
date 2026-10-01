@@ -120,7 +120,7 @@ function createEagerOnlyDeps(opts?: { validateResult?: boolean; specAudioComplet
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		onHangupRequest: mock.fn(),
 	}
 
 	return { deps, streamTokenizedCalls, preSendTexts, speculationEvents }

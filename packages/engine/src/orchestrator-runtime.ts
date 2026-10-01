@@ -1,5 +1,6 @@
 import type { CallerTurnEvent, FluxConfigureOptions, TtsSpeaker, VoiceActivityDetector } from './audio/types.js'
 import type { BackchannelEngine } from './backchannel/types.js'
+import type { PreparedGreeting } from './turn/strategy.js'
 
 interface RuntimeLogger {
 	info: (...args: unknown[]) => void
@@ -38,6 +39,8 @@ export interface OrchestratorRuntimeDeps {
 	ensureBackchannelEngine: () => void
 	buildOpeningBlock: () => string
 	getCallKeyterms: () => string[] | undefined
+	/** Pre-synthesize the greeting during call setup (dial/ring window). */
+	prepareGreeting?: (openingBlock: string) => Promise<PreparedGreeting | null>
 }
 
 export function createOrchestratorRuntime(deps: OrchestratorRuntimeDeps) {
@@ -47,6 +50,12 @@ export function createOrchestratorRuntime(deps: OrchestratorRuntimeDeps) {
 	let startPromise: Promise<void> | null = null
 	let vad: VoiceActivityDetector | null = null
 	let hasStarted = false
+
+	// Greeting pre-synthesis kicked off while the phone is still ringing.
+	// The opening block is built once and shared with start() so the
+	// prepared audio always matches the block it was generated from.
+	let greetingOpeningBlock: string | null = null
+	let greetingPromise: Promise<PreparedGreeting | null> | null = null
 
 	// Keep hold of every registered transcriber listener so shutdown can detach
 	// them. Prevents listener leaks if the runtime were to be re-used and also
@@ -140,6 +149,10 @@ export function createOrchestratorRuntime(deps: OrchestratorRuntimeDeps) {
 			vad = vadResult.status === 'fulfilled' ? vadResult.value : null
 			if (!vad) deps.log.error('VAD initialization failed, falling back to Deepgram-only interrupt detection')
 			deps.ensureBackchannelEngine()
+			if (deps.prepareGreeting) {
+				greetingOpeningBlock = deps.buildOpeningBlock()
+				greetingPromise = deps.prepareGreeting(greetingOpeningBlock).catch(() => null)
+			}
 			deps.log.info({ elapsed: Date.now() - t0 }, 'services connected')
 		})().catch((err) => {
 			transcriberReady = null
@@ -158,7 +171,7 @@ export function createOrchestratorRuntime(deps: OrchestratorRuntimeDeps) {
 			await connectServices()
 
 			deps.log.info('generating first turn')
-			const openingBlock = deps.buildOpeningBlock()
+			const openingBlock = greetingOpeningBlock ?? deps.buildOpeningBlock()
 
 			if (transcriberReady) {
 				await transcriberReady
@@ -168,7 +181,14 @@ export function createOrchestratorRuntime(deps: OrchestratorRuntimeDeps) {
 				}
 			}
 
-			deps.callMachineRuntime.sendToCallMachine({ type: 'start_first_turn', openingBlock })
+			// Prepared greeting: generation started during dial, so awaiting it
+			// is always at least as fast as generating from scratch here.
+			const prepared = greetingPromise ? await greetingPromise : null
+			if (prepared) {
+				deps.callMachineRuntime.sendToCallMachine({ type: 'start_first_turn', openingBlock, prepared })
+			} else {
+				deps.callMachineRuntime.sendToCallMachine({ type: 'start_first_turn', openingBlock })
+			}
 			hasStarted = true
 		})().catch((err) => {
 			hasStarted = false

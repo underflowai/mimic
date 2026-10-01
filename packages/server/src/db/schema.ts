@@ -31,6 +31,10 @@ export const apiAgents = pgTable('api_agents', {
 	webhook: text('webhook'),
 	successCondition: jsonb('success_condition'),
 	ambience: jsonb('ambience'),
+	/** Machine-checkable contract sidecar emitted by the goal compiler (AgentSpec). */
+	agentSpec: jsonb('agent_spec'),
+	/** Compile-time eval artifacts: adversarial caller personas + scoring rubric. */
+	evals: jsonb('evals'),
 	createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -43,14 +47,19 @@ export const apiCalls = pgTable(
 		toPhone: text('to_phone').notNull(),
 		status: callStatusEnum('status').notNull().default('pending'),
 		callContext: jsonb('call_context').notNull().default({}),
+		/** Per-call structured data — compiled prompts reference the keys, values are injected at runtime. */
+		callData: jsonb('call_data'),
 		transcript: jsonb('transcript'),
 		toolCalls: jsonb('tool_calls'),
+		/** Verified-actions audit trail: proposed → gate → executed, with evidence spans. */
+		toolAudit: jsonb('tool_audit'),
 		result: jsonb('result'),
 		goalAchieved: boolean('goal_achieved'),
 		goalAchievedReason: text('goal_achieved_reason'),
 		duration: integer('duration'),
 		errorMessage: text('error_message'),
 		recordingPath: text('recording_path'),
+		eventLogPath: text('event_log_path'),
 		idempotencyKey: text('idempotency_key'),
 		webhookDeliveredAt: timestamp('webhook_delivered_at', { withTimezone: true }),
 		createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -72,6 +72,7 @@ function createHarness() {
 		vad,
 		ensureBackchannelEngine,
 		createVoiceActivityDetector,
+		runtimeDeps: { tts, specTts },
 	}
 }
 
@@ -189,6 +190,64 @@ describe('createOrchestratorRuntime', () => {
 			2,
 		)
 		assert.equal(h.transcriber.on.mock.calls.length > 0, true)
+	})
+
+	it('start attaches the pre-synthesized greeting when preparation succeeded', async () => {
+		const h = createHarness()
+		const prepared = {
+			agentResponse: 'Hi, this is Aurora calling.',
+			sink: { chunks: [], done: true, forward: null },
+			ttsPromise: null,
+			endCallRequested: false,
+		}
+		const prepareGreeting = mock.fn(async (_openingBlock: string) => prepared)
+		const runtime = createOrchestratorRuntime({
+			log: { info: () => {}, warn: () => {}, error: () => {} },
+			transcriber: h.transcriber as never,
+			tts: h.runtimeDeps.tts,
+			specTts: h.runtimeDeps.specTts,
+			callMachineRuntime: h.turnEngine as never,
+			createVoiceActivityDetector: h.createVoiceActivityDetector as never,
+			getBackchannelEngine: () => null,
+			ensureBackchannelEngine: () => {},
+			buildOpeningBlock: () => 'opening block',
+			getCallKeyterms: () => [],
+			prepareGreeting: prepareGreeting as never,
+		})
+
+		await runtime.start()
+
+		// Prep was kicked off during connect with the same opening block.
+		assert.equal(prepareGreeting.mock.calls.length, 1)
+		assert.equal(prepareGreeting.mock.calls[0]!.arguments[0], 'opening block')
+		const event = h.turnEngine.sendToCallMachine.mock.calls[0]!.arguments[0]
+		assert.equal(event.type, 'start_first_turn')
+		assert.equal(event.openingBlock, 'opening block')
+		assert.equal((event.prepared as typeof prepared).agentResponse, 'Hi, this is Aurora calling.')
+	})
+
+	it('start falls back to fresh generation when greeting prep fails', async () => {
+		const h = createHarness()
+		const prepareGreeting = mock.fn(async (_openingBlock: string) => null)
+		const runtime = createOrchestratorRuntime({
+			log: { info: () => {}, warn: () => {}, error: () => {} },
+			transcriber: h.transcriber as never,
+			tts: h.runtimeDeps.tts,
+			specTts: h.runtimeDeps.specTts,
+			callMachineRuntime: h.turnEngine as never,
+			createVoiceActivityDetector: h.createVoiceActivityDetector as never,
+			getBackchannelEngine: () => null,
+			ensureBackchannelEngine: () => {},
+			buildOpeningBlock: () => 'opening block',
+			getCallKeyterms: () => [],
+			prepareGreeting: prepareGreeting as never,
+		})
+
+		await runtime.start()
+
+		const event = h.turnEngine.sendToCallMachine.mock.calls[0]!.arguments[0]
+		assert.equal(event.type, 'start_first_turn')
+		assert.equal('prepared' in event, false)
 	})
 
 	it('routes caller audio to transcriber, backchannel engine, and vad', async () => {

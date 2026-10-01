@@ -76,6 +76,8 @@ graph TD
 
 Tools run through the **tool supervisor** (`supervisor-machine.ts`), which spawns a child **invocation actor** per detected tool intent. Each invocation owns its lifecycle (`detecting → awaiting_args → executing → ready`). A background classifier (`watcher.ts`) decides `execute / not_ready / none` per utterance. The director does NOT call tools natively — it speaks stall/filler via control-block guidance while tools run in the background. Results are committed to director history and injected into the `<tool_results>` section of subsequent control blocks. The agent naturally incorporates results on the next caller-triggered or silence-watchdog turn — no proactive follow-up turn is fired.
 
+Writes clear two checks before they run. The watcher must quote the caller's authorizing words (checked against the caller's actual turns), and `write-gate.ts` checks that each argument value has a source: the caller's words, a prior read result, or text the integrator supplied for the call (`toolKnownValues`). Contact details and identifiers (emails, phone numbers, codes) with no source hold the write as `not_ready` with a `verify:<arg>` blocker and a director note asking for a readback; dates, names, and free text are only recorded as evidence spans or `unverifiedArgs`.
+
 ```mermaid
 sequenceDiagram
     participant Caller
@@ -402,6 +404,7 @@ mimic/
     tools/supervisor-machine.ts   — tool supervisor, spawns per-invocation child actors
     tools/invocation-machine.ts   — per-tool lifecycle (detecting/awaiting_args/executing/ready/claimed/delivered)
     tools/watcher.ts              — tool intent classifier: execute/not-ready/none per utterance
+    tools/write-gate.ts           — evidence check for write arguments (caller words / read results / supplied data)
     tool-runner.ts                — shared ToolDefinition type
     tool-transport.ts             — web search + SDK socket tool execution routing
     web-searcher.ts               — OpenAI Responses API web search

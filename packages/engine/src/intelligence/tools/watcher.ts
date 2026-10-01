@@ -18,6 +18,7 @@ import { loadPrompt } from '#engine/prompts.js'
 
 import { formatTurnsForPrompt, type CallTurn } from '../../shared/prompt-turns.js'
 import type { ToolDefinition } from './runner.js'
+import { buildWriteGateSources, checkWriteArgs, type ToolEvidenceSpan } from './write-gate.js'
 
 const log = createLogger('mimic:tool-watcher')
 
@@ -30,6 +31,10 @@ export interface WatcherDecision {
 	reasoning: string
 	/** Explicit caller withdrawal of the existing pending tool, never a running-tool cancellation. */
 	cancelExisting?: boolean
+	/** For writes: where each argument value was found (caller, lookup result, supplied data). */
+	evidence?: ToolEvidenceSpan[]
+	/** For writes: arguments with no corroborating source that were not strict enough to block. */
+	unverifiedArgs?: string[]
 }
 
 const watcherDecisionSchema = z.object({
@@ -48,6 +53,12 @@ export interface ToolWatcherInput {
 	recentTurns: CallTurn[]
 	tools: ToolDefinition[]
 	priorToolResults?: Array<{ toolName: string; result: string }>
+	/**
+	 * Integrator-supplied text (per-call data, context) that counts as a
+	 * legitimate source for write-tool argument values, alongside the caller's
+	 * words and prior read results.
+	 */
+	knownValues?: string[]
 	existingToolName?: string
 	existingToolArgs?: Record<string, unknown>
 	callerDateTime?: string
@@ -336,12 +347,36 @@ function normalizeDecision(parsed: z.infer<typeof watcherDecisionSchema>, input:
 	for (const key of requiredParameters(tool)) {
 		if (!(key in args) || (typeof args[key] === 'string' && !(args[key] as string).trim())) missing.add(key)
 	}
+	let evidence: ToolEvidenceSpan[] | undefined
+	let unverifiedArgs: string[] | undefined
+	let gateNote: string | null = null
 	if (tool.kind === 'write') {
 		const callerStatements = [
 			input.transcript,
 			...input.recentTurns.filter((turn) => turn.role === 'user').map((turn) => turn.content),
 		]
 		if (!isGroundedCallerQuote(parsed.writeAuthorizationQuote, callerStatements)) missing.add('authorization')
+
+		// The model says the caller authorized the write; the gate checks that the
+		// values it is about to send actually came from somewhere.
+		const gate = checkWriteArgs(
+			tool.name,
+			args,
+			buildWriteGateSources({
+				readResults: input.priorToolResults,
+				turns: input.recentTurns,
+				callerTranscript: input.transcript,
+				knownValues: input.knownValues,
+			}),
+		)
+		for (const arg of gate.blocked) missing.add(`verify:${arg}`)
+		evidence = gate.evidence
+		unverifiedArgs = gate.unverified
+		gateNote = gate.reason
+		log.info(
+			{ tool: tool.name, blocked: gate.blocked, unverified: gate.unverified, evidence: gate.evidence },
+			'write gate',
+		)
 	}
 	// Invocation readiness is based on missing.length, so not_ready must retain a
 	// blocker even if the model forgot to identify it.
@@ -354,10 +389,12 @@ function normalizeDecision(parsed: z.infer<typeof watcherDecisionSchema>, input:
 		missing: blocked ? Array.from(missing) : null,
 		directorNote:
 			blocked && parsed.decision === 'execute'
-				? `${tool.name} needs: ${Array.from(missing).join(', ')}.`
+				? (gateNote ?? `${tool.name} needs: ${Array.from(missing).join(', ')}.`)
 				: parsed.directorNote,
 		reasoning: parsed.reasoning,
 		cancelExisting: false,
+		...(evidence && { evidence }),
+		...(unverifiedArgs && { unverifiedArgs }),
 	}
 }
 

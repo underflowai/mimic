@@ -131,6 +131,54 @@ describe('tool watcher', () => {
 		}
 	})
 
+	it('holds a write whose contact detail has no source, and tells the director to read it back', async () => {
+		const sendText: ToolDefinition = {
+			name: 'sendText',
+			description: 'Text the caller',
+			kind: 'write',
+			parameters: {
+				type: 'object',
+				properties: { phone: { type: 'string' }, message: { type: 'string' } },
+				required: ['phone', 'message'],
+			},
+		}
+		const transcript = 'Yes, text me the details.'
+		const args = { phone: '+1 415 555 1234', message: 'Your appointment is Tuesday at 3.' }
+
+		// Nobody said the number: wait for a readback.
+		const held = fixture({ tool: 'sendText', args, writeAuthorizationQuote: transcript })
+		const heldResult = await watchForToolAction(held.client, { ...input, transcript, tools: [sendText] })
+		assert.equal(heldResult.decision, 'not_ready')
+		assert.deepEqual(heldResult.missing, ['verify:phone'])
+		assert.match(heldResult.directorNote!, /sendText must wait: phone \(phone number/)
+		assert.deepEqual(heldResult.unverifiedArgs, ['message'])
+
+		// The caller spoke it earlier: run, with the quote kept as evidence.
+		const spoken = fixture({ tool: 'sendText', args, writeAuthorizationQuote: transcript })
+		const spokenResult = await watchForToolAction(spoken.client, {
+			...input,
+			transcript,
+			tools: [sendText],
+			recentTurns: [{ role: 'user', content: 'My cell is four one five, five five five, one two three four.' }],
+		})
+		assert.equal(spokenResult.decision, 'execute')
+		assert.deepEqual(
+			spokenResult.evidence?.map((span) => [span.arg, span.source]),
+			[['phone', 'caller']],
+		)
+
+		// Or the integrator supplied it with the call.
+		const supplied = fixture({ tool: 'sendText', args, writeAuthorizationQuote: transcript })
+		const suppliedResult = await watchForToolAction(supplied.client, {
+			...input,
+			transcript,
+			tools: [sendText],
+			knownValues: ['<data>\npatientPhone: (415) 555-1234\n</data>'],
+		})
+		assert.equal(suppliedResult.decision, 'execute')
+		assert.equal(suppliedResult.evidence?.[0]?.source, 'known_values')
+	})
+
 	it('matches whole words only, so a fragment inside another word is not a quote', () => {
 		assert.equal(isGroundedCallerQuote('book it', ['Please do not rebook it']), false)
 		assert.equal(isGroundedCallerQuote('book it', ['Please book it now']), true)

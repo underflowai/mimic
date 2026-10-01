@@ -105,6 +105,19 @@ describe('buildOrchestratorConfigFromAgent', () => {
 		)
 	})
 
+	it('offers supplied data and context to the write gate as legitimate argument sources', () => {
+		const withBoth = buildOrchestratorConfigFromAgent(
+			agent({ context: { office: 'Bright Smiles, (512) 555-0100' } }),
+			undefined,
+			{ patientPhone: '(415) 555-1234' },
+		)
+		assert.deepEqual(withBoth.orchestratorConfig.toolKnownValues, [
+			'<data>\npatientPhone: (415) 555-1234\n</data>',
+			'office: Bright Smiles, (512) 555-0100',
+		])
+		assert.deepEqual(buildOrchestratorConfigFromAgent(agent()).orchestratorConfig.toolKnownValues, [])
+	})
+
 	it('leaves the prompt alone when a call has no data', () => {
 		assert.equal(
 			buildOrchestratorConfigFromAgent(agent(), undefined, null).orchestratorConfig.systemPrompt,

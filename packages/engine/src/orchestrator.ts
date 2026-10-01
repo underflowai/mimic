@@ -89,6 +89,13 @@ export interface CallOrchestratorConfig {
 	onBackchannel?: (token: import('./backchannel/engine.js').BackchannelToken) => void
 	tools?: import('./intelligence/tools/runner.js').ToolDefinition[]
 	executeTool?: import('./intelligence/tools/transport.js').ToolExecutor
+	/**
+	 * Text the integrator supplied for this call (per-call data, context).
+	 * Write-tool arguments that are contact details or identifiers must
+	 * appear in the caller's words, a prior read result, or here; otherwise
+	 * the write waits for a readback.
+	 */
+	toolKnownValues?: string[]
 	maxCompletionTokens?: number
 	/**
 	 * Lets the director end the call by finishing a reply with `[end-call]`.
@@ -245,6 +252,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		getDirectorTurns: () => director.listTurns(),
 		tools: callConfig.tools,
 		executeTool: callConfig.executeTool,
+		toolKnownValues: callConfig.toolKnownValues,
 		endCallEnabled,
 		// Either the silence watchdog exhausted its check-in budget or the
 		// director ended its reply with `[end-call]`. Emit the hangup event so

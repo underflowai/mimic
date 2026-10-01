@@ -98,6 +98,11 @@ function normalizeContext(context: GoalContext): string {
 	return entries.map(([key, value]) => `${key}: ${value}`).join('\n')
 }
 
+function hasContext(context: GoalContext | undefined): context is GoalContext {
+	if (!context) return false
+	return typeof context === 'string' ? context.trim().length > 0 : Object.keys(context).length > 0
+}
+
 function formatObjectBlock(value: Record<string, unknown>) {
 	const entries = Object.entries(value)
 	if (entries.length === 0) return 'None provided.'
@@ -300,6 +305,11 @@ export function buildOrchestratorConfigFromAgent(
 			textQualityBlock: agent.turnControlBlock?.replaceAll('[AGENT_NAME]', persona.firstName),
 			endCallEnabled: true,
 			tools: agent.tools.length > 0 ? agent.tools : undefined,
+			// Contact details and identifiers the integrator supplied are legitimate
+			// write-tool arguments even though the caller never spoke them.
+			toolKnownValues: [dataBlock, hasContext(agent.context) ? normalizeContext(agent.context) : ''].filter(
+				(text) => text.trim().length > 0,
+			),
 		},
 	}
 }

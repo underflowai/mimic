@@ -112,6 +112,8 @@ export interface CallMachineRuntimeDeps {
 	getDirectorTurns: () => CallTurn[]
 	tools?: import('../intelligence/tools/runner.js').ToolDefinition[]
 	executeTool?: import('../intelligence/tools/transport.js').ToolExecutor
+	/** Integrator-supplied text that corroborates write-tool argument values (see `write-gate.ts`). */
+	toolKnownValues?: string[]
 	/**
 	 * Whether the director may end the call with the `[end-call]` tag.
 	 * When false the tag is still stripped from speech, but ignored.
@@ -445,6 +447,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					recentTurns: input.recentTurns,
 					tools: allTools,
 					priorToolResults: getCompletedToolResults(),
+					knownValues: deps.toolKnownValues,
 					callerDateTime: deps.getCallerDateTime(),
 					existingToolName: input.existingToolName,
 					existingToolArgs: input.existingToolArgs,

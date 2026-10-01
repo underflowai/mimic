@@ -98,3 +98,7 @@ A third pass worked from two production calls pulled from the worker logs rather
 - **Hold requests.** "Hang on, let me grab my calendar" or a silence follow-up the director answers with nothing switches the watchdog to `MIMIC_HOLD_IDLE_MS` (45s) until the caller's next real turn.
 
 Not changed: the dental opening still names the reason for the call before confirming who answered (a privacy call for the prompt author), and the backchannel engine remains unwired in the server.
+
+## Verified actions
+
+Recommendation 3 above concerned argument invalidation; the shipped change is narrower and deterministic. `write-gate.ts` checks each write-tool argument against the caller's words, prior read results, and the integrator's per-call data and context. A phone number, email, or code that appears in none of them holds the write with a `verify:<arg>` blocker and a readback note for the director; the authorizing-quote check still applies. Everything else (dates, names, free text) is recorded as an evidence span or an unverified argument in the watcher log, not blocked — their formats vary too much to block on without a corpus showing it is safe.

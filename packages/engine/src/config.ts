@@ -23,7 +23,8 @@ export const config = {
 			get defaultProvider(): MimicDirectorProvider {
 				return parseDirectorProvider(getEnv('MIMIC_DIRECTOR_PROVIDER'))
 			},
-			defaultOpenaiModel: 'gpt-5-chat-latest',
+			// gpt-5-chat-latest was retired 2026-07-23. `chat-latest` tracks the current ChatGPT Instant model.
+			defaultOpenaiModel: 'chat-latest',
 			defaultAnthropicModel: 'claude-haiku-4-5',
 		},
 		openai: {

@@ -89,6 +89,8 @@ export type ClassifyResultEvent = {
 	toolArgs: Record<string, unknown> | null
 	missingArgs: string[]
 	directorNote: string | null
+	/** Explicit withdrawal of the pending action; ordinary none/failure leaves it intact. */
+	cancelExisting?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -229,14 +231,28 @@ function supersedeOverflowExecuting(children: Record<string, unknown>, currentTa
 
 export function getToolStateForControlBlock(snapshot: ToolSupervisorSnapshot): ToolStateForControlBlock {
 	const pendingTools: string[] = snapshot.context.activeDirectorNote ? [snapshot.context.activeDirectorNote] : []
+	const executingTools: string[] = []
 	const toolResults: Array<{ topic: string; result: string }> = []
+
+	for (const ref of getInvocationRefs(snapshot.children).sort(byCreationOrder)) {
+		const state = getInvocationState(ref)
+		const ctx = getInvocationContext(ref)
+		if (state === 'executing') {
+			executingTools.push(`${ctx.toolName}: ${ctx.query}`)
+		} else if (state === 'awaiting_args') {
+			// Another invocation finishing can clear activeDirectorNote. Keep the
+			// actual missing fields visible until this invocation is resolved.
+			pendingTools.push(`${ctx.toolName} has not started; missing required information: ${ctx.missingArgs.join(', ')}.`)
+			if (ctx.directorNote && !pendingTools.includes(ctx.directorNote)) pendingTools.push(ctx.directorNote)
+		}
+	}
 
 	for (const r of snapshot.context.pendingResults) {
 		toolResults.push({ topic: r.topic, result: r.result })
 	}
 
 	const toolDefinitions = snapshot.context.tools.map((t) => ({ name: t.name, description: t.description }))
-	return { pendingTools, executingTools: [], toolResults, toolDefinitions }
+	return { pendingTools, executingTools, toolResults, toolDefinitions }
 }
 
 /**
@@ -378,7 +394,9 @@ export const toolSupervisor = toolSupervisorSetup.createMachine({
 						const state = getInvocationState(ref)
 						const ctx = getInvocationContext(ref)
 						if (!event.needsTool || !event.toolName) {
-							if (state === 'detecting') {
+							if (state === 'awaiting_args' && event.cancelExisting === true) {
+								ref.send({ type: 'SUPERSEDE' })
+							} else if (state === 'detecting') {
 								ref.send({
 									type: 'CLASSIFY_RESULT',
 									needsTool: false,

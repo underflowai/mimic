@@ -385,6 +385,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					recentTurns: input.recentTurns,
 					tools: allTools,
 					priorToolResults: getCompletedToolResults(),
+					callerDateTime: deps.getCallerDateTime(),
 					existingToolName: input.existingToolName,
 					existingToolArgs: input.existingToolArgs,
 					signal: abortController.signal,
@@ -402,6 +403,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 							toolArgs: decision.args,
 							missingArgs: decision.missing ?? [],
 							directorNote: decision.directorNote,
+							cancelExisting: decision.cancelExisting === true,
 						})
 					})
 					.catch(async (err) => {
@@ -594,7 +596,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					type: 'DETECT_INTENT',
 					transcript: p.transcript,
 					turnId: context.nextTurnId,
-					recentTurns: deps.getDirectorTurns().slice(-10),
+					recentTurns: deps.getDirectorTurns(),
 				})
 				enqueue.raise({
 					type: 'turn_complete',

@@ -3,6 +3,8 @@ import { describe, it } from 'node:test'
 import { z } from 'zod'
 
 import { executeTool, introspectTools, tool } from './tools.js'
+import { Mimic } from './index.js'
+import type { ToolSchema } from './types.js'
 
 // ---------------------------------------------------------------------------
 // tool()
@@ -17,6 +19,7 @@ describe('tool()', () => {
 		})
 		assert.equal(t.__mimicTool, true)
 		assert.equal(t.description, 'Check slots')
+		assert.equal(t.kind, 'write')
 	})
 
 	it('run receives validated input from schema', async () => {
@@ -35,9 +38,10 @@ describe('tool()', () => {
 // ---------------------------------------------------------------------------
 
 describe('introspectTools', () => {
-	it('extracts parameter descriptions from Zod .describe()', () => {
+	it('preserves types, descriptions, required fields, and explicit read kind', () => {
 		const checkCalendar = tool({
 			description: 'Check available slots',
+			kind: 'read',
 			parameters: z.object({
 				date: z.string().describe('The date to check'),
 				limit: z.number().optional().describe('Max results'),
@@ -49,18 +53,98 @@ describe('introspectTools', () => {
 		assert.equal(schemas.length, 1)
 		assert.equal(schemas[0]!.name, 'checkCalendar')
 		assert.equal(schemas[0]!.description, 'Check available slots')
-		assert.ok(schemas[0]!.parameters.date.includes('The date to check'))
-		assert.ok(schemas[0]!.parameters.limit.includes('Max results'))
+		assert.equal(schemas[0]!.kind, 'read')
+		assert.deepEqual(schemas[0]!.parameters.properties, {
+			date: { type: 'string', description: 'The date to check' },
+			limit: { type: 'number', description: 'Max results' },
+		})
+		assert.deepEqual(schemas[0]!.parameters.required, ['date'])
 	})
 
-	it('uses field name when no .describe() is set', () => {
+	it('preserves string type without an invented description', () => {
 		const t = tool({
 			description: 'Simple',
 			parameters: z.object({ query: z.string() }),
 			run: async () => 'ok',
 		})
 		const schemas = introspectTools({ simple: t })
-		assert.equal(schemas[0]!.parameters.query, 'query')
+		assert.deepEqual(schemas[0]!.parameters.properties, { query: { type: 'string' } })
+		assert.equal(schemas[0]!.kind, 'write')
+	})
+
+	it('preserves booleans, numbers, arrays, enums, nested objects, and optional fields', () => {
+		const filters = tool({
+			description: 'Filter results',
+			kind: 'read',
+			parameters: z.object({
+				enabled: z.boolean(),
+				limit: z.number().int(),
+				levels: z.array(z.enum(['basic', 'advanced'])),
+				details: z.object({ label: z.string().optional(), count: z.number() }),
+				note: z.string().optional(),
+			}),
+			run: async () => 'ok',
+		})
+		const [schema] = introspectTools({ filters })
+		assert.deepEqual(schema!.parameters.required, ['enabled', 'limit', 'levels', 'details'])
+		assert.deepEqual(schema!.parameters.properties, {
+			enabled: { type: 'boolean' },
+			limit: { type: 'integer' },
+			levels: { type: 'array', items: { type: 'string', enum: ['basic', 'advanced'] } },
+			details: {
+				type: 'object',
+				properties: { label: { type: 'string' }, count: { type: 'number' } },
+				required: ['count'],
+				additionalProperties: false,
+			},
+			note: { type: 'string' },
+		})
+	})
+
+	it('defaults legacy tool objects without a kind to write', () => {
+		const legacy = {
+			__mimicTool: true as const,
+			description: 'Legacy tool',
+			schema: z.object({}),
+			run: async () => 'ok',
+		}
+		assert.equal(introspectTools({ legacy })[0]!.kind, 'write')
+	})
+
+	it('sends tool kinds and complete parameter schemas on the call request', async () => {
+		let sentTools: ToolSchema[] = []
+		const fetchImpl: typeof fetch = async (_url, init) => {
+			if (init?.method === 'POST') {
+				sentTools = (JSON.parse(String(init.body)) as { tools: ToolSchema[] }).tools
+				return new Response(JSON.stringify({ id: 'call_1', status: 'pending' }), { status: 201 })
+			}
+			return new Response(
+				JSON.stringify({
+					id: 'call_1',
+					status: 'completed',
+					transcript: [],
+					result: {},
+					goalAchieved: false,
+					goalAchievedReason: 'Test',
+					duration: 0,
+					errorMessage: null,
+				}),
+			)
+		}
+		const mimic = new Mimic({ apiKey: 'mk_test', fetch: fetchImpl, WebSocket: null })
+		const tools = {
+			lookup: tool({
+				kind: 'read',
+				description: 'Lookup',
+				parameters: z.object({ enabled: z.boolean(), count: z.number().optional() }),
+				run: async () => 'ok',
+			}),
+			book: tool({ description: 'Book', parameters: z.object({ guests: z.number() }), run: async () => 'ok' }),
+		}
+		await mimic.call({ to: '+15551234567', goal: 'Check options', tools, pollIntervalMs: 1 }).result
+		assert.deepEqual(sentTools, introspectTools(tools))
+		assert.equal(sentTools[0]!.kind, 'read')
+		assert.equal(sentTools[1]!.kind, 'write')
 	})
 
 	it('handles multiple tools', () => {
@@ -146,7 +230,9 @@ describe('executeTool', () => {
 		const t = tool({
 			description: 'Fail',
 			parameters: z.object({}),
-			run: async () => { throw new Error('database down') },
+			run: async () => {
+				throw new Error('database down')
+			},
 		})
 		await assert.rejects(() => executeTool({ fail: t }, 'fail', {}), { message: 'database down' })
 	})

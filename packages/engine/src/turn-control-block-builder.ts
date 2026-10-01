@@ -125,6 +125,8 @@ export async function createTurnControlBlockBuilder(deps: TurnControlBlockBuilde
 
 		const silenceInstruction = buildSilenceInstruction(prompts, opts)
 		if (silenceInstruction) signalParts.push(silenceInstruction)
+		// Apply these to both compiler-generated and persona blocks, after situational nudges.
+		signalParts.push(prompts.turnPriorities)
 
 		let block = strategyBlock
 		if (signalParts.length > 0) {

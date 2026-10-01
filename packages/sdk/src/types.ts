@@ -59,6 +59,7 @@ export interface Persona {
  *
  * const checkCalendar = tool({
  *   description: 'Check available calendar slots',
+ *   kind: 'read',
  *   parameters: z.object({
  *     date: z.string().describe('The date to check'),
  *   }),
@@ -70,6 +71,10 @@ export interface MimicTool {
 	/** @internal */
 	__mimicTool: true
 	description: string
+	/** Unspecified tools are treated as writes; reads must be declared explicitly. */
+	kind?: 'read' | 'write'
+	/** @internal Preserve the original schema of an MCP-discovered tool. */
+	_mcpMeta?: { toolName: string; inputSchema: Record<string, unknown> }
 	schema: ZodType
 	run: (input: unknown) => Promise<string> | string
 }
@@ -83,7 +88,8 @@ export type ToolInput = MimicTool
 export interface ToolSchema {
 	name: string
 	description: string
-	parameters: Record<string, string>
+	kind: 'read' | 'write'
+	parameters: Record<string, unknown>
 }
 
 // ── Call options ───────────────────────────────────────────────────────
@@ -107,8 +113,8 @@ export interface ToolSchema {
  *   }),
  *   tools: { checkCalendar },
  * })
- * // result.data.confirmed → boolean
- * // result.data.notes → string
+ * // result.data.confirmed → boolean | null
+ * // result.data.notes → string | null
  * ```
  */
 export interface CallOptions {
@@ -120,6 +126,8 @@ export interface CallOptions {
 	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
 	voice?: Voice
+	/** Caller timezone as an IANA name, e.g. America/New_York. Used to resolve relative dates and times. */
+	userTimezone?: string
 	/**
 	 * Background knowledge the agent can reference — company info, policies,
 	 * product details. Write it as a paragraph, like you'd brief a human.
@@ -127,8 +135,8 @@ export interface CallOptions {
 	 * @example
 	 * ```typescript
 	 * context: `You're calling on behalf of Greenwood Medical. We require
-	 * 24-hour cancellation notice. If they need to reschedule, offer the
-	 * next available slot. Dr. Smith is out on Fridays.`
+	 * 24-hour cancellation notice. If they need to reschedule, collect their
+	 * preferred date and time for the office to review. Dr. Smith is out on Fridays.`
 	 * ```
 	 */
 	context?: string
@@ -151,7 +159,7 @@ export interface CallOptions {
 	 * their name naturally. Does NOT affect the compiled prompt.
 	 */
 	recipient?: { firstName: string; lastName?: string; email?: string }
-	/** Whether the agent should disclose it's AI and that the call is recorded. Defaults to `true`. */
+	/** Whether to proactively disclose AI status. Defaults to `true`. Recording notice/consent must be configured separately. */
 	aiDisclosure?: boolean
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
@@ -180,7 +188,8 @@ export interface CallOptions {
 	webhook?: string
 	/**
 	 * What to extract from the call. Pass a Zod object schema — types
-	 * are enforced at extraction time and flow into `result.data`.
+	 * describe known values in `result.data`. Every field can also be null
+	 * when the call did not establish a value, even if the input schema is nonnullable.
 	 * Use `.describe()` on each field to tell the agent what to extract.
 	 *
 	 * @example
@@ -278,6 +287,11 @@ export interface TranscriptEntry {
 	content: string
 }
 
+/** Extracted values preserve unknown information as null, including required fields. */
+export type ExtractedData<T extends Record<string, unknown>> = {
+	[K in keyof T]-?: Exclude<T[K], undefined> | null
+}
+
 /**
  * The final result of a completed call. Discriminated on `status` —
  * narrow with `if (result.status === 'completed')` to access typed data.
@@ -300,7 +314,7 @@ export type CallResult<T extends Record<string, unknown> = Record<string, unknow
 			id: string
 			goalAchieved: boolean
 			goalAchievedReason: string
-			data: T
+			data: ExtractedData<T>
 			transcript: TranscriptEntry[]
 			duration: number
 	  }

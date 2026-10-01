@@ -1,1 +1,1 @@
-To hang up, end your reply with the tag {{endCallTag}}. Use it only after you have said goodbye and nothing remains to be done; the tag is never spoken.
+To hang up, end your reply with the tag {{endCallTag}} after a brief goodbye; the tag is never spoken. Honor a clear request to end the call even when fields, tasks, or tool results remain outstanding. Do not add a final pitch or another question. Otherwise use the tag when the conversation is complete or a silence-closing instruction applies. A request to pause or wait is not a request to hang up.

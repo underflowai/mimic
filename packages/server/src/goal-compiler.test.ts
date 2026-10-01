@@ -1,0 +1,103 @@
+import assert from 'node:assert/strict'
+import { describe, it, mock } from 'node:test'
+import type OpenAI from 'openai'
+
+import { arloPersona } from '@mimic/engine'
+import {
+	buildOrchestratorConfigFromAgent,
+	compileGoal,
+	type AgentConfig,
+	type GoalCompilerInput,
+} from './goal-compiler.js'
+
+function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
+	return {
+		goal: 'Collect a preferred appointment time.',
+		voice: 'male',
+		context: {},
+		tools: [],
+		results: {},
+		aiDisclosure: true,
+		agentName: 'Casey',
+		systemPrompt: 'You are [AGENT_NAME].',
+		turnControlBlock: '[AGENT_NAME], answer the caller directly.',
+		...overrides,
+	}
+}
+
+describe('buildOrchestratorConfigFromAgent', () => {
+	it('keeps the configured identity across speech, turn guidance, and background workers', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent())
+		assert.equal(orchestratorConfig.persona?.firstName, 'Casey')
+		assert.equal(orchestratorConfig.persona?.ttsVoiceId, arloPersona.ttsVoiceId)
+		assert.equal(orchestratorConfig.systemPrompt, 'You are Casey.')
+		assert.equal(orchestratorConfig.textQualityBlock, 'Casey, answer the caller directly.')
+		assert.equal(arloPersona.firstName, 'Arlo', 'shared voice defaults must not be mutated')
+	})
+
+	it('passes the caller timezone to subsequent turns and research, not just the opening', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent(), {
+			userTimezone: 'America/New_York',
+			firstName: 'Morgan',
+			email: 'morgan@example.com',
+		})
+		assert.equal(orchestratorConfig.userTimezone, 'America/New_York')
+		assert.equal(orchestratorConfig.recipient?.firstName, 'Morgan')
+		assert.match(orchestratorConfig.buildOpeningBlock(), /callerEmail: morgan@example.com/)
+	})
+
+	it('enables the existing hangup protocol for API calls', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent())
+		assert.equal(orchestratorConfig.endCallEnabled, true)
+	})
+
+	it('uses the voice fallback only when the stored agent name is empty', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent({ agentName: '  ' }))
+		assert.equal(orchestratorConfig.persona?.firstName, 'Arlo')
+	})
+})
+
+describe('compileGoal', () => {
+	it('preserves names and field metadata while supplying runtime capabilities', async () => {
+		const compiled = {
+			compiledPrompt: 'You are Al. The caller is Alex in Albany. Contact Al at Al@example.com.',
+			speechTags: 'Speak concisely.',
+			turnControlBlock: 'Answer directly.',
+			agentName: 'Al',
+		}
+		const create = mock.fn(async (_input: unknown) => ({
+			choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(compiled) } }],
+		}))
+		const client = { chat: { completions: { create } } } as unknown as OpenAI
+		const input: GoalCompilerInput = {
+			goal: 'Collect preferences.',
+			voice: 'male',
+			context: {},
+			tools: [],
+			results: { booked: 'Whether a booking was confirmed.' },
+			data: {
+				preference: {
+					value: null,
+					validOptions: ['morning', 'afternoon'],
+					required: false,
+					optional: true,
+					nullable: true,
+					condition: 'Collect only when rescheduling',
+					source: 'caller',
+				},
+			},
+		}
+		const result = await compileGoal(input, client)
+		assert.match(result.systemPrompt, /The caller is Alex in Albany\. Contact Al at Al@example\.com\./)
+		assert.equal(result.systemPrompt.includes('[AGENT_NAME]'), false)
+		assert.equal(result.agentName, 'Al')
+		const request = create.mock.calls[0]!.arguments[0] as { messages: Array<{ role: string; content: string }> }
+		const userInput = request.messages.find((message) => message.role === 'user')!.content
+		assert.match(userInput, /webSearch \(read\)/)
+		assert.match(userInput, /only break and spell SSML tags pass through/)
+		assert.match(userInput, /"required":false,"optional":true,"nullable":true/)
+		assert.match(userInput, /Collect only when rescheduling/)
+		assert.match(userInput, /"source":"caller"/)
+		assert.match(userInput, /Requested post-call result fields \(desired extraction, not evidence/)
+	})
+})

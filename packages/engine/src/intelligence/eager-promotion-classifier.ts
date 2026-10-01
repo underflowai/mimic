@@ -18,10 +18,9 @@
  *
  * Runs on the shared background model (`models.background`) with the prompt
  * in `prompts/instructions/eager-promotion-classifier.md`. The prompt was
- * chosen by an offline eval (42 cases × 6 prompts × 3 models × 3 runs):
- * terse prompts on small models collapsed into always-promote (27 FPs out
- * of 42), while the explicit prompt reached 97.6% accuracy with zero FPs.
- * Re-run that eval before changing the prompt or the background model.
+ * designed to reject material changes even on the same topic. The opt-in
+ * live cases in eager-promotion-classifier.test.ts evaluate the current prompt;
+ * historical evaluations of earlier prompts do not validate this version.
  *
  * ### Latency is masked on the critical path
  *
@@ -45,80 +44,26 @@ function getSystemPrompt() {
 	return cachedPrompt
 }
 
-/**
- * Normalizes a transcript for comparison: trims, lowercases, strips
- * trailing punctuation and all non-alphanumeric characters except spaces.
- */
-function normalizeForComparison(t: string): string {
-	return t
-		.trim()
+/** Normalize only presentation differences; preserve Unicode, numbers, and meaning-bearing punctuation. */
+function normalizeForComparison(text: string): string {
+	return text
+		.normalize('NFC')
 		.toLowerCase()
-		.replace(/[^a-z0-9\s]/g, ' ')
+		.replace(/[’‘]/g, "'")
 		.replace(/\s+/g, ' ')
 		.trim()
-}
-
-const multiWordFillers = ['i mean', 'you know']
-const singleWordFillers = new Set([
-	'uh',
-	'um',
-	'ah',
-	'er',
-	'like',
-	'so',
-	'well',
-	'yeah',
-	'yep',
-	'right',
-	'okay',
-	'ok',
-	'actually',
-	'basically',
-	'honestly',
-	'anyway',
-	'anyways',
-])
-
-/**
- * Strips ASR filler words and disfluencies that cannot change caller intent.
- * Multi-word fillers are removed first, then single-word fillers.
- */
-function stripFiller(text: string): string {
-	let out = text
-	for (const phrase of multiWordFillers) out = out.replaceAll(phrase, ' ')
-	return out
-		.split(/\s+/)
-		.filter((w) => w.length > 0 && !singleWordFillers.has(w))
-		.join(' ')
+		.replace(/[.,!]+$/, '')
+		.trim()
 }
 
 /**
- * Tiered fast-path: determines whether the speculative transcript is
- * close enough to the final transcript to skip the LLM classifier.
- *
- *   Tier 1: Normalized exact match (punctuation/case differences).
- *   Tier 2: Equal after stripping ASR filler words.
- *   Tier 3: Spec is a prefix of final (after filler strip) with <= 2
- *           trailing substantive words.
+ * Skip the classifier only for nonempty equivalent transcripts. Every new
+ * substantive word must be checked against the draft, even a one-word suffix.
  */
 export function canFastPathPromote(spec: string, final: string): boolean {
 	const normSpec = normalizeForComparison(spec)
 	const normFinal = normalizeForComparison(final)
-
-	if (normSpec === normFinal) return true
-
-	const strippedSpec = stripFiller(normSpec)
-	const strippedFinal = stripFiller(normFinal)
-
-	if (strippedSpec === strippedFinal) return true
-
-	if (strippedFinal.startsWith(strippedSpec)) {
-		const tail = strippedFinal.slice(strippedSpec.length).trim()
-		const tailWords = tail.split(/\s+/).filter(Boolean)
-		if (tailWords.length <= 2) return true
-	}
-
-	return false
+	return normSpec.length > 0 && normSpec === normFinal
 }
 
 export async function classifyEagerPromotion(
@@ -133,18 +78,16 @@ export async function classifyEagerPromotion(
 	}
 
 	const systemPrompt = await getSystemPrompt()
-	const userParts = [
-		`Generation-basis transcript (what we prepared against): "${speculativeTranscript}"`,
-		`Full transcript (what the caller actually said): "${finalTranscript}"`,
-	]
-	if (draftResponse) {
-		userParts.push(`Agent's prepared response: "${draftResponse}"`)
+	const evidence = {
+		partialTranscript: speculativeTranscript,
+		fullTranscript: finalTranscript,
+		draftResponse,
 	}
 
 	const parsed = await callBackgroundModel(
 		client,
 		systemPrompt,
-		userParts.join('\n\n'),
+		JSON.stringify(evidence),
 		promotionSchema,
 		'eager-promo',
 		{

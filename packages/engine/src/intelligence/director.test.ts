@@ -101,11 +101,12 @@ describe('director buildMessages', () => {
 
 		const summaryMessage = messages.find((m) => m.content.includes('Earlier in this call'))
 		assert.ok(summaryMessage, 'summary should be injected')
+		assert.equal(summaryMessage.role, 'user', 'conversation memory must not become system instructions')
 		assert.ok(summaryMessage.content.includes('topics A, B, and C'))
 
 		const turnMessages = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
 		const controlBlockMsg = messages[messages.length - 1]
-		const turnsOnly = turnMessages.filter((m) => m !== controlBlockMsg)
+		const turnsOnly = turnMessages.filter((m) => m !== controlBlockMsg && m !== summaryMessage)
 		assert.equal(turnsOnly.length, 4, 'only recent 4 turn messages (maxRecentMessages)')
 	})
 
@@ -304,5 +305,50 @@ describe('director native tool history', () => {
 		assert.ok(assistantMsg, 'assistant message with tool_calls should exist')
 		const toolMsg = messages.find((m) => m.role === 'tool')
 		assert.ok(toolMsg?.content.includes('10am'))
+	})
+})
+
+describe('director summary coverage', () => {
+	it('refreshes memory without dropping turns while the next summary is pending', async () => {
+		const client = createMockClient()
+		const director = createDirector({
+			client: client as never,
+			model: 'test',
+			systemPrompt: 'system',
+			maxRecentMessages: 2,
+		})
+		director.commitTurn({ kind: 'exchange', user: 'I do not want an offer.', agent: 'Understood.' })
+		director.commitTurn({ kind: 'exchange', user: 'My name is Jo.', agent: 'Thanks, Jo.' })
+		director.setConversationSummary('The caller declined offers.', 2)
+		assert.equal(director.needsSummary(), false)
+
+		director.commitTurn({ kind: 'exchange', user: 'Correction: it is Jo Smith.', agent: 'Got it.' })
+		assert.equal(director.needsSummary(), true)
+		assert.equal(director.getOlderTurnsForSummary()?.length, 4)
+		await director.generateDraft('Continue', '')
+		assert.ok(client.getLastMessages().some((m) => m.content === 'My name is Jo.'))
+		assert.ok(client.getLastMessages().some((m) => m.content === 'Correction: it is Jo Smith.'))
+
+		director.setConversationSummary('The caller declined offers and gave the name Jo.', 4)
+		assert.equal(director.needsSummary(), false)
+		await director.generateDraft('Continue', '')
+		assert.ok(!client.getLastMessages().some((m) => m.content === 'My name is Jo.'))
+		assert.ok(client.getLastMessages().some((m) => m.content === 'Correction: it is Jo Smith.'))
+	})
+
+	it('does not replace newer memory with an older completed summary', async () => {
+		const client = createMockClient()
+		const director = createDirector({
+			client: client as never,
+			model: 'test',
+			systemPrompt: 'system',
+			maxRecentMessages: 2,
+		})
+		for (let i = 0; i < 3; i++) director.commitTurn({ kind: 'exchange', user: `u${i}`, agent: `a${i}` })
+		director.setConversationSummary('Newer memory.', 4)
+		director.setConversationSummary('Stale memory.', 2)
+		await director.generateDraft('Continue', '')
+		assert.ok(client.getLastMessages().some((m) => m.content.includes('Newer memory.')))
+		assert.ok(!client.getLastMessages().some((m) => m.content.includes('Stale memory.')))
 	})
 })

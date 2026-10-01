@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto'
-
 import { Hono } from 'hono'
 import { and, eq, or, sql } from 'drizzle-orm'
 import { RoomServiceClient } from 'livekit-server-sdk'
@@ -10,53 +8,10 @@ import { publishCallEvent } from '../call-bus.js'
 import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls, type ApiCallRow } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
+import { hashPromptConfig, normalizeCallTools, type ApiToolInput } from '../prompt-config.js'
 import { cancelQueuedCall, enqueueCall } from '../jobs/queue.js'
 import { childLogger } from '../logger.js'
 import { MAX_CONCURRENT_CALLS } from '../middleware/rate-limit.js'
-
-function stableStringify(value: unknown): string {
-	if (value === null || typeof value !== 'object') {
-		return JSON.stringify(value)
-	}
-	if (Array.isArray(value)) {
-		return `[${value.map((item) => stableStringify(item)).join(',')}]`
-	}
-	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
-	return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`
-}
-
-function hashPromptConfig(
-	apiKeyId: string,
-	config: {
-		goal: string
-		voice: string
-		context?: string
-		data?: Record<string, unknown>
-		tools: unknown[]
-		results: unknown
-		aiDisclosure?: boolean
-		ambience?: boolean
-		persona?: { systemPrompt: string; agentName?: string }
-		webhook?: string
-	},
-): string {
-	const payload = stableStringify({
-		apiKeyId,
-		goal: config.goal,
-		voice: config.voice,
-		context: config.context ?? '',
-		data: config.data ?? null,
-		tools: config.tools,
-		results: config.results,
-		aiDisclosure: config.aiDisclosure,
-		ambience: config.ambience,
-		// Only present in persona mode so pre-existing config hashes (and
-		// their cached compiled agents) stay valid.
-		...(config.persona && { persona: config.persona }),
-		...(config.webhook && { webhook: config.webhook }),
-	})
-	return createHash('sha256').update(payload).digest('hex')
-}
 
 const calls = new Hono()
 
@@ -67,11 +22,12 @@ calls.post('/', async (c) => {
 		goal: string
 		agentId?: string
 		voice?: 'female' | 'male'
+		userTimezone?: string
 		context?: string
 		data?: Record<string, unknown>
 		recipient?: { firstName: string; lastName?: string; email?: string }
 		aiDisclosure?: boolean
-		tools?: Array<{ name: string; description: string; parameters: Record<string, string> }>
+		tools?: ApiToolInput[]
 		results?: Record<string, unknown>
 		extract?: Record<string, unknown>
 		ambience?: boolean
@@ -94,6 +50,17 @@ calls.post('/', async (c) => {
 	}
 
 	if (!body.to?.trim()) return c.json({ error: 'to (phone number) is required' }, 400)
+
+	let tools: ReturnType<typeof normalizeCallTools>
+	try {
+		tools = normalizeCallTools(body.tools)
+		if (body.userTimezone !== undefined) {
+			if (!body.userTimezone.trim()) throw new Error('userTimezone must be an IANA timezone')
+			new Intl.DateTimeFormat('en-US', { timeZone: body.userTimezone }).format()
+		}
+	} catch (error) {
+		return c.json({ error: error instanceof Error ? error.message : 'Invalid tool or timezone configuration' }, 400)
+	}
 
 	const db = getDb()
 
@@ -132,11 +99,6 @@ calls.post('/', async (c) => {
 		}
 
 		const voice = body.voice ?? 'female'
-		const tools = (body.tools ?? []).map((t) => ({
-			...t,
-			kind: 'read' as const,
-			parameters: t.parameters ?? {},
-		}))
 		const results = body.results ?? body.extract ?? {}
 
 		const configHash = hashPromptConfig(apiKey.id, {
@@ -144,6 +106,7 @@ calls.post('/', async (c) => {
 			voice,
 			context: body.context,
 			data: body.data,
+			recipient: body.recipient,
 			tools,
 			results,
 			aiDisclosure: body.aiDisclosure,
@@ -157,11 +120,13 @@ calls.post('/', async (c) => {
 		const [cached] = await db
 			.select()
 			.from(apiAgents)
-			.where(and(
-				eq(apiAgents.apiKeyId, apiKey.id),
-				eq(apiAgents.configHash, configHash),
-				sql`${apiAgents.systemPrompt} <> ''`,
-			))
+			.where(
+				and(
+					eq(apiAgents.apiKeyId, apiKey.id),
+					eq(apiAgents.configHash, configHash),
+					sql`${apiAgents.systemPrompt} <> ''`,
+				),
+			)
 			.limit(1)
 
 		if (cached) {
@@ -212,6 +177,7 @@ calls.post('/', async (c) => {
 	}
 
 	const callContext: Record<string, string> = {}
+	if (body.userTimezone) callContext.userTimezone = body.userTimezone
 	if (body.recipient?.firstName) callContext.firstName = body.recipient.firstName
 	if (body.recipient?.lastName) callContext.lastName = body.recipient.lastName
 	if (body.recipient?.email) callContext.email = body.recipient.email
@@ -219,10 +185,9 @@ calls.post('/', async (c) => {
 	const [concurrencyRow] = await db
 		.select({ activeCalls: sql<number>`count(*)::int` })
 		.from(apiCalls)
-		.where(and(
-			eq(apiCalls.apiKeyId, apiKey.id),
-			or(eq(apiCalls.status, 'pending'), eq(apiCalls.status, 'in_progress')),
-		))
+		.where(
+			and(eq(apiCalls.apiKeyId, apiKey.id), or(eq(apiCalls.status, 'pending'), eq(apiCalls.status, 'in_progress'))),
+		)
 
 	if ((concurrencyRow?.activeCalls ?? 0) >= MAX_CONCURRENT_CALLS) {
 		return c.json({ error: 'Concurrent call limit reached. Wait for active calls to complete.' }, 429)
@@ -282,22 +247,29 @@ calls.post('/', async (c) => {
 					context: body.context ?? '',
 					data: body.data,
 					recipient: body.recipient,
-					tools: (body.tools ?? []).map((t) => ({ ...t, kind: 'read' as const, parameters: t.parameters ?? {} })),
+					tools,
 					results: body.results ?? body.extract ?? {},
 					aiDisclosure: body.aiDisclosure,
 				})
 
-				await db.update(apiAgents).set({
-					systemPrompt: compiled.systemPrompt,
-					turnControlBlock: compiled.turnControlBlock ?? null,
-					agentName: compiled.agentName,
-				}).where(eq(apiAgents.id, agentId))
+				await db
+					.update(apiAgents)
+					.set({
+						systemPrompt: compiled.systemPrompt,
+						turnControlBlock: compiled.turnControlBlock ?? null,
+						agentName: compiled.agentName,
+					})
+					.where(eq(apiAgents.id, agentId))
 			}
 
 			await enqueueCall({ callId: call.id, agentId })
 		} catch (err) {
 			const errorMessage = err instanceof Error ? err.message : String(err)
-			await db.update(apiCalls).set({ status: 'failed', errorMessage }).where(eq(apiCalls.id, call.id)).catch(() => {})
+			await db
+				.update(apiCalls)
+				.set({ status: 'failed', errorMessage })
+				.where(eq(apiCalls.id, call.id))
+				.catch(() => {})
 			publishCallEvent(call.id, { type: 'call_status', status: 'failed' })
 			publishCallEvent(call.id, { type: 'error', message: errorMessage })
 		}

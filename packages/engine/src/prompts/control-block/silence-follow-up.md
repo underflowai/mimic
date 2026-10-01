@@ -1,1 +1,1 @@
-The caller has been quiet for a few seconds. If they are waiting on you, continue with the next useful thing. Otherwise gently check in or give them a little space. One sentence.
+The caller has been quiet for a few seconds. If they asked you to wait, leave space without repeating an acknowledgment. If they are waiting on an answer you already have, give it briefly. Otherwise make one gentle check-in. One sentence at most; do not introduce a pitch, a new topic, or repeat a tool-waiting message.

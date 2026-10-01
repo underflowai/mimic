@@ -16,16 +16,18 @@ import type { InterruptContext } from './types.js'
 export type { InterruptContext } from './types.js'
 
 export interface ControlBlockPrompts {
+	/** Shared caller-intent and data-boundary rules for compiled and persona agents. */
+	turnPriorities: string
 	/** Default cadence steer for persona-mode agents, which have no compiled text-quality block. */
 	spokenCadence: string
 	silenceFollowUp: string
 	silenceClosing: string
 	transcriptQuality: string
 	toolRunning: string
-	/** `{{toolList}}` — the comma-separated `name (description)` list. */
+	/** `{{toolList}}` — the JSON capability list. */
 	toolsAvailable: PromptTemplate
 	endCall: string
-	/** `{{heardPortion}}`, `{{unsaidPortion}}` (empty when the caller heard most of the draft). */
+	/** JSON-encoded `{{heardPortion}}`, `{{unsaidPortion}}` (empty when no reliable remainder is available). */
 	interrupt: PromptTemplate
 	/** Director note used when tool intent classification throws. */
 	toolClassificationFailed: string
@@ -44,6 +46,7 @@ let cachedPrompts: Promise<ControlBlockPrompts> | null = null
 /** Loads every control-block fragment once per process. */
 export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 	cachedPrompts ??= Promise.all([
+		text('turn-priorities'),
 		text('spoken-cadence'),
 		text('silence-follow-up'),
 		text('silence-closing'),
@@ -55,6 +58,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 		text('tool-classification-failed'),
 	]).then(
 		([
+			turnPriorities,
 			spokenCadence,
 			silenceFollowUp,
 			silenceClosing,
@@ -65,6 +69,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			interrupt,
 			toolClassificationFailed,
 		]) => ({
+			turnPriorities,
 			spokenCadence,
 			silenceFollowUp,
 			silenceClosing,
@@ -80,7 +85,15 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 }
 
 export function formatUserDateTime(timezone?: string) {
-	const tz = timezone ?? 'America/Los_Angeles'
+	let tz = timezone?.trim() || 'UTC'
+	let callerTimezoneKnown = Boolean(timezone?.trim())
+	try {
+		// Validate before formatting so a bad profile value cannot abort a voice turn.
+		new Intl.DateTimeFormat('en-US', { timeZone: tz })
+	} catch {
+		tz = 'UTC'
+		callerTimezoneKnown = false
+	}
 	const now = new Date()
 	const date = now.toLocaleDateString('en-US', {
 		timeZone: tz,
@@ -94,7 +107,7 @@ export function formatUserDateTime(timezone?: string) {
 		new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' })
 			.formatToParts(now)
 			.find((p) => p.type === 'timeZoneName')?.value ?? tz
-	return `${date}, ${time} ${tzAbbr}`
+	return `${date}, ${time} ${tzAbbr}${callerTimezoneKnown ? '' : ' (caller timezone unavailable; UTC reference)'}`
 }
 
 function normalizeWord(word: string) {
@@ -137,13 +150,13 @@ export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleC
 
 	if (executing.length > 0) {
 		for (const note of executing) {
-			parts.push(`Tool note: ${note}`)
+			parts.push(`Executing tool context (JSON string): ${JSON.stringify(note)}`)
 		}
 		parts.push(prompts.toolRunning)
 	}
 
 	if (pending.length > 0) {
-		for (const nudge of pending) parts.push(`Tool note: ${nudge}`)
+		for (const nudge of pending) parts.push(`Tool coordination note (JSON string): ${JSON.stringify(nudge)}`)
 	}
 
 	if (executing.length > 0 || pending.length > 0) return
@@ -151,7 +164,7 @@ export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleC
 	const defs = ctx.toolDefinitions ?? []
 	if (defs.length === 0) return
 
-	const toolList = defs.map((t) => `${t.name} (${t.description})`).join(', ')
+	const toolList = JSON.stringify(defs.map(({ name, description }) => ({ name, description })))
 	parts.push(prompts.toolsAvailable({ toolList }))
 }
 
@@ -166,5 +179,10 @@ export function appendEndCallGuidance(parts: string[], prompts: ControlBlockProm
 export function appendInterruptContext(parts: string[], ctx: InterruptContext | null, prompts: ControlBlockPrompts) {
 	if (!ctx?.heardPortion) return
 	const unsaidPortion = deriveUnsaidPortion(ctx.fullDraft, ctx.heardPortion)
-	parts.push(prompts.interrupt({ heardPortion: ctx.heardPortion, unsaidPortion }))
+	parts.push(
+		prompts.interrupt({
+			heardPortion: JSON.stringify(ctx.heardPortion),
+			unsaidPortion: unsaidPortion ? JSON.stringify(unsaidPortion) : '',
+		}),
+	)
 }

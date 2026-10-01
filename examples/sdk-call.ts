@@ -14,9 +14,13 @@ import { Mimic, tool } from '@underflowai/mimic'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
+// Demo handlers below return simulated data. Replace them with real calendar
+// lookups and writes before using this workflow for real appointments.
+
 // ── Define tools with Zod ──────────────────────────────────────────────
 
 const checkCalendar = tool({
+	kind: 'read',
 	description: 'Check available calendar slots for a given date',
 	parameters: z.object({
 		date: z.string().describe('The date to check, e.g. "next Thursday"'),
@@ -27,6 +31,7 @@ const checkCalendar = tool({
 })
 
 const reschedule = tool({
+	kind: 'write',
 	description: 'Reschedule an appointment to a new date and time',
 	parameters: z.object({
 		newDate: z.string().describe('The new date'),
@@ -41,7 +46,10 @@ const reschedule = tool({
 
 const call = mimic.call<{ confirmed: boolean; notes: string }>({
 	to: '+15551234567',
-	goal: 'Confirm the appointment for tomorrow at 2pm with Dr. Smith',
+	goal: 'Demonstrate confirming or rescheduling a simulated appointment for tomorrow at 2pm with Dr. Smith.',
+	context:
+		'This is a calendar simulation. Slots and rescheduling confirmations from the tools are demo data, not real appointments. Make that clear to the caller.',
+	userTimezone: 'America/New_York',
 	tools: { checkCalendar, reschedule },
 	extract: z.object({
 		confirmed: z.boolean().describe('whether the appointment was confirmed'),

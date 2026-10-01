@@ -4,7 +4,7 @@ import { describe, it } from 'node:test'
 import { shouldRunLiveMimicTests } from '#test/support/live-test-gate.js'
 import { canFastPathPromote, classifyEagerPromotion } from './eager-promotion-classifier.js'
 
-describe('canFastPathPromote — tiered heuristic', () => {
+describe('canFastPathPromote — conservative equivalence', () => {
 	const cases: Array<{ description: string; spec: string; final: string; expected: boolean }> = [
 		// Tier 1: normalized exact match
 		{ description: 'identical transcripts', spec: 'I need help', final: 'I need help', expected: true },
@@ -16,56 +16,56 @@ describe('canFastPathPromote — tiered heuristic', () => {
 		},
 		{ description: 'case difference', spec: 'Tell me more', final: 'tell me more', expected: true },
 
-		// Tier 2: filler-word stripping
+		// Any changed words require semantic validation, including likely hesitations.
 		{
 			description: 'filler inserted mid-sentence',
 			spec: 'We mostly do commercial auto',
 			final: 'We mostly do, uh, commercial auto',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'leading filler added',
 			spec: 'I need help with my account',
 			final: 'Yeah, uh, I need help with my account',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'multiple fillers scattered',
 			spec: 'We had three claims last year',
 			final: 'So, um, we had like three claims last year',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'you know as filler',
 			spec: 'The cert holder needs to be updated',
 			final: 'You know, the cert holder needs to be updated',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'i mean as filler',
 			spec: 'We get about forty calls a day',
 			final: 'I mean, we get about forty calls a day',
-			expected: true,
+			expected: false,
 		},
 
-		// Tier 3: prefix containment with short tail
+		// Even short substantive suffixes require semantic validation.
 		{
 			description: 'one trailing word',
 			spec: 'I work at a car dealership',
 			final: 'I work at a car dealership in Denver',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'two trailing words',
 			spec: 'We handle insurance',
 			final: 'We handle insurance for trucking',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'prefix + filler + short tail',
 			spec: 'I run a clinic',
 			final: 'Yeah, I run a clinic in Florida',
-			expected: true,
+			expected: false,
 		},
 
 		// Should fall through (NOT fast-path promoted)
@@ -97,6 +97,28 @@ describe('canFastPathPromote — tiered heuristic', () => {
 			description: 'three trailing substantive words exceeds limit',
 			spec: 'I need help',
 			final: 'I need help with my large account',
+			expected: false,
+		},
+		{ description: 'empty transcripts', spec: '', final: '', expected: false },
+		{ description: 'only hesitations', spec: 'uh', final: 'um', expected: false },
+		{ description: 'one-word negation', spec: 'I want to proceed', final: 'I want to proceed never', expected: false },
+		{ description: 'same-topic timing constraint', spec: 'Book it', final: 'Book it tomorrow', expected: false },
+		{ description: 'short withdrawal', spec: 'Book it', final: 'Book it never mind', expected: false },
+		{ description: 'question changes assertion', spec: 'You booked it', final: 'You booked it?', expected: false },
+		{
+			description: 'numbers retain decimal punctuation',
+			spec: 'The amount is 1.5',
+			final: 'The amount is 1 5',
+			expected: false,
+		},
+		{ description: 'non-Latin changes are not discarded', spec: '北京', final: '上海', expected: false },
+		{ description: 'accent changes remain visible', spec: 'Call José', final: 'Call Jose', expected: false },
+		{ description: 'hesitation could be a name', spec: 'Call', final: 'Call UM', expected: false },
+		{ description: 'direction is not a filler', spec: 'Turn', final: 'Turn right', expected: false },
+		{
+			description: 'filler phrase is not removed from a name',
+			spec: 'Call Simona',
+			final: 'Call Syou knowimona',
 			expected: false,
 		},
 	]
@@ -154,6 +176,27 @@ describe('classifyEagerPromotion — real API', () => {
 			draftResponse: "Sure, let me pull up your company info. What's the name?",
 			expected: false,
 		},
+		{
+			description: 'new detail answers the prepared question',
+			specTranscript: 'I need an appointment',
+			finalTranscript: 'I need an appointment tomorrow',
+			draftResponse: 'Which day would you like?',
+			expected: false,
+		},
+		{
+			description: 'same-topic refusal supersedes partial interest',
+			specTranscript: 'That sounds useful',
+			finalTranscript: 'That sounds useful but please do not sign me up',
+			draftResponse: 'Great, I will sign you up now.',
+			expected: false,
+		},
+		{
+			description: 'same-topic follow-up question cannot be ignored',
+			specTranscript: 'Book it for Tuesday',
+			finalTranscript: 'Book it for Tuesday if it is free. Is there a fee?',
+			draftResponse: 'I can book that for you now.',
+			expected: false,
+		},
 	]
 
 	for (const { description, specTranscript, finalTranscript, draftResponse, expected } of promoteCases) {
@@ -175,10 +218,10 @@ describe('classifyEagerPromotion — real API', () => {
 
 	const twoWayCases = [
 		{
-			description: 'same thought without draft',
+			description: 'new location without draft requires regeneration',
 			specTranscript: 'I work at a car dealership',
 			finalTranscript: 'I work at a car dealership in Denver',
-			expected: true,
+			expected: false,
 		},
 		{
 			description: 'new question without draft',

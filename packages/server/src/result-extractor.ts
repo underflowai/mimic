@@ -74,18 +74,20 @@ function buildJsonSchema(results: Record<string, TypedField>): Record<string, un
 
 		const baseType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
 
-		if (field.nullable) {
-			prop.type = [baseType, 'null']
-		} else {
-			prop.type = baseType
-		}
+		// Missing evidence must remain unknown even for a business-required field.
+		// Strict structured output requires every property in `required`; optional
+		// caller input is represented by null instead of an omitted JSON key.
+		prop.type = [baseType, 'null']
 
 		properties[key] = prop
-		if (!field.optional) required.push(key)
+		required.push(key)
 	}
 
 	properties.goalAchieved = { type: 'boolean', description: 'Whether the agent achieved its stated goal' }
-	properties.goalAchievedReason = { type: 'string', description: 'Brief explanation of why the goal was or was not achieved' }
+	properties.goalAchievedReason = {
+		type: 'string',
+		description: 'Brief explanation of why the goal was or was not achieved',
+	}
 	required.push('goalAchieved', 'goalAchievedReason')
 
 	return {
@@ -105,7 +107,7 @@ function formatResults(results: Record<string, unknown>) {
 		.map(([key, value]) => {
 			if (typeof value === 'object' && value !== null && 'description' in value) {
 				const f = value as TypedField
-				return `${key} (${f.type}${f.nullable ? ', nullable' : ''}): ${f.description}`
+				return `${key} (${f.type}; unknown = null${f.optional ? '; optional' : ''}): ${f.description}`
 			}
 			return `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`
 		})
@@ -118,7 +120,7 @@ function formatToolCalls(toolCalls: ToolCallRecord[]) {
 		.map((tool) =>
 			[
 				`Tool: ${tool.name}`,
-				`Success: ${tool.success === false ? 'false' : 'true'}`,
+				`Execution success: ${tool.success === undefined ? 'unknown' : String(tool.success)}`,
 				`Input: ${JSON.stringify(tool.input)}`,
 				`Output: ${JSON.stringify(tool.output)}`,
 			].join('\n'),
@@ -133,7 +135,7 @@ function deterministicSuccess(
 ) {
 	if (!condition || condition.type === 'llm_evaluated') return null
 	if (condition.type === 'tool_called') {
-		const matched = toolCalls.some((t) => t.name === condition.toolName && t.success !== false)
+		const matched = toolCalls.some((t) => t.name === condition.toolName && t.success === true)
 		return {
 			value: matched,
 			reason: matched
@@ -155,24 +157,30 @@ function getSystemPrompt() {
 	return cachedSystemPrompt
 }
 
-export async function extractCallResult(
-	client: OpenAI,
-	input: ExtractionInput,
-): Promise<ExtractionResult> {
-	const deterministic = deterministicSuccess(input.successCondition, {}, input.toolCalls ?? [])
+export async function extractCallResult(client: OpenAI, input: ExtractionInput): Promise<ExtractionResult> {
+	const deterministic =
+		input.successCondition?.type === 'tool_called'
+			? deterministicSuccess(input.successCondition, {}, input.toolCalls ?? [])
+			: null
 
+	const typedResults = normalizeToTypedSchema(input.results)
 	const userPrompt = [
-		'Goal:', input.goal, '',
-		'Result schema:', formatResults(input.results), '',
-		'Tool calls:', formatToolCalls(input.toolCalls ?? []), '',
+		'Goal:',
+		input.goal,
+		'',
+		'Result schema:',
+		formatResults(typedResults),
+		'',
+		'Tool calls:',
+		formatToolCalls(input.toolCalls ?? []),
+		'',
 		deterministic
 			? `Deterministic goal decision: goalAchieved=${deterministic.value}, reason: ${deterministic.reason}`
 			: 'Deterministic goal decision: none (use your judgment)',
 		'',
-		'Transcript:', formatTranscript(input.transcript),
+		'Transcript:',
+		formatTranscript(input.transcript),
 	].join('\n')
-
-	const typedResults = normalizeToTypedSchema(input.results)
 
 	const { model, reasoningEffort } = models.resultExtractor
 	const response = await client.chat.completions.create({
@@ -192,15 +200,42 @@ export async function extractCallResult(
 		},
 	})
 
-	const content = response.choices[0]?.message.content ?? '{}'
-	const parsed = JSON.parse(content) as Record<string, unknown>
+	const choice = response.choices[0]
+	let parsed: Record<string, unknown> = {}
+	let extractionAvailable = false
+	if (choice && choice.finish_reason === 'stop' && !choice.message.refusal && choice.message.content) {
+		try {
+			const value: unknown = JSON.parse(choice.message.content)
+			if (value && typeof value === 'object' && !Array.isArray(value)) {
+				const candidate = value as Record<string, unknown>
+				const validFields = Object.entries(typedResults).every(([key, field]) => {
+					const expectedType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
+					return Object.hasOwn(candidate, key) && (candidate[key] === null || typeof candidate[key] === expectedType)
+				})
+				if (
+					validFields &&
+					typeof candidate.goalAchieved === 'boolean' &&
+					typeof candidate.goalAchievedReason === 'string'
+				) {
+					parsed = candidate
+					extractionAvailable = true
+				}
+			}
+		} catch {
+			// An incomplete/refused/invalid extraction cannot establish caller facts.
+		}
+	}
 
 	const goalAchieved = typeof parsed.goalAchieved === 'boolean' ? parsed.goalAchieved : false
-	const goalAchievedReason = typeof parsed.goalAchievedReason === 'string' ? parsed.goalAchievedReason : ''
+	const goalAchievedReason =
+		extractionAvailable && typeof parsed.goalAchievedReason === 'string'
+			? parsed.goalAchievedReason
+			: 'Goal completion could not be verified because result extraction was unavailable.'
 
 	const result: Record<string, unknown> = {}
-	for (const key of Object.keys(input.results)) {
-		result[key] = parsed[key] ?? null
+	for (const [key, field] of Object.entries(typedResults)) {
+		const expectedType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
+		result[key] = typeof parsed[key] === expectedType ? parsed[key] : null
 	}
 
 	const fieldDecision =

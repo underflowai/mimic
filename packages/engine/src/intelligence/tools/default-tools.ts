@@ -3,7 +3,7 @@ import type { ToolDefinition } from './runner.js'
 export const webSearchToolDefinition = {
 	name: 'webSearch',
 	description:
-		'Look up real-world facts the agent does not already know — industry statistics, company background, regulatory details, market data. Do not search for information already provided in context.',
+		'Research the specific external fact the caller needs, especially current or time-sensitive information. Include the intended entity, location, and time window when known. Do not research a company merely because it was mentioned, add sales context, or repeat facts already verified for the relevant time window.',
 	kind: 'read',
 	parameters: {
 		type: 'object',

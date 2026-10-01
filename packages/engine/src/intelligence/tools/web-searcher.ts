@@ -26,7 +26,7 @@ const searchOutputSchema = z.object({
 		.string()
 		.nullable()
 		.describe(
-			'Concise answer for the voice agent, max 200 words. Specific numbers, real data, concrete details. Null only if search returned nothing useful.',
+			'Concise answer for the voice agent, max 150 words. Direct answer grounded in web results, with short source attribution and relevant dates. State material uncertainty. Null only if search returned nothing useful.',
 		),
 })
 const searchOutputFormat = zodTextFormat(searchOutputSchema, 'provide_enrichment')
@@ -72,9 +72,11 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 	}
 
 	async function search(topic: string, conversationTurns: CallTurn[], callerDateTime?: string, signal?: AbortSignal) {
+		if (signal?.aborted) return null
 		const systemPrompt = await getSearchPrompt()
 		const conversation = formatTurnsForPrompt(conversationTurns, { agentLabel: agentName })
-		const dateLine = callerDateTime ? `## Current date/time\n${callerDateTime}\n\n` : ''
+		const now = callerDateTime || `${new Date().toISOString()} (UTC fallback; caller timezone unknown)`
+		const dateLine = `## Current date/time\n${now}\n\n`
 		const userMessage = `${dateLine}## Research topic\n${topic}\n\n## Conversation so far\n${conversation}`
 
 		async function runSearch(maxOutputTokens: number) {
@@ -86,6 +88,7 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 					instructions: systemPrompt,
 					input: userMessage,
 					tools: [{ type: 'web_search' }],
+					tool_choice: 'required',
 					text: { format: searchOutputFormat },
 				},
 				signal ? { signal } : undefined,
@@ -101,11 +104,25 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 
 		let text = response.output_text?.trim() ?? ''
 		let parsed = parseSearchOutput(text)
-		if (!parsed && responseLooksTruncated(response, initialMaxOutputTokens) && !signal?.aborted) {
+		if (responseLooksTruncated(response, initialMaxOutputTokens) && !signal?.aborted) {
 			log.info({ outputTokens: outTok, maxOutputTokens: initialMaxOutputTokens }, 'retrying truncated search output')
 			response = await runSearch(retryMaxOutputTokens)
 			text = response.output_text?.trim() ?? ''
 			parsed = parseSearchOutput(text)
+		}
+
+		// The final response must contain completed research. A plausible answer (or a
+		// search from an earlier, discarded retry) is not evidence for this handoff.
+		const completedSearch = response.output.some(
+			(item) => item.type === 'web_search_call' && item.status === 'completed',
+		)
+		if (
+			!completedSearch ||
+			(response.status && response.status !== 'completed') ||
+			responseLooksTruncated(response, retryMaxOutputTokens)
+		) {
+			log.warn({ completedSearch, status: response.status }, 'discarding unverified or incomplete research')
+			return null
 		}
 
 		if (!parsed) {
@@ -121,7 +138,11 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 			return null
 		}
 
-		const enrichment = parsed?.enrichment ?? null
+		const enrichment = parsed?.enrichment?.trim() || null
+		if (enrichment && enrichment.split(/\s+/u).length > 150) {
+			log.warn('discarding enrichment that exceeds the 150-word handoff limit')
+			return null
+		}
 		log.info({ enrichmentPreview: enrichment?.slice(0, 200) ?? null }, 'search result')
 		return enrichment
 	}

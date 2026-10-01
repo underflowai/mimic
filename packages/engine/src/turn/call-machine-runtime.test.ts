@@ -62,6 +62,59 @@ describe('call-machine runtime phase selectors', () => {
 })
 
 describe('call-machine runtime caller_turn_complete flow', () => {
+	it('passes the reference time and earlier caller details to the tool watcher', { timeout: 3_000 }, async () => {
+		const base = createMockRuntimeDeps()
+		let captureRequest!: (request: unknown) => void
+		const observed = new Promise<unknown>((resolve) => {
+			captureRequest = resolve
+		})
+		const engine = createCallMachineRuntime({
+			...base.deps,
+			getCallerDateTime: () => 'October 1, 2026, 9:00 AM America/New_York',
+			getDirectorTurns: () => [
+				{ role: 'user', content: 'Earlier verified reference: ORIGINAL-REFERENCE.' },
+				...Array.from({ length: 12 }, () => ({ role: 'agent' as const, content: 'A later exchange.' })),
+			],
+			backgroundClient: {
+				responses: {
+					create: async (request: unknown) => {
+						captureRequest(request)
+						return {
+							output: [
+								{
+									type: 'message',
+									content: [
+										{
+											type: 'output_text',
+											text: JSON.stringify({
+												decision: 'none',
+												tool: null,
+												args: null,
+												missing: null,
+												directorNote: null,
+												reasoning: 'No action requested.',
+												writeAuthorizationQuote: null,
+												cancelExisting: false,
+											}),
+										},
+									],
+								},
+							],
+						}
+					},
+				},
+			} as unknown as CallMachineRuntimeDeps['backgroundClient'],
+		})
+		try {
+			engine.sendToCallMachine({ type: 'caller_turn_complete', transcript: 'Thank you.', confidence: 0.9 })
+			const request = JSON.stringify(await observed)
+			assert.match(request, /ORIGINAL-REFERENCE/)
+			assert.match(request, /October 1, 2026, 9:00 AM America\/New_York/)
+		} finally {
+			engine.stop()
+		}
+	})
+
 	it('emits discarded and commits user-only when closing', async () => {
 		const commitTurn = mock.fn()
 		const base = createMockRuntimeDeps()

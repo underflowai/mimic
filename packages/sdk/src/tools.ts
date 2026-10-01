@@ -1,4 +1,5 @@
-import { ZodObject, type ZodError, type ZodType } from 'zod'
+import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
+import type { ZodError, ZodType } from 'zod'
 
 import type { MimicTool, ToolInput, ToolSchema } from './types.js'
 
@@ -16,6 +17,7 @@ import type { MimicTool, ToolInput, ToolSchema } from './types.js'
  *
  * const checkCalendar = tool({
  *   description: 'Check available calendar slots',
+ *   kind: 'read',
  *   parameters: z.object({
  *     date: z.string().describe('The date to check'),
  *   }),
@@ -27,29 +29,21 @@ import type { MimicTool, ToolInput, ToolSchema } from './types.js'
  */
 export function tool<T extends ZodType>(opts: {
 	description: string
+	/** Defaults to write. Declare read only for tools that retrieve information without side effects. */
+	kind?: 'read' | 'write'
 	parameters: T
 	run: (input: T extends ZodType<infer U> ? U : never) => Promise<string> | string
 }): MimicTool {
 	return {
 		__mimicTool: true,
 		description: opts.description,
+		kind: opts.kind ?? 'write',
 		schema: opts.parameters,
 		run: opts.run as (input: unknown) => Promise<string> | string,
 	}
 }
 
 // ── Schema → wire format ──────────────────────────────────────────────
-
-function describeZodField(key: string, field: ZodType): string {
-	const description = field.description
-	const isOptional = field.isOptional()
-
-	const parts: string[] = []
-	if (description) parts.push(description)
-	if (isOptional) parts.push('(optional)')
-
-	return parts.length > 0 ? parts.join(' ') : key
-}
 
 /**
  * Build tool schemas from a tools record for the API wire format.
@@ -61,19 +55,8 @@ function describeZodField(key: string, field: ZodType): string {
  */
 export function introspectTools(tools: Record<string, ToolInput>): ToolSchema[] {
 	return Object.entries(tools).map(([name, t]) => {
-		const mcpMeta = (t as { _mcpMeta?: { paramDescriptions: Record<string, string> } })._mcpMeta
-		if (mcpMeta) {
-			return { name, description: t.description, parameters: mcpMeta.paramDescriptions }
-		}
-
-		const parameters: Record<string, string> = {}
-		if (t.schema instanceof ZodObject) {
-			const shape = t.schema.shape as Record<string, ZodType>
-			for (const [key, field] of Object.entries(shape)) {
-				parameters[key] = describeZodField(key, field)
-			}
-		}
-		return { name, description: t.description, parameters }
+		const parameters = t._mcpMeta?.inputSchema ?? toJsonSchemaCompat(t.schema, { pipeStrategy: 'input' })
+		return { name, description: t.description, kind: t.kind ?? 'write', parameters }
 	})
 }
 

@@ -8,9 +8,9 @@ import { Mimic } from '@underflowai/mimic'
 const mimic = new Mimic('mk_...')
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Confirm the appointment for tomorrow at 2pm with Dr. Smith',
-  context: `You're calling on behalf of Greenwood Medical. We require
+	to: '+15551234567',
+	goal: 'Confirm the appointment for tomorrow at 2pm with Dr. Smith',
+	context: `You're calling on behalf of Greenwood Medical. We require
   24-hour cancellation notice. Dr. Smith is out on Fridays.`,
 })
 
@@ -43,8 +43,8 @@ import { Mimic } from '@underflowai/mimic'
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Say hello and ask how their day is going',
+	to: '+15551234567',
+	goal: 'Say hello and ask how their day is going',
 })
 
 const result = await call.result
@@ -56,12 +56,13 @@ Tell the agent what it needs to know. Write it like you'd brief a human:
 
 ```typescript
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Confirm the appointment for tomorrow at 2pm',
-  context: `You're calling on behalf of Greenwood Medical. We require
-  24-hour cancellation notice. If they need to reschedule, offer the
-  next available slot. Dr. Smith is out on Fridays.`,
-  recipient: { firstName: 'Jane', lastName: 'Smith' },
+	to: '+15551234567',
+	goal: 'Confirm the appointment for tomorrow at 2pm',
+	userTimezone: 'America/New_York',
+	context: `You're calling on behalf of Greenwood Medical. We require
+  24-hour cancellation notice. If they need to reschedule, collect their
+  preferred date and time. Without a calendar tool, do not promise availability.`,
+	recipient: { firstName: 'Jane', lastName: 'Smith' },
 })
 ```
 
@@ -76,19 +77,24 @@ import { Mimic, tool } from '@underflowai/mimic'
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
 const checkCalendar = tool({
-  description: 'Check available calendar slots',
-  parameters: z.object({ date: z.string().describe('The date to check') }),
-  run: async ({ date }) => myCalendarAPI.getSlots(date),
+	kind: 'read',
+	description: 'Check available calendar slots',
+	parameters: z.object({ date: z.string().describe('The date to check') }),
+	run: async ({ date }) => myCalendarAPI.getSlots(date),
 })
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Book an appointment for the caller',
-  tools: { checkCalendar },
+	to: '+15551234567',
+	goal: 'Check appointment availability and collect the preferred slot; this example cannot book it.',
+	tools: { checkCalendar },
 })
 ```
 
-Tools execute locally in your process. Or connect to an MCP server:
+Tools execute locally in your process. Declare `kind: 'read'` for lookups and
+`kind: 'write'` for actions such as booking or sending. Unclassified tools default
+to write. A calendar lookup does not book an appointment; add a write tool for that.
+
+Or connect to an MCP server:
 
 ```typescript
 const tools = await mimic.mcp('http://localhost:3000/mcp')
@@ -97,24 +103,25 @@ mimic.call({ to: '+15551234567', goal: 'Book an appointment', tools })
 
 ## Extracting data
 
-Use a Zod schema to get typed results from the call:
+Use a Zod schema to get typed results from the call. Any requested field can be
+`null` when the call did not establish its value; unknown is distinct from false:
 
 ```typescript
 import { z } from 'zod'
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Confirm the appointment',
-  extract: z.object({
-    confirmed: z.boolean().describe('whether the appointment was confirmed'),
-    notes: z.string().nullable().describe('any notes from the conversation'),
-  }),
+	to: '+15551234567',
+	goal: 'Confirm the appointment',
+	extract: z.object({
+		confirmed: z.boolean().describe('whether the appointment was confirmed'),
+		notes: z.string().nullable().describe('any notes from the conversation'),
+	}),
 })
 
 const result = await call.result
 if (result.status === 'completed') {
-  result.data.confirmed  // boolean
-  result.data.notes      // string | null
+	result.data.confirmed // boolean | null (unknown)
+	result.data.notes // string | null
 }
 ```
 
@@ -155,7 +162,7 @@ mimic.call({
 
   // Voice
   voice: 'female',              // 'female' (Aurora) or 'male' (Arlo)
-  aiDisclosure: true,           // Disclose AI status + recording
+  aiDisclosure: true,           // Identify the agent as AI; recording notice is separate
   ambience: true,               // Office background noise
 
   // Persona mode — use your own system prompt, skip goal compilation
@@ -175,12 +182,12 @@ mimic.call({
 
 ## Packages
 
-| Package | What it does |
-|---|---|
-| `packages/sdk` | Client SDK — `tool()`, streaming, typed results |
-| `packages/engine` | Voice engine — ASR, LLM, TTS, interrupts, speculation, backchannel |
-| `packages/server` | API server — Hono, Postgres, SIP dialing, result extraction |
-| `packages/transport-livekit` | LiveKit adapter — rooms, audio I/O, noise cancellation |
+| Package                      | What it does                                                       |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `packages/sdk`               | Client SDK — `tool()`, streaming, typed results                    |
+| `packages/engine`            | Voice engine — ASR, LLM, TTS, interrupts, speculation, backchannel |
+| `packages/server`            | API server — Hono, Postgres, SIP dialing, result extraction        |
+| `packages/transport-livekit` | LiveKit adapter — rooms, audio I/O, noise cancellation             |
 
 ## Self-hosting
 

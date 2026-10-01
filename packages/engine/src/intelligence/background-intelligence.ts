@@ -83,10 +83,13 @@ export function createBackgroundIntelligence(deps: BackgroundIntelligenceDeps) {
 			const parsed = await callBackgroundModel(
 				client,
 				prompts.entityExtraction,
-				`${agentName}: "${agentResponse}"\nCaller: "${userTranscript}"`,
+				JSON.stringify([
+					{ role: 'caller', content: userTranscript },
+					{ role: 'agent', content: agentResponse },
+				]),
 				entitySchema,
 				'keyterms',
-				{ signal: deps.callSignal },
+				{ maxTokens: 250, signal: deps.callSignal },
 			)
 			if (!callIsActive()) return
 			if (parsed) {
@@ -115,7 +118,7 @@ export function createBackgroundIntelligence(deps: BackgroundIntelligenceDeps) {
 				formatTurnsForPrompt(olderTurns, { agentLabel: agentName }),
 				summarySchema,
 				'conversation-summary',
-				{ maxTokens: 300, signal: deps.callSignal },
+				{ maxTokens: 500, signal: deps.callSignal },
 			)
 
 			if (!callIsActive() || !parsed?.summary) return

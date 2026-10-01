@@ -50,6 +50,7 @@ interface ClassifySpec {
 	toolArgs: Record<string, unknown> | null
 	missingArgs: string[]
 	directorNote?: string | null
+	cancelExisting?: boolean
 }
 
 interface HarnessOptions {
@@ -106,6 +107,7 @@ function createTestHarness(opts: HarnessOptions) {
 					toolArgs: spec.toolArgs,
 					missingArgs: spec.missingArgs,
 					directorNote: spec.directorNote ?? null,
+					cancelExisting: spec.cancelExisting,
 				}
 				const delayMs = opts.classifyDelaysMs?.[idx] ?? 0
 				if (delayMs <= 0) {
@@ -569,5 +571,119 @@ describe('tool-supervisor-machine', () => {
 		assert.equal(toolState.toolDefinitions[1]!.name, 'bookMeeting')
 
 		actor.stop()
+	})
+
+	it('reports actual execution separately from pending fields and retains those fields when another tool completes', async (t) => {
+		const { actor, getSupSnapshot } = createTestHarness({
+			classifyResults: [
+				{
+					needsTool: true,
+					query: 'check Friday availability',
+					toolName: 'checkCalendar',
+					toolArgs: { date: '2026-05-08' },
+					missingArgs: [],
+				},
+				{
+					needsTool: true,
+					query: 'book a meeting Monday',
+					toolName: 'bookMeeting',
+					toolArgs: { date: '2026-05-11' },
+					missingArgs: ['time'],
+					directorNote: 'Ask what time on Monday.',
+				},
+			],
+			executionResults: [{ result: 'Friday is free' }],
+			transportDelay: 80,
+		})
+		t.after(() => actor.stop())
+
+		actor.send({ type: 'DETECT_INTENT', transcript: 'check Friday availability', turnId: 1 })
+		actor.send({ type: 'DETECT_INTENT', transcript: 'book a meeting Monday', turnId: 2 })
+
+		const active = getToolStateForControlBlock(getSupSnapshot())
+		assert.deepEqual(active.executingTools, ['checkCalendar: check Friday availability'])
+		assert.ok(active.pendingTools.includes('bookMeeting has not started; missing required information: time.'))
+		assert.ok(active.pendingTools.includes('Ask what time on Monday.'))
+		assert.equal(active.toolResults.length, 0)
+
+		await delay(120)
+		const completed = getToolStateForControlBlock(getSupSnapshot())
+		assert.deepEqual(completed.executingTools, [])
+		assert.ok(completed.pendingTools.includes('bookMeeting has not started; missing required information: time.'))
+		assert.ok(completed.pendingTools.includes('Ask what time on Monday.'))
+		assert.equal(completed.toolResults[0]?.result, 'Friday is free')
+	})
+
+	it('retires an explicitly withdrawn pending write without canceling an executing read', async (t) => {
+		const { actor, getSupSnapshot, parentEvents } = createTestHarness({
+			classifyResults: [
+				{
+					needsTool: true,
+					query: 'check Friday availability',
+					toolName: 'checkCalendar',
+					toolArgs: { date: '2026-05-08' },
+					missingArgs: [],
+				},
+				{
+					needsTool: true,
+					query: 'book a meeting Monday',
+					toolName: 'bookMeeting',
+					toolArgs: { date: '2026-05-11' },
+					missingArgs: ['time'],
+					directorNote: 'Booking needs a time.',
+				},
+				{
+					needsTool: false,
+					query: 'never mind the booking',
+					toolName: null,
+					toolArgs: null,
+					missingArgs: [],
+					cancelExisting: true,
+				},
+			],
+			executionResults: [{ result: 'Friday is free' }],
+			transportDelay: 80,
+		})
+		t.after(() => actor.stop())
+		actor.send({ type: 'DETECT_INTENT', transcript: 'check Friday availability', turnId: 1 })
+		actor.send({ type: 'DETECT_INTENT', transcript: 'book a meeting Monday', turnId: 2 })
+		actor.send({ type: 'DETECT_INTENT', transcript: 'never mind the booking', turnId: 3 })
+
+		const active = getToolStateForControlBlock(getSupSnapshot())
+		assert.deepEqual(active.pendingTools, [])
+		assert.deepEqual(active.executingTools, ['checkCalendar: check Friday availability'])
+		assert.equal(
+			getInvocationRefs(getSupSnapshot().children).some((ref) => invState(ref) === 'awaiting_args'),
+			false,
+		)
+		await delay(120)
+		const ready = parentEvents.filter((event) => event.type === 'tool_result_ready')
+		assert.equal(ready.length, 1)
+		assert.equal(ready[0]?.toolName, 'checkCalendar', 'the withdrawn booking must never run')
+	})
+
+	it('preserves an awaiting action when an ordinary none result has no withdrawal flag', (t) => {
+		const { actor, getSupSnapshot } = createTestHarness({
+			classifyResults: [
+				{
+					needsTool: true,
+					query: 'book Monday',
+					toolName: 'bookMeeting',
+					toolArgs: { date: '2026-05-11' },
+					missingArgs: ['time'],
+				},
+				{ needsTool: false, query: 'one moment', toolName: null, toolArgs: null, missingArgs: [] },
+			],
+		})
+		t.after(() => actor.stop())
+		actor.send({ type: 'DETECT_INTENT', transcript: 'book Monday', turnId: 1 })
+		actor.send({ type: 'DETECT_INTENT', transcript: 'one moment', turnId: 2 })
+		const state = getToolStateForControlBlock(getSupSnapshot())
+		assert.ok(state.pendingTools.some((note) => note.includes('missing required information: time')))
+		assert.deepEqual(state.executingTools, [])
+		assert.equal(
+			getInvocationRefs(getSupSnapshot().children).filter((ref) => invState(ref) === 'awaiting_args').length,
+			1,
+		)
 	})
 })

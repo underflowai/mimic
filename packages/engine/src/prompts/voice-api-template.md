@@ -1,5 +1,5 @@
 {{compiledPrompt}}
 
-# Speech output rules
+Speech output rules:
 
 {{speechTags}}

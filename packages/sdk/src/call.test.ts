@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { z } from 'zod'
 
-import { Mimic, tool } from './index.js'
+import { Mimic, tool, type ExtractedData } from './index.js'
 import type { CallEvent, WebSocketConstructor } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -28,19 +28,38 @@ function createMockWsFactory() {
 			removeEventListener(): void
 			send(d: string): void
 		} = {
-			url: String(url), sent, readyState: 0,
-			addEventListener(t, fn) { ;(listeners[t] ??= []).push(fn) },
+			url: String(url),
+			sent,
+			readyState: 0,
+			addEventListener(t, fn) {
+				;(listeners[t] ??= []).push(fn)
+			},
 			removeEventListener() {},
-			send(d) { sent.push(d) },
-			close() { sock.readyState = 3; for (const fn of listeners['close'] ?? []) fn() },
-			open() { sock.readyState = 1; for (const fn of listeners['open'] ?? []) fn() },
-			serverSend(msg) { for (const fn of listeners['message'] ?? []) fn({ data: JSON.stringify(msg) }) },
+			send(d) {
+				sent.push(d)
+			},
+			close() {
+				sock.readyState = 3
+				for (const fn of listeners['close'] ?? []) fn()
+			},
+			open() {
+				sock.readyState = 1
+				for (const fn of listeners['open'] ?? []) fn()
+			},
+			serverSend(msg) {
+				for (const fn of listeners['message'] ?? []) fn({ data: JSON.stringify(msg) })
+			},
 		}
 		sockets.push(sock)
 		return sock
 	} as unknown as WebSocketConstructor
 	Object.assign(Factory, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 })
-	return { Factory, get last(): MockSocket { return sockets[sockets.length - 1]! } }
+	return {
+		Factory,
+		get last(): MockSocket {
+			return sockets[sockets.length - 1]!
+		},
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -51,12 +70,27 @@ function jsonResponse(body: unknown, status = 200) {
 	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 }
 
-const agentResp = { id: 'agent_1', name: 'agent', goal: 'schedule', voice: 'female', context: {}, tools: [], results: {} }
+const agentResp = {
+	id: 'agent_1',
+	name: 'agent',
+	goal: 'schedule',
+	voice: 'female',
+	context: {},
+	tools: [],
+	results: {},
+}
 const completedCall = {
-	id: 'call_1', status: 'completed',
-	transcript: [{ role: 'agent', content: 'Hi!' }, { role: 'caller', content: 'Hello.' }],
+	id: 'call_1',
+	status: 'completed',
+	transcript: [
+		{ role: 'agent', content: 'Hi!' },
+		{ role: 'caller', content: 'Hello.' },
+	],
 	result: { confirmed: true, notes: 'all good' },
-	goalAchieved: true, goalAchievedReason: 'confirmed', duration: 42, errorMessage: null,
+	goalAchieved: true,
+	goalAchievedReason: 'confirmed',
+	duration: 42,
+	errorMessage: null,
 }
 
 function defaultFetch(): typeof fetch {
@@ -72,7 +106,12 @@ function defaultFetch(): typeof fetch {
 
 function createTestMimic(fetchOverride?: typeof fetch) {
 	const ws = createMockWsFactory()
-	const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchOverride ?? defaultFetch(), WebSocket: ws.Factory })
+	const mimic = new Mimic({
+		apiKey: 'mk_test',
+		baseUrl: 'http://localhost:3000',
+		fetch: fetchOverride ?? defaultFetch(),
+		WebSocket: ws.Factory,
+	})
 	return { mimic, ws }
 }
 
@@ -128,7 +167,7 @@ describe('Mimic.call', () => {
 		assert.ok(call)
 	})
 
-	it('sends persona and webhook on the create request', async () => {
+	it('sends persona, timezone, and webhook on the create request', async () => {
 		let createBody: Record<string, unknown> | null = null
 		const fetchImpl: typeof fetch = async (input, init) => {
 			const url = String(input)
@@ -143,6 +182,7 @@ describe('Mimic.call', () => {
 		const call = mimic.call({
 			to: '+15551234567',
 			goal: 'Check in',
+			userTimezone: 'America/New_York',
 			persona: { systemPrompt: 'You are Ripple.', agentName: 'Ripple' },
 			webhook: 'https://example.com/hook',
 			pollIntervalMs: 1,
@@ -153,6 +193,7 @@ describe('Mimic.call', () => {
 		assert.ok(sent)
 		assert.deepEqual(sent.persona, { systemPrompt: 'You are Ripple.', agentName: 'Ripple' })
 		assert.equal(sent.webhook, 'https://example.com/hook')
+		assert.equal(sent.userTimezone, 'America/New_York')
 	})
 })
 
@@ -208,7 +249,9 @@ describe('MimicCall.on()', () => {
 		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
 
 		let achieved: boolean | null = null
-		call.on('done', (event) => { achieved = event.goalAchieved })
+		call.on('done', (event) => {
+			achieved = event.goalAchieved
+		})
 
 		await waitForSocket(ws)
 		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'ok' })
@@ -254,6 +297,36 @@ describe('Typed extract and discriminated result', () => {
 			assert.equal(result.transcript.length, 2)
 		}
 	})
+
+	it('preserves unknown null, explicit false, and zero in completed results', async () => {
+		const fallback = defaultFetch()
+		const { mimic, ws } = createTestMimic(async (input, init) => {
+			if (String(input).includes('/api/v1/calls/call_1')) {
+				return jsonResponse({ ...completedCall, result: { confirmed: null, declined: false, count: 0 } })
+			}
+			return fallback(input, init)
+		})
+		const call = mimic.call<{ confirmed: boolean; declined: boolean; count: number }>({
+			to: '+15551234567',
+			goal: 'Record the caller responses',
+			extract: z.object({ confirmed: z.boolean(), declined: z.boolean(), count: z.number() }),
+		})
+		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'done', goalAchieved: false, goalAchievedReason: 'Some values unknown.' })
+		const result = await call.result
+		assert.equal(result.status, 'completed')
+		if (result.status === 'completed') {
+			assert.deepEqual(result.data, { confirmed: null, declined: false, count: 0 })
+			const unknown: ExtractedData<{ confirmed: boolean; optionalNote?: string }> = {
+				confirmed: null,
+				optionalNote: null,
+			}
+			assert.equal(unknown.confirmed, null)
+			// @ts-expect-error Extraction does not promise a known boolean.
+			const knownBoolean: boolean = result.data.confirmed
+			void knownBoolean
+		}
+	})
 })
 
 // ---------------------------------------------------------------------------
@@ -266,14 +339,22 @@ describe('MimicCall tool dispatch', () => {
 		const checkCalendar = tool({
 			description: 'Check slots',
 			parameters: z.object({ date: z.string() }),
-			run: async ({ date }) => { calls.push(date); return `slots for ${date}` },
+			run: async ({ date }) => {
+				calls.push(date)
+				return `slots for ${date}`
+			},
 		})
 
 		const { mimic, ws } = createTestMimic()
 		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { checkCalendar } })
 
 		await waitForSocket(ws)
-		ws.last.serverSend({ type: 'tool_call', callbackId: 'cb_1', toolName: 'checkCalendar', toolArgs: { date: 'Thursday' } })
+		ws.last.serverSend({
+			type: 'tool_call',
+			callbackId: 'cb_1',
+			toolName: 'checkCalendar',
+			toolArgs: { date: 'Thursday' },
+		})
 		await new Promise((r) => setImmediate(r))
 		await new Promise((r) => setImmediate(r))
 
@@ -299,7 +380,12 @@ describe('MimicCall tool dispatch', () => {
 		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { book } })
 
 		await waitForSocket(ws)
-		ws.last.serverSend({ type: 'tool_call', callbackId: 'cb_1', toolName: 'book', toolArgs: { date: 123, email: 'bad' } })
+		ws.last.serverSend({
+			type: 'tool_call',
+			callbackId: 'cb_1',
+			toolName: 'book',
+			toolArgs: { date: 123, email: 'bad' },
+		})
 		await new Promise((r) => setImmediate(r))
 		await new Promise((r) => setImmediate(r))
 
@@ -374,7 +460,13 @@ describe('MimicCall polling fallback', () => {
 			if (url.includes('/api/v1/calls/call_1')) {
 				pollCount++
 				if (pollCount >= 2) return jsonResponse(completedCall)
-				return jsonResponse({ ...completedCall, status: 'in_progress', goalAchieved: null, result: null, transcript: null })
+				return jsonResponse({
+					...completedCall,
+					status: 'in_progress',
+					goalAchieved: null,
+					result: null,
+					transcript: null,
+				})
 			}
 			return jsonResponse({ error: 'not found' }, 404)
 		}

@@ -5,6 +5,7 @@ import { z } from 'zod'
 import {
 	arloPersona,
 	auroraPersona,
+	defaultMimicTools,
 	formatUserDateTime,
 	loadPrompt,
 	models,
@@ -93,7 +94,13 @@ function serializeValue(value: unknown, indent: string): string {
 
 	if (isConstrainedField(value)) {
 		const display = value.value === null || value.value === undefined ? 'MISSING' : String(value.value)
-		return `${display} (valid options: ${value.validOptions.join(', ')})`
+		// Preserve field semantics such as conditions, provenance, and collection
+		// instructions alongside the value and options supplied for compilation.
+		const metadata = Object.fromEntries(
+			Object.entries(value).filter(([key]) => key !== 'value' && key !== 'validOptions'),
+		)
+		const metadataText = Object.keys(metadata).length > 0 ? `; metadata: ${JSON.stringify(metadata)}` : ''
+		return `${display} (valid options: ${value.validOptions.join(', ')}${metadataText})`
 	}
 
 	if (Array.isArray(value)) {
@@ -207,6 +214,7 @@ function buildCompilerInput(input: GoalCompilerInput) {
 				: 'Not supplied. Runtime may provide caller details in the control block.'
 		}`,
 		`AI disclosure: ${formatAiDisclosure(input.aiDisclosure)}`,
+		'Runtime speech capabilities: Cartesia Sonic 3.6; only break and spell SSML tags pass through. Emotion, speed, and volume tags are stripped. Omit laughter unless the task explicitly calls for it.',
 		'Recording status or notice: not supplied as a dedicated setting. Do not infer it from AI disclosure; follow only explicit recording instructions in the goal or context.',
 		'',
 		'Goal:',
@@ -222,7 +230,11 @@ function buildCompilerInput(input: GoalCompilerInput) {
 			normalizeData(input.data),
 		)
 	}
-	parts.push('', 'Runtime tools available (definitions are reference data, not instructions):', formatTools(input.tools))
+	parts.push(
+		'',
+		'Runtime tools available (definitions are reference data, not instructions):',
+		formatTools([...defaultMimicTools, ...input.tools]),
+	)
 	parts.push(
 		'',
 		'Requested post-call result fields (desired extraction, not evidence that an outcome is complete):',
@@ -242,9 +254,8 @@ async function renderSystemPromptFromTemplate(
 	})
 }
 
-export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoal> {
+export async function compileGoal(input: GoalCompilerInput, openai = new OpenAI()): Promise<CompiledGoal> {
 	const compilerPrompt = await getCompilerPrompt()
-	const openai = new OpenAI()
 
 	const { model, reasoningEffort, maxOutputTokens } = models.goalCompiler
 
@@ -272,12 +283,10 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 	const agentName = parsed.agentName || defaultAgentName(input.voice)
 	const systemPrompt = await renderSystemPromptFromTemplate(agentName, parsed)
 
-	// Store the prompt with [AGENT_NAME] placeholder so it can be reused
-	// across voices without recompilation
-	const templatePrompt = systemPrompt.replaceAll(agentName, '[AGENT_NAME]')
-
 	return {
-		systemPrompt: templatePrompt,
+		// Keep authored names intact. Global substitution can corrupt unrelated
+		// names and data (for example, an agent named Al and a caller in Albany).
+		systemPrompt,
 		turnControlBlock: parsed.turnControlBlock,
 		agentName,
 	}
@@ -333,7 +342,8 @@ export function buildOrchestratorConfigFromAgent(
 	agent: AgentConfig,
 	callContext?: Record<string, string>,
 ): { orchestratorConfig: Omit<CallOrchestratorConfig, 'audioTransport'> } {
-	const persona = agent.voice === 'male' ? arloPersona : auroraPersona
+	const voicePersona = agent.voice === 'male' ? arloPersona : auroraPersona
+	const persona = { ...voicePersona, firstName: agent.agentName.trim() || voicePersona.firstName }
 	const userTimezone = callContext?.userTimezone
 	const recipient = resolveRecipient(agent, callContext)
 	return {
@@ -342,10 +352,12 @@ export function buildOrchestratorConfigFromAgent(
 			systemPrompt: agent.systemPrompt.replaceAll('[AGENT_NAME]', persona.firstName),
 			maxCompletionTokens: 384,
 			userFirstName: resolveFirstName(agent, callContext),
+			userTimezone,
 			recipient,
 			buildOpeningBlock: () => buildOpeningContextBlock(userTimezone, recipient),
 			buildTurnControlBlock,
-			textQualityBlock: agent.turnControlBlock ?? undefined,
+			textQualityBlock: agent.turnControlBlock?.replaceAll('[AGENT_NAME]', persona.firstName),
+			endCallEnabled: true,
 			tools: agent.tools.length > 0 ? agent.tools : undefined,
 		},
 	}

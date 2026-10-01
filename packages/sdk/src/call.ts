@@ -7,6 +7,7 @@ import type {
 	CallEventMap,
 	CallOptions,
 	CallResult,
+	ExtractedData,
 	ServerMessage,
 	ToolInput,
 	WebSocketConstructor,
@@ -33,7 +34,7 @@ function toCallResult<T extends Record<string, unknown>>(call: ApiCall): CallRes
 		id: call.id,
 		goalAchieved: call.goalAchieved ?? false,
 		goalAchievedReason: call.goalAchievedReason ?? '',
-		data: (call.result ?? {}) as T,
+		data: (call.result ?? {}) as ExtractedData<T>,
 		transcript: call.transcript ?? [],
 		duration: call.duration ?? 0,
 	}
@@ -47,9 +48,8 @@ function levenshtein(a: string, b: string): number {
 	for (let j = 0; j <= n; j++) dp[0]![j] = j
 	for (let i = 1; i <= m; i++) {
 		for (let j = 1; j <= n; j++) {
-			dp[i]![j] = a[i - 1] === b[j - 1]
-				? dp[i - 1]![j - 1]!
-				: 1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!)
+			dp[i]![j] =
+				a[i - 1] === b[j - 1] ? dp[i - 1]![j - 1]! : 1 + Math.min(dp[i - 1]![j]!, dp[i]![j - 1]!, dp[i - 1]![j - 1]!)
 		}
 	}
 	return dp[m]![n]!
@@ -98,9 +98,9 @@ export interface MimicCallInit {
  * if (result.status === 'completed') console.log(result.data)
  * ```
  */
-export class MimicCall<T extends Record<string, unknown> = Record<string, unknown>>
-	implements AsyncIterable<CallEvent>
-{
+export class MimicCall<
+	T extends Record<string, unknown> = Record<string, unknown>,
+> implements AsyncIterable<CallEvent> {
 	/** Resolves when the call completes with the final typed result. */
 	readonly result: Promise<CallResult<T>>
 
@@ -190,6 +190,7 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 				goal: this.options.goal,
 				to: this.options.to,
 				voice: this.options.voice,
+				userTimezone: this.options.userTimezone,
 				context: this.options.context,
 				data: this.options.data,
 				recipient: this.options.recipient,

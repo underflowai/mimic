@@ -24,8 +24,8 @@ import { Mimic } from '@underflowai/mimic'
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Say hello and ask how their day is going',
+	to: '+15551234567',
+	goal: 'Say hello and ask how their day is going',
 })
 
 const result = await call.result
@@ -38,11 +38,12 @@ Tell the agent what it needs to know. Write it like you'd brief a human:
 
 ```typescript
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Confirm the appointment for tomorrow at 2pm',
-  context: `You're calling on behalf of Greenwood Medical. We require
-  24-hour cancellation notice. If they need to reschedule, offer the
-  next available slot. Dr. Smith is out on Fridays.`,
+	to: '+15551234567',
+	goal: 'Confirm the appointment for tomorrow at 2pm',
+	userTimezone: 'America/New_York',
+	context: `You're calling on behalf of Greenwood Medical. We require
+  24-hour cancellation notice. If they need to reschedule, collect their
+  preferred date and time for the office to review. Dr. Smith is out on Fridays.`,
 })
 ```
 
@@ -53,29 +54,29 @@ what fields exist and walks through them naturally:
 
 ```typescript
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Confirm the appointment',
-  context: 'You work at Greenwood Medical.',
-  data: {
-    appointmentDate: 'Thursday May 16',
-    appointmentTime: '2:00 PM',
-    doctorName: 'Dr. Smith',
-  },
-  recipient: {
-    firstName: 'Jane',
-    lastName: 'Smith',
-  },
+	to: '+15551234567',
+	goal: 'Confirm the appointment',
+	context: 'You work at Greenwood Medical.',
+	data: {
+		appointmentDate: 'Thursday May 16',
+		appointmentTime: '2:00 PM',
+		doctorName: 'Dr. Smith',
+	},
+	recipient: {
+		firstName: 'Jane',
+		lastName: 'Smith',
+	},
 })
 ```
 
-`data` field names are compiled into the prompt (so the agent knows
-what to discuss), but the values are injected at runtime. This means
-you can reuse the same compiled prompt across different patients —
-only the first call compiles (~30s), every subsequent call with the
-same goal + context + data keys is instant.
+`data` names and values are supplied to the prompt compiler. The compiled
+prompt cache includes that data and the recipient, so another person's
+values do not reuse a prompt containing the previous person's details.
 
-`recipient` is injected per-turn so the agent can use their name
-naturally. It never affects the compiled prompt.
+`recipient` is also available in each turn's runtime context. Set
+`userTimezone` to the caller's IANA timezone (for example, `America/New_York`)
+to resolve “today” and “tomorrow” in their local time. Timezone is stored
+per call and does not require a separate compiled prompt.
 
 ## Tools
 
@@ -89,38 +90,45 @@ import { Mimic, tool } from '@underflowai/mimic'
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
 const checkCalendar = tool({
-  description: 'Check available calendar slots',
-  parameters: z.object({
-    date: z.string().describe('The date to check'),
-  }),
-  run: async ({ date }) => {
-    // Your existing code — runs locally in your process
-    const slots = await myCalendarAPI.getSlots(date)
-    return JSON.stringify(slots)
-  },
+	kind: 'read',
+	description: 'Check available calendar slots',
+	parameters: z.object({
+		date: z.string().describe('The date to check'),
+	}),
+	run: async ({ date }) => {
+		// Your existing code — runs locally in your process
+		const slots = await myCalendarAPI.getSlots(date)
+		return JSON.stringify(slots)
+	},
 })
 
 const bookAppointment = tool({
-  description: 'Book an appointment',
-  parameters: z.object({
-    time: z.string().describe('The time slot'),
-    email: z.string().email().describe('Patient email'),
-  }),
-  run: async ({ time, email }) => {
-    await myCalendarAPI.book(time, email)
-    return `Booked ${time} for ${email}`
-  },
+	kind: 'write',
+	description: 'Book an appointment',
+	parameters: z.object({
+		time: z.string().describe('The time slot'),
+		email: z.string().email().describe('Patient email'),
+	}),
+	run: async ({ time, email }) => {
+		await myCalendarAPI.book(time, email)
+		return `Booked ${time} for ${email}`
+	},
 })
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Book an appointment for the caller',
-  tools: { checkCalendar, bookAppointment },
+	to: '+15551234567',
+	goal: 'Book an appointment for the caller',
+	tools: { checkCalendar, bookAppointment },
 })
 ```
 
-Tools execute locally in your process. Your secrets and APIs never
-leave your machine.
+Use `kind: 'read'` for lookups and `kind: 'write'` for actions such as booking,
+updating a record, or sending a message. An omitted kind defaults to `write`;
+only tools explicitly marked read are eligible for speculative execution.
+
+Tools execute locally in your process. Tool arguments and returned results
+are sent through Mimic so the agent can use them; keep secrets inside your
+handler rather than returning them.
 
 ## MCP tools
 
@@ -131,9 +139,9 @@ wrapping entirely:
 const tools = await mimic.mcp('http://localhost:3000/mcp')
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Book an appointment',
-  tools,
+	to: '+15551234567',
+	goal: 'Book an appointment',
+	tools,
 })
 ```
 
@@ -143,36 +151,38 @@ You can mix MCP tools with custom tools:
 const mcpTools = await mimic.mcp('http://localhost:3000/mcp')
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Book an appointment',
-  tools: { ...mcpTools, myCustomTool },
+	to: '+15551234567',
+	goal: 'Book an appointment',
+	tools: { ...mcpTools, myCustomTool },
 })
 ```
 
 ## Extracting data
 
-Use a Zod schema to extract typed, validated data from the call.
-The types are enforced — booleans come back as `true`/`false`, not
-`"true"`:
+Use a Zod schema to describe the values to extract from the call.
+Known booleans come back as `true` or `false`, not strings. Every field
+can also be `null` when the call did not establish its value, including
+required or nonnullable schema fields. Unknown is different from false;
+optional fields are returned as null when missing.
 
 ```typescript
 import { z } from 'zod'
 
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Confirm the appointment',
-  extract: z.object({
-    confirmed: z.boolean().describe('whether the appointment was confirmed'),
-    notes: z.string().nullable().describe('any notes from the conversation'),
-    rescheduleDate: z.string().nullable().describe('new date if rescheduled'),
-  }),
+	to: '+15551234567',
+	goal: 'Confirm the appointment',
+	extract: z.object({
+		confirmed: z.boolean().describe('whether the appointment was confirmed'),
+		notes: z.string().nullable().describe('any notes from the conversation'),
+		rescheduleDate: z.string().nullable().describe('new date if rescheduled'),
+	}),
 })
 
 const result = await call.result
 if (result.status === 'completed') {
-  result.data.confirmed     // boolean
-  result.data.notes         // string | null
-  result.data.rescheduleDate // string | null
+	result.data.confirmed // boolean | null
+	result.data.notes // string | null
+	result.data.rescheduleDate // string | null
 }
 ```
 
@@ -183,23 +193,23 @@ Listen to the call in real-time:
 ```typescript
 // Typed event handlers
 call.on('speech', ({ role, text }) => {
-  console.log(`[${role}] ${text}`)
+	console.log(`[${role}] ${text}`)
 })
 
 call.on('tool_call', ({ name, args }) => {
-  console.log(`Calling ${name} with`, args)
+	console.log(`Calling ${name} with`, args)
 })
 
 call.on('tool_result', ({ name, result }) => {
-  console.log(`${name} returned: ${result}`)
+	console.log(`${name} returned: ${result}`)
 })
 
 call.on('done', ({ goalAchieved, goalAchievedReason }) => {
-  console.log(`Goal achieved: ${goalAchieved} — ${goalAchievedReason}`)
+	console.log(`Goal achieved: ${goalAchieved} — ${goalAchievedReason}`)
 })
 
 call.on('error', ({ message }) => {
-  console.error(`Error: ${message}`)
+	console.error(`Error: ${message}`)
 })
 ```
 
@@ -207,17 +217,17 @@ Or use async iteration:
 
 ```typescript
 for await (const event of call) {
-  switch (event.type) {
-    case 'speech':
-      console.log(`[${event.role}] ${event.text}`)
-      break
-    case 'tool_call':
-      console.log(`Calling ${event.name}`)
-      break
-    case 'done':
-      console.log(`Done: ${event.goalAchieved}`)
-      break
-  }
+	switch (event.type) {
+		case 'speech':
+			console.log(`[${event.role}] ${event.text}`)
+			break
+		case 'tool_call':
+			console.log(`Calling ${event.name}`)
+			break
+		case 'done':
+			console.log(`Done: ${event.goalAchieved}`)
+			break
+	}
 }
 ```
 
@@ -245,28 +255,29 @@ the system prompt directly and skip compilation:
 
 ```typescript
 const call = mimic.call({
-  to: '+15551234567',
-  goal: 'Check in on how the morning went and note anything that needs follow-up',
-  persona: {
-    systemPrompt: ripplePrompt, // your full agent prompt, used verbatim
-    agentName: 'Ripple',
-  },
+	to: '+15551234567',
+	goal: 'Check in on how the morning went and note anything that needs follow-up',
+	persona: {
+		systemPrompt: ripplePrompt, // your full agent prompt, used verbatim
+		agentName: 'Ripple',
+	},
 })
 ```
 
 `goal` is still required: the result extractor uses it as its rubric for
-`goalAchieved` and `extract`. `context`, `data`, and `recipient` are stored
-but not woven into the prompt in this mode, so anything the agent must know
-belongs in `systemPrompt` (max 48,000 characters). Calls with identical
-options reuse the same agent, so persona changes take effect immediately.
+`goalAchieved` and `extract`. `context` and `data` are stored but not woven
+into the persona prompt, so put required background in `systemPrompt`
+(max 48,000 characters). `recipient` and `userTimezone` remain available in
+runtime context. Calls with identical options reuse the same agent;
+changing the persona creates a distinct configuration.
 
 ## Completion webhook
 
 ```typescript
 mimic.call({
-  to: '+15551234567',
-  goal: '...',
-  webhook: 'https://example.com/mimic/completed', // receives a call.completed event
+	to: '+15551234567',
+	goal: '...',
+	webhook: 'https://example.com/mimic/completed', // receives a call.completed event
 })
 ```
 
@@ -293,7 +304,8 @@ mimic.call({
 
   // Voice
   voice: 'female',              // 'female' (Aurora) or 'male' (Arlo)
-  aiDisclosure: true,           // Disclose AI status + recording
+  userTimezone: 'America/New_York', // Caller timezone for relative dates/times
+  aiDisclosure: true,           // Proactively disclose AI status
 
   // Audio
   ambience: true,               // Office background noise
@@ -312,6 +324,10 @@ mimic.call({
   idempotencyKey: 'unique-key', // Prevent duplicate calls
 })
 ```
+
+`aiDisclosure` controls the AI introduction. Configure recording notice and
+consent separately for the actual recording workflow; this flag does not
+establish recording status or caller consent.
 
 ## Running the example
 

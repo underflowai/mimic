@@ -107,7 +107,7 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.equal(ctx.silenceFollowUp, true)
 		assert.equal(ctx.silenceClosing, true)
 		assert.equal(ctx.silenceFollowUpCount, 3)
-		assert.match(block, /stayed quiet after a couple of gentle check-ins/i)
+		assert.match(block, /stayed quiet after repeated check-ins/i)
 		assert.match(block, /goodbye/i)
 		assert.match(block, /no question/i)
 	})
@@ -134,14 +134,16 @@ describe('createTurnControlBlockBuilder', () => {
 		const compiled = await createTurnControlBlockBuilder({ ...deps, textQualityBlock: 'COMPILED BLOCK' })
 		const compiledBlock = compiled.build('hi', { interruptContext: null })
 		assert.match(compiledBlock, /COMPILED BLOCK/)
+		assert.match(compiledBlock, /Follow the caller's latest intent/)
 		assert.doesNotMatch(compiledBlock, /mid-conversation on a live phone call/)
 		assert.doesNotMatch(compiledBlock, /Voice transcription/)
 
 		const persona = await createTurnControlBlockBuilder(deps)
 		const personaBlock = persona.build('hi', { interruptContext: null })
 		assert.match(personaBlock, /mid-conversation on a live phone call/)
-		assert.match(personaBlock, /one turn in three/)
+		assert.match(personaBlock, /without forced fillers/)
 		assert.match(personaBlock, /Voice transcription/)
+		assert.match(personaBlock, /Follow the caller's latest intent/)
 	})
 
 	it('appends the end-call tag guidance only when enabled', async () => {

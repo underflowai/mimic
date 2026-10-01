@@ -24,12 +24,12 @@ import { callBackgroundModel } from '#engine/llm-parse.js'
 import { createLogger } from '#engine/logger.js'
 import { loadPrompt } from '#engine/prompts.js'
 
-import { backchannelTokens, minBackchannelWords } from './tokens.js'
+import { minBackchannelWords } from './tokens.js'
 
 const log = createLogger('mimic:bc-classify')
 
 const schema = z.object({
-	token: z.enum(backchannelTokens).nullable(),
+	token: z.enum(['mm-hmm', 'uh-huh', 'got-it', 'i-see']).nullable(),
 })
 
 let cachedPrompt: Promise<string> | null = null
@@ -47,13 +47,16 @@ export function createBackchannelClassifier(client: OpenAI, callSignal: AbortSig
 		const words = transcript.trim().split(/\s+/).filter(Boolean)
 		if (words.length < minBackchannelWords) return null
 
-		const snippet = words.slice(-50).join(' ')
+		const snippet = transcript.trim()
 		const systemPrompt = await getSystemPrompt()
-		const result = await callBackgroundModel(client, systemPrompt, snippet, schema, 'backchannel', {
-			temperature: 1,
-			maxTokens: 50,
-			signal: callSignal,
-		})
+		const result = await callBackgroundModel(
+			client,
+			systemPrompt,
+			JSON.stringify({ callerTranscript: snippet }),
+			schema,
+			'backchannel',
+			{ maxTokens: 50, signal: callSignal },
+		)
 
 		const token = result?.token ?? null
 		const snippetHash = hashSnippet(snippet)

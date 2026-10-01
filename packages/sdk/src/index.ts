@@ -33,7 +33,7 @@ import type { CallOptions, MimicOptions, ToolInput } from './types.js'
  *
  * const result = await call.result
  * if (result.status === 'completed') {
- *   console.log(result.data.confirmed) // boolean
+ *   console.log(result.data.confirmed) // boolean | null
  * }
  * ```
  */
@@ -60,7 +60,9 @@ export class Mimic {
 			throw new MimicError('API key is required. Pass a string starting with "mk_".')
 		}
 		if (!opts.apiKey.startsWith('mk_') && !opts.apiKey.startsWith('sk_')) {
-			throw new MimicError(`Invalid API key format: "${opts.apiKey.slice(0, 8)}...". Expected a key starting with "mk_".`)
+			throw new MimicError(
+				`Invalid API key format: "${opts.apiKey.slice(0, 8)}...". Expected a key starting with "mk_".`,
+			)
 		}
 		this.client = new MimicClient(opts)
 		this.wsOption = typeof options === 'object' ? options.WebSocket : undefined
@@ -78,9 +80,9 @@ export class Mimic {
 	 *   to: '+15551234567',
 	 *   goal: 'Confirm the appointment',
 	 *   tools: { checkCalendar },
- *   extract: z.object({
- *     confirmed: z.boolean().describe('whether confirmed'),
- *   }),
+	 *   extract: z.object({
+	 *     confirmed: z.boolean().describe('whether confirmed'),
+	 *   }),
 	 * })
 	 *
 	 * // Option A: stream events
@@ -108,9 +110,7 @@ export class Mimic {
 		return connectMcp(url, options)
 	}
 
-	call<T extends Record<string, unknown> = Record<string, unknown>>(
-		options: CallOptions,
-	): MimicCall<T> {
+	call<T extends Record<string, unknown> = Record<string, unknown>>(options: CallOptions): MimicCall<T> {
 		return new MimicCall<T>({
 			client: this.client,
 			options,
@@ -133,6 +133,7 @@ export type {
 	CallResult,
 	DoneEvent,
 	ErrorEvent,
+	ExtractedData,
 	MimicOptions,
 	MimicTool,
 	Persona,

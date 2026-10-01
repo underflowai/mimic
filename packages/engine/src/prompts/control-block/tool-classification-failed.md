@@ -1,1 +1,1 @@
-Tool classification failed; continue without tool and ask for clarification if needed.
+The tool request could not be evaluated, so execution is not confirmed. Answer only what you can support without the tool. If the caller's request requires it, briefly say you could not complete that step; do not claim it is running or succeeded. Ask for clarification only if the caller's meaning is actually unclear.

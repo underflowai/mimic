@@ -17,7 +17,7 @@
  * ```
  */
 
-// Lazy-imported to avoid pulling ajv/zod-to-json-schema into the main bundle
+// Import network client and transport only when connecting to an MCP server.
 type MCPClient = import('@modelcontextprotocol/sdk/client/index.js').Client
 
 import { z } from 'zod'
@@ -25,34 +25,20 @@ import { z } from 'zod'
 import type { MimicTool, ToolInput } from './types.js'
 import { SDK_VERSION } from './version.js'
 
-/** @internal Convert MCP JSON Schema to a fake ZodType that passes our introspection. */
-function mcpSchemaToDescription(schema: Record<string, unknown>): Record<string, string> {
-	const properties = (schema.properties ?? {}) as Record<string, { type?: string; description?: string }>
-	const required = new Set((schema.required ?? []) as string[])
-	const result: Record<string, string> = {}
-
-	for (const [key, prop] of Object.entries(properties)) {
-		const parts: string[] = []
-		if (prop.type) parts.push(prop.type)
-		if (prop.description) parts.push(`— ${prop.description}`)
-		if (!required.has(key)) parts.push('(optional)')
-		result[key] = parts.join(' ') || key
-	}
-
-	return result
-}
-
-function createMcpTool(
+/** @internal Adapt one discovered tool while preserving its declared input schema. */
+export function createMcpTool(
 	client: MCPClient,
 	toolName: string,
 	description: string,
 	inputSchema: Record<string, unknown>,
+	readOnlyHint?: boolean,
 ): MimicTool {
 	const zodSchema = z.record(z.unknown())
 
 	return {
 		__mimicTool: true,
 		description,
+		kind: readOnlyHint === true ? 'read' : 'write',
 		schema: zodSchema,
 		async run(input: unknown) {
 			const args = (input ?? {}) as Record<string, unknown>
@@ -64,8 +50,8 @@ function createMcpTool(
 				.join('\n')
 			return text || JSON.stringify(result.content)
 		},
-		_mcpMeta: { toolName, inputSchema, paramDescriptions: mcpSchemaToDescription(inputSchema) },
-	} as MimicTool & { _mcpMeta: unknown }
+		_mcpMeta: { toolName, inputSchema },
+	}
 }
 
 export interface McpConnectionOptions {
@@ -92,10 +78,7 @@ export interface McpConnectionOptions {
  * mimic.call({ to: '...', goal: '...', tools })
  * ```
  */
-export async function connectMcp(
-	url: string,
-	options?: McpConnectionOptions,
-): Promise<Record<string, ToolInput>> {
+export async function connectMcp(url: string, options?: McpConnectionOptions): Promise<Record<string, ToolInput>> {
 	const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
 	const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js')
 
@@ -115,6 +98,7 @@ export async function connectMcp(
 			mcpTool.name,
 			mcpTool.description ?? mcpTool.name,
 			(mcpTool.inputSchema ?? {}) as Record<string, unknown>,
+			mcpTool.annotations?.readOnlyHint,
 		)
 	}
 

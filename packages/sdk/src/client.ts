@@ -3,7 +3,9 @@ import { ZodObject, type ZodType } from 'zod'
 
 import type { ApiCall, CreateCallResponse, MimicOptions, Persona, ToolSchema, Voice } from './types.js'
 
-function serializeExtractSchema(schema?: ZodObject<Record<string, ZodType>>): Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> | undefined {
+function serializeExtractSchema(
+	schema?: ZodObject<Record<string, ZodType>>,
+): Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> | undefined {
 	if (!schema || !(schema instanceof ZodObject)) return undefined
 	const shape = schema.shape as Record<string, ZodType>
 	const result: Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> = {}
@@ -78,6 +80,7 @@ export class MimicClient {
 		goal: string
 		to: string
 		voice?: Voice
+		userTimezone?: string
 		context?: string
 		data?: Record<string, unknown>
 		recipient?: { firstName: string; lastName?: string; email?: string }
@@ -95,6 +98,7 @@ export class MimicClient {
 				to: params.to,
 				goal: params.goal,
 				voice: params.voice ?? 'female',
+				userTimezone: params.userTimezone,
 				context: params.context,
 				data: params.data,
 				recipient: params.recipient,

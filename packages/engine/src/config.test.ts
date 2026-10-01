@@ -40,10 +40,28 @@ describe('getNumberEnv', () => {
 })
 
 describe('config.mimic tuning knobs', () => {
-	it('exposes validated Flux defaults', () => {
-		assert.equal(config.mimic.flux.model, 'flux-general-en')
-		assert.ok(config.mimic.flux.eagerEotThreshold < config.mimic.flux.eotThreshold)
-		assert.ok(config.mimic.flux.reconnect.initialBackoffMs < config.mimic.flux.reconnect.maxBackoffMs)
+	it('uses balanced Flux defaults that favor complete caller turns', () => {
+		const keys = [
+			'MIMIC_FLUX_MODEL',
+			'MIMIC_FLUX_EOT_THRESHOLD',
+			'MIMIC_FLUX_EAGER_EOT_THRESHOLD',
+			'MIMIC_FLUX_EOT_TIMEOUT_MS',
+		] as const
+		const original = new Map(keys.map((name) => [name, process.env[name]]))
+		for (const name of keys) delete process.env[name]
+		try {
+			assert.equal(config.mimic.flux.model, 'flux-general-en')
+			assert.equal(config.mimic.flux.eotThreshold, 0.7)
+			assert.equal(config.mimic.flux.eagerEotThreshold, 0.3)
+			assert.equal(config.mimic.flux.eotTimeoutMs, 3000)
+			assert.ok(config.mimic.flux.reconnect.initialBackoffMs < config.mimic.flux.reconnect.maxBackoffMs)
+		} finally {
+			for (const name of keys) {
+				const value = original.get(name)
+				if (value === undefined) delete process.env[name]
+				else process.env[name] = value
+			}
+		}
 	})
 
 	it('reads turn-taking overrides from the environment', () => {

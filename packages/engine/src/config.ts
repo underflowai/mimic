@@ -54,15 +54,15 @@ export const config = {
 			},
 			/** End-of-turn confidence that commits a turn. */
 			get eotThreshold() {
-				return getNumberEnv('MIMIC_FLUX_EOT_THRESHOLD', 0.5, { min: 0, max: 1 })
+				return getNumberEnv('MIMIC_FLUX_EOT_THRESHOLD', 0.7, { min: 0.5, max: 0.9 })
 			},
 			/** Lower confidence at which Flux emits EagerEndOfTurn so we can speculate. */
 			get eagerEotThreshold() {
-				return getNumberEnv('MIMIC_FLUX_EAGER_EOT_THRESHOLD', 0.3, { min: 0, max: 1 })
+				return getNumberEnv('MIMIC_FLUX_EAGER_EOT_THRESHOLD', 0.3, { min: 0.3, max: 0.9 })
 			},
 			/** Silence after which Flux forces EndOfTurn regardless of confidence. */
 			get eotTimeoutMs() {
-				return getNumberEnv('MIMIC_FLUX_EOT_TIMEOUT_MS', 2000, { min: 500, max: 10_000, integer: true })
+				return getNumberEnv('MIMIC_FLUX_EOT_TIMEOUT_MS', 3000, { min: 500, max: 60_000, integer: true })
 			},
 			/** Caller audio is batched into chunks of about this length before sending. */
 			audioChunkTargetMs: 80,

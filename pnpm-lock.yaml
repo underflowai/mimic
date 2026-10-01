@@ -11,7 +11,7 @@ importers:
   packages/engine:
     dependencies:
       '@sentry/node':
-        specifier: '>=9.0.0'
+        specifier: '>=10.25.0'
         version: 10.53.1
       handlebars:
         specifier: ^4.7.8

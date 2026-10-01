@@ -22,5 +22,3 @@ Mark {"promote": false} when ANY of these are true:
 - The draft assumes a frame (bad news / specific value / wrong product) that the full transcript contradicts
 
 If unsure, prefer {"promote": false} — playing a mismatched response is worse than waiting for a fresh one.
-
-Return JSON only: {"promote": true|false}.

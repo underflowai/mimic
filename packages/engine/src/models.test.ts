@@ -33,5 +33,7 @@ describe('supportsTemperature', () => {
 		assert.equal(supportsTemperature(models.background.model, models.background.reasoningEffort), true)
 		assert.equal(supportsTemperature(models.webSearch.model), true)
 		assert.equal(supportsTemperature(models.toolWatcher.model, models.toolWatcher.reasoningEffort), false)
+		assert.equal(supportsTemperature(models.goalCompiler.model, models.goalCompiler.reasoningEffort), false)
+		assert.equal(supportsTemperature(models.resultExtractor.model, models.resultExtractor.reasoningEffort), false)
 	})
 })

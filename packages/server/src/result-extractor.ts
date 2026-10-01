@@ -8,6 +8,8 @@
 
 import OpenAI from 'openai'
 
+import { models } from '@mimic/engine'
+
 export interface TranscriptEntry {
 	role: 'user' | 'assistant'
 	content: string
@@ -172,10 +174,10 @@ export async function extractCallResult(
 
 	const typedResults = normalizeToTypedSchema(input.results)
 
+	const { model, reasoningEffort } = models.resultExtractor
 	const response = await client.chat.completions.create({
-		// Post-call, not latency-sensitive: current-generation model at low effort for extraction quality.
-		model: 'gpt-6.1-sol',
-		reasoning_effort: 'low',
+		model,
+		reasoning_effort: reasoningEffort,
 		messages: [
 			{ role: 'system', content: SYSTEM_PROMPT },
 			{ role: 'user', content: userPrompt },

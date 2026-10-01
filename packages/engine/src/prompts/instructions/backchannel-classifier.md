@@ -14,4 +14,3 @@ Otherwise match the caller's tone/intent to ONE token:
 - Instruction, action, directive → okay
 
 Do NOT default to any single token. Vary naturally.
-JSON: {"token":"yeah"} or {"token":null}

@@ -1,5 +1,6 @@
 /**
- * Model registry — the single place a model name appears.
+ * Model registry — the single place a model name appears, for the engine and
+ * for the server (goal compiler, result extractor).
  *
  * Call sites import from here so a model swap is one edit. The director model
  * is a default only; `CallOrchestratorConfig.directorModel` overrides it per
@@ -39,6 +40,13 @@ export const models = {
 	 * same accuracy, ~1/50th the price. `low` kept for the WRITE-tool verification rules.
 	 */
 	toolWatcher: { model: 'gpt-6-luna', reasoningEffort: 'low', maxOutputTokens: 512 },
+	/**
+	 * Compiles a developer goal into the agent's prompt (server). Runs once per agent
+	 * config, so quality over speed. Reasoning tokens count against the output ceiling.
+	 */
+	goalCompiler: { model: 'gpt-6.1-sol', reasoningEffort: 'high', maxOutputTokens: 32_000 },
+	/** Post-call result extraction (server). Not latency-sensitive. */
+	resultExtractor: { model: 'gpt-6.1-sol', reasoningEffort: 'low' },
 } as const satisfies Record<string, ModelSpec | Record<string, ModelSpec>>
 
 /**

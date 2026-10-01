@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import { zodResponseFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 
 import {
@@ -6,6 +7,7 @@ import {
 	auroraPersona,
 	formatUserDateTime,
 	loadPrompt,
+	models,
 	renderPromptTemplate,
 	type CallOrchestratorConfig,
 	type TurnControlBlockContext,
@@ -65,6 +67,7 @@ const compiledGoalSchema = z.object({
 	turnControlBlock: z.string().min(1),
 	agentName: z.string().min(1),
 })
+const compiledGoalFormat = zodResponseFormat(compiledGoalSchema, 'compiled_goal')
 
 let cachedCompilerPrompt: string | null = null
 
@@ -219,13 +222,14 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 	const compilerPrompt = await getCompilerPrompt()
 	const openai = new OpenAI()
 
+	const { model, reasoningEffort, maxOutputTokens } = models.goalCompiler
+
+	// Reasoning models reject `temperature`, so none is sent.
 	const result = await openai.chat.completions.create({
-		// Runs once per new agent config; quality over speed. Reasoning models reject `temperature`.
-		model: 'gpt-6.1-sol',
-		reasoning_effort: 'high',
-		// Reasoning tokens count against this cap; a ceiling against a runaway compile, not a target.
-		max_completion_tokens: 32_000,
-		response_format: { type: 'json_object' },
+		model,
+		reasoning_effort: reasoningEffort,
+		max_completion_tokens: maxOutputTokens,
+		response_format: compiledGoalFormat,
 		messages: [
 			{ role: 'system', content: compilerPrompt },
 			{ role: 'user', content: buildCompilerInput(input) },
@@ -234,10 +238,12 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 
 	const choice = result.choices[0]
 	if (choice?.finish_reason === 'length') {
-		throw new Error('goal compiler hit max_completion_tokens before finishing the JSON')
+		throw new Error('goal compiler hit max_completion_tokens before finishing the reply')
 	}
-	const raw = choice?.message?.content?.trim() ?? ''
-	const parsed = compiledGoalSchema.parse(JSON.parse(raw))
+	if (choice?.message.refusal) {
+		throw new Error(`goal compiler refused: ${choice.message.refusal}`)
+	}
+	const parsed = compiledGoalSchema.parse(JSON.parse(choice?.message.content ?? ''))
 
 	const agentName = parsed.agentName || defaultAgentName(input.voice)
 	const systemPrompt = await renderSystemPromptFromTemplate(agentName, parsed)

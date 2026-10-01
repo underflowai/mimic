@@ -6,6 +6,7 @@
  */
 
 import type OpenAI from 'openai'
+import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 
 import { safeParseJsonWithSchema } from '#engine/llm-parse.js'
@@ -20,22 +21,15 @@ const log = createLogger('mimic:web-search')
 const initialMaxOutputTokens = 1_000
 const retryMaxOutputTokens = 2_000
 
-const searchResponseSchema = {
-	type: 'object',
-	additionalProperties: false,
-	properties: {
-		enrichment: {
-			type: ['string', 'null'],
-			description:
-				'Concise answer for the voice agent, max 200 words. Specific numbers, real data, concrete details. Null only if search returned nothing useful.',
-		},
-	},
-	required: ['enrichment'],
-} as const
-
 const searchOutputSchema = z.object({
-	enrichment: z.string().nullable(),
+	enrichment: z
+		.string()
+		.nullable()
+		.describe(
+			'Concise answer for the voice agent, max 200 words. Specific numbers, real data, concrete details. Null only if search returned nothing useful.',
+		),
 })
+const searchOutputFormat = zodTextFormat(searchOutputSchema, 'provide_enrichment')
 
 interface SearchResponseLike {
 	usage?: { output_tokens?: number | null } | null
@@ -95,14 +89,7 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 					instructions: systemPrompt,
 					input: userMessage,
 					tools: [{ type: 'web_search' }],
-					text: {
-						format: {
-							type: 'json_schema',
-							name: 'provide_enrichment',
-							schema: searchResponseSchema,
-							strict: true,
-						},
-					},
+					text: { format: searchOutputFormat },
 				},
 				signal ? { signal } : undefined,
 			)

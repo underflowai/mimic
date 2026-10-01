@@ -158,6 +158,12 @@ mimic.call({
   aiDisclosure: true,           // Disclose AI status + recording
   ambience: true,               // Office background noise
 
+  // Persona mode — use your own system prompt, skip goal compilation
+  persona: { systemPrompt: '...', agentName: 'Ripple' },
+
+  // Completion webhook (call.completed)
+  webhook: 'https://example.com/mimic/completed',
+
   // Timeouts
   timeoutMs: 300_000,           // Max wait (default 5 min)
   toolTimeoutMs: 30_000,        // Per-tool timeout (default 30s)

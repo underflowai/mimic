@@ -127,6 +127,33 @@ describe('Mimic.call', () => {
 		const call = mimic.call({ to: '+15551234567', goal: 'Book', tools: { checkCalendar } })
 		assert.ok(call)
 	})
+
+	it('sends persona and webhook on the create request', async () => {
+		let createBody: Record<string, unknown> | null = null
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = String(input)
+			if (url.endsWith('/api/v1/calls') && init?.method === 'POST') {
+				createBody = JSON.parse(String(init.body)) as Record<string, unknown>
+				return jsonResponse({ id: 'call_1', status: 'pending' }, 201)
+			}
+			if (url.includes('/api/v1/calls/call_1')) return jsonResponse(completedCall)
+			return jsonResponse({ error: 'not found' }, 404)
+		}
+		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchImpl, WebSocket: null })
+		const call = mimic.call({
+			to: '+15551234567',
+			goal: 'Check in',
+			persona: { systemPrompt: 'You are Ripple.', agentName: 'Ripple' },
+			webhook: 'https://example.com/hook',
+			pollIntervalMs: 1,
+		})
+		await call.result
+
+		const sent = createBody as Record<string, unknown> | null
+		assert.ok(sent)
+		assert.deepEqual(sent.persona, { systemPrompt: 'You are Ripple.', agentName: 'Ripple' })
+		assert.equal(sent.webhook, 'https://example.com/hook')
+	})
 })
 
 // ---------------------------------------------------------------------------

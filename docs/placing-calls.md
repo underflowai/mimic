@@ -236,6 +236,40 @@ const result = await call.result
 Cancellation propagates to the server — the call is marked as cancelled,
 queued jobs are removed, and any in-progress call is terminated.
 
+## Persona mode
+
+By default Mimic compiles your `goal` and `context` into a voice-agent
+prompt. If your caller already has an identity of its own — a personal
+agent phoning its user, a branded assistant with a maintained voice — pass
+the system prompt directly and skip compilation:
+
+```typescript
+const call = mimic.call({
+  to: '+15551234567',
+  goal: 'Check in on how the morning went and note anything that needs follow-up',
+  persona: {
+    systemPrompt: ripplePrompt, // your full agent prompt, used verbatim
+    agentName: 'Ripple',
+  },
+})
+```
+
+`goal` is still required: the result extractor uses it as its rubric for
+`goalAchieved` and `extract`. `context`, `data`, and `recipient` are stored
+but not woven into the prompt in this mode, so anything the agent must know
+belongs in `systemPrompt` (max 48,000 characters). Calls with identical
+options reuse the same agent, so persona changes take effect immediately.
+
+## Completion webhook
+
+```typescript
+mimic.call({
+  to: '+15551234567',
+  goal: '...',
+  webhook: 'https://example.com/mimic/completed', // receives a call.completed event
+})
+```
+
 ## Options reference
 
 ```typescript
@@ -263,6 +297,12 @@ mimic.call({
 
   // Audio
   ambience: true,               // Office background noise
+
+  // Persona mode (skip goal compilation; see above)
+  persona: { systemPrompt: '...', agentName: 'Ripple' },
+
+  // Completion webhook
+  webhook: 'https://example.com/mimic/completed',
 
   // Timeouts
   timeoutMs: 300_000,           // Max wait time (default 5 min)

@@ -197,6 +197,8 @@ export class MimicCall<T extends Record<string, unknown> = Record<string, unknow
 				tools: toolSchemas,
 				extract: this.options.extract,
 				ambience: this.options.ambience,
+				persona: this.options.persona,
+				webhook: this.options.webhook,
 				idempotencyKey: this.options.idempotencyKey,
 			})
 

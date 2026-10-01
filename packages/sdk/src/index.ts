@@ -135,6 +135,7 @@ export type {
 	ErrorEvent,
 	MimicOptions,
 	MimicTool,
+	Persona,
 	SpeechEvent,
 	ToolCallEvent,
 	ToolErrorEvent,

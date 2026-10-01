@@ -1,7 +1,7 @@
 import { ApiError } from './errors.js'
 import { ZodObject, type ZodType } from 'zod'
 
-import type { ApiCall, CreateCallResponse, MimicOptions, ToolSchema, Voice } from './types.js'
+import type { ApiCall, CreateCallResponse, MimicOptions, Persona, ToolSchema, Voice } from './types.js'
 
 function serializeExtractSchema(schema?: ZodObject<Record<string, ZodType>>): Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> | undefined {
 	if (!schema || !(schema instanceof ZodObject)) return undefined
@@ -83,6 +83,8 @@ export class MimicClient {
 		tools?: ToolSchema[]
 		extract?: ZodObject<Record<string, ZodType>>
 		ambience?: boolean
+		persona?: Persona
+		webhook?: string
 		idempotencyKey?: string
 	}): Promise<{ call: CreateCallResponse }> {
 		const call = await this.request<CreateCallResponse>('/api/v1/calls', {
@@ -98,6 +100,8 @@ export class MimicClient {
 				tools: params.tools ?? [],
 				extract: serializeExtractSchema(params.extract),
 				ambience: params.ambience,
+				persona: params.persona,
+				webhook: params.webhook,
 				idempotencyKey: params.idempotencyKey,
 			}),
 		})

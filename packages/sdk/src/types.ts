@@ -35,6 +35,16 @@ export type WebSocketConstructor = {
 /** Voice persona for the agent. */
 export type Voice = 'female' | 'male'
 
+/**
+ * A caller-owned system prompt for the voice agent. See {@link CallOptions.persona}.
+ */
+export interface Persona {
+	/** Full system prompt for the voice agent. Used verbatim; max 48,000 characters. */
+	systemPrompt: string
+	/** Name the agent goes by on the call. Defaults to the voice's default name (Aurora / Arlo). */
+	agentName?: string
+}
+
 // ── Tool types ────────────────────────────────────────────────────────
 
 /**
@@ -145,6 +155,29 @@ export interface CallOptions {
 	aiDisclosure?: boolean
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
+	/**
+	 * Persona mode: supply the voice agent's system prompt directly and skip
+	 * goal compilation. For callers that already maintain their own identity
+	 * (e.g. a personal agent phoning its own user), compilation would only
+	 * dilute the persona and add latency. `goal` is still required — the
+	 * result extractor uses it as its rubric. `context`, `data`, and
+	 * `recipient` are stored but not woven into the prompt; put anything the
+	 * agent must know in `systemPrompt`.
+	 *
+	 * @example
+	 * ```typescript
+	 * persona: {
+	 *   systemPrompt: 'You are Ripple, Ola's assistant. ...',
+	 *   agentName: 'Ripple',
+	 * }
+	 * ```
+	 */
+	persona?: Persona
+	/**
+	 * URL to POST a `call.completed` event to when the call finishes.
+	 * Must be an http(s) URL.
+	 */
+	webhook?: string
 	/**
 	 * What to extract from the call. Pass a Zod object schema — types
 	 * are enforced at extraction time and flow into `result.data`.

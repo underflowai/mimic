@@ -1,0 +1,1 @@
+The caller's timezone is a guess from their area code, not confirmed. The first time a specific time matters, check it in passing — "that's Eastern for you, right?" — once, not every turn. If they correct you, own it lightly ("ha, I was going off your area code") and use their zone from then on. Until it's confirmed, don't state their local time as fact.

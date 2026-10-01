@@ -31,6 +31,8 @@ export interface ControlBlockPrompts {
 	interrupt: PromptTemplate
 	/** Director note used when tool intent classification throws. */
 	toolClassificationFailed: string
+	/** Appended while the caller's timezone is an area-code guess the caller hasn't confirmed. */
+	timezoneGuess: string
 }
 
 function text(name: string) {
@@ -56,6 +58,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 		template('end-call'),
 		template('interrupt'),
 		text('tool-classification-failed'),
+		text('timezone-guess'),
 	]).then(
 		([
 			turnPriorities,
@@ -68,6 +71,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			endCall,
 			interrupt,
 			toolClassificationFailed,
+			timezoneGuess,
 		]) => ({
 			turnPriorities,
 			spokenCadence,
@@ -79,12 +83,25 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			endCall: endCall({ endCallTag }),
 			interrupt,
 			toolClassificationFailed,
+			timezoneGuess,
 		}),
 	)
 	return cachedPrompts
 }
 
-export function formatUserDateTime(timezone?: string) {
+export interface FormatUserDateTimeOptions {
+	/**
+	 * The zone was guessed (from the caller's area code) rather than supplied.
+	 * The rendered line says so, and the control block tells the agent to
+	 * confirm it before leaning on it.
+	 */
+	inferred?: boolean
+}
+
+/** Appended to the date line when the zone is a guess. Prompts key off this wording. */
+export const inferredTimezoneLabel = '(timezone guessed from the caller’s area code — unconfirmed)'
+
+export function formatUserDateTime(timezone?: string, options?: FormatUserDateTimeOptions) {
 	let tz = timezone?.trim() || 'UTC'
 	let callerTimezoneKnown = Boolean(timezone?.trim())
 	try {
@@ -107,7 +124,12 @@ export function formatUserDateTime(timezone?: string) {
 		new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' })
 			.formatToParts(now)
 			.find((p) => p.type === 'timeZoneName')?.value ?? tz
-	return `${date}, ${time} ${tzAbbr}${callerTimezoneKnown ? '' : ' (caller timezone unavailable; UTC reference)'}`
+	const qualifier = !callerTimezoneKnown
+		? ' (caller timezone unavailable; UTC reference)'
+		: options?.inferred
+			? ` ${inferredTimezoneLabel}`
+			: ''
+	return `${date}, ${time} ${tzAbbr}${qualifier}`
 }
 
 function normalizeWord(word: string) {

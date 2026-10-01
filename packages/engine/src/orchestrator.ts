@@ -68,6 +68,12 @@ export interface CallOrchestratorConfig {
 		email?: string
 	}
 	userTimezone?: string
+	/**
+	 * `userTimezone` was guessed (e.g. from the caller's area code) rather than
+	 * supplied. The date line says so and the director is told to confirm the
+	 * zone in passing the first time a specific time matters.
+	 */
+	userTimezoneInferred?: boolean
 	keyterms?: string[]
 	/**
 	 * The transport through which the outbound audio pipeline delivers
@@ -186,6 +192,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 				lastName: callConfig.userLastName,
 			},
 		getUserTimezone: () => callConfig.userTimezone,
+		getUserTimezoneInferred: () => callConfig.userTimezoneInferred === true,
 		buildTurnControlBlock: (ctx) => callConfig.buildTurnControlBlock(ctx),
 		textQualityBlock: callConfig.textQualityBlock,
 		endCallEnabled,
@@ -233,7 +240,8 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 			return assembleControlBlock(transcript, outcome, opts)
 		},
 		webSearcher,
-		getCallerDateTime: () => formatUserDateTime(callConfig.userTimezone),
+		getCallerDateTime: () =>
+			formatUserDateTime(callConfig.userTimezone, { inferred: callConfig.userTimezoneInferred === true }),
 		getDirectorTurns: () => director.listTurns(),
 		tools: callConfig.tools,
 		executeTool: callConfig.executeTool,
@@ -348,12 +356,21 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 
 	function configure(
 		updates: Partial<
-			Pick<CallOrchestratorConfig, 'userFirstName' | 'userLastName' | 'userTimezone' | 'keyterms' | 'onBackchannel'>
+			Pick<
+				CallOrchestratorConfig,
+				'userFirstName' | 'userLastName' | 'userTimezone' | 'userTimezoneInferred' | 'keyterms' | 'onBackchannel'
+			>
 		>,
 	) {
 		if (updates.userFirstName !== undefined) callConfig.userFirstName = updates.userFirstName
 		if (updates.userLastName !== undefined) callConfig.userLastName = updates.userLastName
-		if (updates.userTimezone !== undefined) callConfig.userTimezone = updates.userTimezone
+		if (updates.userTimezone !== undefined) {
+			callConfig.userTimezone = updates.userTimezone
+			// A zone set explicitly after the call started is a confirmed one unless told otherwise.
+			callConfig.userTimezoneInferred = updates.userTimezoneInferred ?? false
+		} else if (updates.userTimezoneInferred !== undefined) {
+			callConfig.userTimezoneInferred = updates.userTimezoneInferred
+		}
 		if (updates.keyterms !== undefined) callConfig.keyterms = updates.keyterms
 		if (updates.onBackchannel !== undefined) {
 			callConfig.onBackchannel = updates.onBackchannel

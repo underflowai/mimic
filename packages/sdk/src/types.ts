@@ -71,7 +71,11 @@ export interface MimicTool {
 	/** @internal */
 	__mimicTool: true
 	description: string
-	/** Unspecified tools are treated as writes; reads must be declared explicitly. */
+	/**
+	 * `'read'` (default) runs as soon as the request is clear; `'write'` waits for
+	 * the caller's explicit go-ahead. MCP tools follow their `readOnlyHint`
+	 * annotation instead: read only when the server marks them read-only.
+	 */
 	kind?: 'read' | 'write'
 	/** @internal Preserve the original schema of an MCP-discovered tool. */
 	_mcpMeta?: { toolName: string; inputSchema: Record<string, unknown> }
@@ -126,7 +130,12 @@ export interface CallOptions {
 	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
 	voice?: Voice
-	/** Caller timezone as an IANA name, e.g. America/New_York. Used to resolve relative dates and times. */
+	/**
+	 * Caller timezone as an IANA name, e.g. America/New_York. Used to resolve
+	 * relative dates and times. When omitted, the server guesses from the
+	 * phone number's area code and the agent confirms the guess with the caller
+	 * before relying on it.
+	 */
 	userTimezone?: string
 	/**
 	 * Background knowledge the agent can reference — company info, policies,

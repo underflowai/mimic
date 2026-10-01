@@ -4,7 +4,7 @@ import { describe, it } from 'node:test'
 import { shouldRunLiveMimicTests } from '#test/support/live-test-gate.js'
 import { canFastPathPromote, classifyEagerPromotion } from './eager-promotion-classifier.js'
 
-describe('canFastPathPromote — conservative equivalence', () => {
+describe('canFastPathPromote — same words, or same words plus pure hesitations', () => {
 	const cases: Array<{ description: string; spec: string; final: string; expected: boolean }> = [
 		// Tier 1: normalized exact match
 		{ description: 'identical transcripts', spec: 'I need help', final: 'I need help', expected: true },
@@ -16,21 +16,35 @@ describe('canFastPathPromote — conservative equivalence', () => {
 		},
 		{ description: 'case difference', spec: 'Tell me more', final: 'tell me more', expected: true },
 
-		// Any changed words require semantic validation, including likely hesitations.
+		// Tier 2: non-lexical hesitations are the one thing ASR adds that cannot carry intent.
 		{
 			description: 'filler inserted mid-sentence',
 			spec: 'We mostly do commercial auto',
 			final: 'We mostly do, uh, commercial auto',
-			expected: false,
+			expected: true,
 		},
 		{
-			description: 'leading filler added',
+			description: 'hesitations added at both ends',
+			spec: 'We had three claims last year',
+			final: 'Um, we had three claims last year, hmm.',
+			expected: true,
+		},
+		{
+			description: 'hesitation dropped from the final',
+			spec: 'I, uh, need to reschedule',
+			final: 'I need to reschedule',
+			expected: true,
+		},
+
+		// Words that are sometimes filler and sometimes content go to the classifier.
+		{
+			description: 'leading "yeah" may answer a question',
 			spec: 'I need help with my account',
 			final: 'Yeah, uh, I need help with my account',
 			expected: false,
 		},
 		{
-			description: 'multiple fillers scattered',
+			description: '"so" and "like" are not stripped',
 			spec: 'We had three claims last year',
 			final: 'So, um, we had like three claims last year',
 			expected: false,
@@ -113,8 +127,8 @@ describe('canFastPathPromote — conservative equivalence', () => {
 		},
 		{ description: 'non-Latin changes are not discarded', spec: '北京', final: '上海', expected: false },
 		{ description: 'accent changes remain visible', spec: 'Call José', final: 'Call Jose', expected: false },
-		{ description: 'hesitation could be a name', spec: 'Call', final: 'Call UM', expected: false },
 		{ description: 'direction is not a filler', spec: 'Turn', final: 'Turn right', expected: false },
+		{ description: 'hesitation-only final says nothing new', spec: 'Call', final: 'Call, um', expected: true },
 		{
 			description: 'filler phrase is not removed from a name',
 			spec: 'Call Simona',
@@ -218,10 +232,10 @@ describe('classifyEagerPromotion — real API', () => {
 
 	const twoWayCases = [
 		{
-			description: 'new location without draft requires regeneration',
+			description: 'same thought without draft',
 			specTranscript: 'I work at a car dealership',
 			finalTranscript: 'I work at a car dealership in Denver',
-			expected: false,
+			expected: true,
 		},
 		{
 			description: 'new question without draft',

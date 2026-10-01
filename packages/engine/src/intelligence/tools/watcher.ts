@@ -285,6 +285,33 @@ function removeUnsetOptionalFields(value: unknown, schema: unknown): unknown {
 	)
 }
 
+/** Case, punctuation, curly quotes, and whitespace are presentation; the words are the evidence. */
+function normalizeQuote(text: string): string {
+	return text
+		.normalize('NFC')
+		.toLowerCase()
+		.replace(/[’‘]/g, "'")
+		.replace(/[^\p{L}\p{N}' ]+/gu, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+}
+
+/**
+ * The quote the model offers as authorization has to be something the caller
+ * actually said: a phrase or sentence found inside one of their turns, compared
+ * word-for-word after normalizing presentation. Requiring an exact whole-turn
+ * match punished the model for dropping a period; requiring nothing lets it
+ * invent consent. The quote still can't prove intent — the model judges that.
+ */
+export function isGroundedCallerQuote(quote: string | null | undefined, callerStatements: string[]): boolean {
+	const needle = quote ? normalizeQuote(quote) : ''
+	if (!needle) return false
+	return callerStatements.some((statement) => {
+		const haystack = normalizeQuote(statement)
+		return haystack === needle || ` ${haystack} `.includes(` ${needle} `)
+	})
+}
+
 function normalizeDecision(parsed: z.infer<typeof watcherDecisionSchema>, input: ToolWatcherInput): WatcherDecision {
 	if (parsed.decision === 'none') {
 		return {
@@ -310,12 +337,11 @@ function normalizeDecision(parsed: z.infer<typeof watcherDecisionSchema>, input:
 		if (!(key in args) || (typeof args[key] === 'string' && !(args[key] as string).trim())) missing.add(key)
 	}
 	if (tool.kind === 'write') {
-		const quote = parsed.writeAuthorizationQuote?.trim()
 		const callerStatements = [
 			input.transcript,
 			...input.recentTurns.filter((turn) => turn.role === 'user').map((turn) => turn.content),
 		]
-		if (!quote || !callerStatements.some((statement) => statement.trim() === quote)) missing.add('authorization')
+		if (!isGroundedCallerQuote(parsed.writeAuthorizationQuote, callerStatements)) missing.add('authorization')
 	}
 	// Invocation readiness is based on missing.length, so not_ready must retain a
 	// blocker even if the model forgot to identify it.
@@ -372,28 +398,38 @@ function buildResponseSchema(tools: ToolDefinition[]) {
 	}
 }
 
+/**
+ * How much conversation the watcher sees. Authorization and argument values
+ * come from the last few exchanges; sending the whole call would grow every
+ * watcher request with call length for no decision-quality gain.
+ */
+export const watcherTurnWindow = 20
+
 export async function watchForToolAction(client: OpenAI, input: ToolWatcherInput): Promise<WatcherDecision> {
 	if (input.signal?.aborted) return FALLBACK
-	try {
-		input = {
-			...input,
-			tools: input.tools.map((tool) => {
-				try {
-					return { ...tool, parameters: resolveLocalSchemaReferences(tool.parameters) }
-				} catch (err) {
-					throw new Error(`Tool ${tool.name}: ${err instanceof Error ? err.message : 'unsupported parameter schema'}`)
-				}
-			}),
+
+	// A tool whose schema the watcher can't represent is dropped for this turn;
+	// the others still run. One bad definition must not disable every tool.
+	const unusable: string[] = []
+	const usableTools: ToolDefinition[] = []
+	for (const tool of input.tools) {
+		try {
+			usableTools.push({ ...tool, parameters: resolveLocalSchemaReferences(tool.parameters) })
+		} catch (err) {
+			const reason = err instanceof Error ? err.message : 'unsupported parameter schema'
+			log.warn({ tool: tool.name, reason }, 'tool watcher cannot use configured schema; skipping tool')
+			unusable.push(`${tool.name}: ${reason}`)
 		}
-	} catch (err) {
-		const reason = err instanceof Error ? err.message : 'unsupported parameter schema'
-		log.warn({ reason }, 'tool watcher cannot use configured schema')
+	}
+	if (usableTools.length === 0) {
 		return {
 			...FALLBACK,
-			reasoning: reason,
+			reasoning: unusable.join('; '),
 			directorNote: 'A tool cannot run because its parameter schema needs correction.',
 		}
 	}
+	input = { ...input, tools: usableTools, recentTurns: input.recentTurns.slice(-watcherTurnWindow) }
+
 	const systemPrompt = await getSystemPrompt()
 	const conversation = formatTurnsForPrompt(input.recentTurns)
 

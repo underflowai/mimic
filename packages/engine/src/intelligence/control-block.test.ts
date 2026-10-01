@@ -6,6 +6,7 @@ import {
 	appendInterruptContext,
 	appendToolLifecycleGuidance,
 	formatUserDateTime,
+	inferredTimezoneLabel,
 	loadControlBlockPrompts,
 	type InterruptContext,
 } from './control-block-utils.js'
@@ -28,6 +29,19 @@ describe('formatUserDateTime', () => {
 		}
 		assert.equal(formatUserDateTime(' America/New_York '), formatUserDateTime('America/New_York'))
 	})
+
+	it('marks an area-code guess as unconfirmed, but never a UTC fallback', (t) => {
+		t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-02T05:30:00Z') })
+		assert.equal(
+			formatUserDateTime('America/New_York', { inferred: true }),
+			`Friday, January 2, 2026, 12:30 AM EST ${inferredTimezoneLabel}`,
+		)
+		assert.equal(formatUserDateTime('America/New_York', { inferred: false }), formatUserDateTime('America/New_York'))
+		assert.equal(
+			formatUserDateTime('Mars/Olympus', { inferred: true }),
+			'Friday, January 2, 2026, 5:30 AM UTC (caller timezone unavailable; UTC reference)',
+		)
+	})
 })
 
 // ---------------------------------------------------------------------------
@@ -47,6 +61,7 @@ describe('loadControlBlockPrompts', () => {
 			prompts.toolRunning,
 			prompts.endCall,
 			prompts.toolClassificationFailed,
+			prompts.timezoneGuess,
 		]) {
 			assert.ok(value.length > 0)
 			assert.equal(value, value.trim())

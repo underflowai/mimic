@@ -4,7 +4,7 @@ import { describe, it, mock } from 'node:test'
 import type OpenAI from 'openai'
 
 import type { ToolDefinition } from './runner.js'
-import { watchForToolAction, type ToolWatcherInput } from './watcher.js'
+import { isGroundedCallerQuote, watchForToolAction, watcherTurnWindow, type ToolWatcherInput } from './watcher.js'
 
 const lookup: ToolDefinition = {
 	name: 'lookup',
@@ -99,6 +99,43 @@ describe('tool watcher', () => {
 		const result = await watchForToolAction(blocked.client, { ...input, transcript, tools: [book] })
 		assert.equal(result.decision, 'not_ready')
 		assert.deepEqual(result.missing, ['phone_confirmation'])
+	})
+
+	it('grounds the authorization quote on words, not on reproducing the whole turn exactly', async () => {
+		const callerTurn = 'Um, yeah — go ahead and book it. Oh, and my email is sam@example.com.'
+		for (const quote of [
+			'go ahead and book it',
+			'Yeah, go ahead and book it.',
+			'GO AHEAD AND BOOK IT',
+			'yeah go ahead and book it oh and my email is sam@example.com',
+		]) {
+			const { client } = fixture({ tool: 'book', writeAuthorizationQuote: quote })
+			const result = await watchForToolAction(client, {
+				...input,
+				transcript: 'Two people.',
+				tools: [book],
+				recentTurns: [{ role: 'user', content: callerTurn }],
+			})
+			assert.equal(result.decision, 'execute', quote)
+		}
+		for (const quote of ['go ahead and cancel it', 'book it for Tuesday', '']) {
+			const { client } = fixture({ tool: 'book', writeAuthorizationQuote: quote })
+			const result = await watchForToolAction(client, {
+				...input,
+				transcript: 'Two people.',
+				tools: [book],
+				recentTurns: [{ role: 'user', content: callerTurn }],
+			})
+			assert.equal(result.decision, 'not_ready', quote)
+			assert.deepEqual(result.missing, ['authorization'])
+		}
+	})
+
+	it('matches whole words only, so a fragment inside another word is not a quote', () => {
+		assert.equal(isGroundedCallerQuote('book it', ['Please do not rebook it']), false)
+		assert.equal(isGroundedCallerQuote('book it', ['Please book it now']), true)
+		assert.equal(isGroundedCallerQuote("that's fine", ['That’s fine, do it.']), true)
+		assert.equal(isGroundedCallerQuote(null, ['anything']), false)
 	})
 
 	it('preserves shared argument schema variants and filters arguments to the selected tool', async () => {
@@ -281,6 +318,22 @@ describe('tool watcher', () => {
 		}
 	})
 
+	it('drops only the tool with an unusable schema and still runs the others', async () => {
+		const broken: ToolDefinition = {
+			name: 'broken',
+			description: 'Broken',
+			kind: 'read',
+			parameters: { type: 'object', properties: { child: { $ref: '#' } } },
+		}
+		const { create, client } = fixture({})
+		const result = await watchForToolAction(client, { ...input, tools: [broken, lookup] })
+		assert.equal(result.decision, 'execute')
+		assert.equal(result.tool, 'lookup')
+		const request = create.mock.calls[0].arguments[0]
+		assert.match(request.input, /- lookup \[READ\]/)
+		assert.doesNotMatch(request.input, /- broken/)
+	})
+
 	it('rejects unknown tools and normalizes none so it cannot carry an action', async () => {
 		for (const result of [{ tool: 'invented' }, { decision: 'none' }]) {
 			const { client } = fixture(result)
@@ -310,19 +363,22 @@ describe('tool watcher', () => {
 		assert.equal((await watchForToolAction(contradictory.client, { ...input, ...pending })).cancelExisting, false)
 	})
 
-	it('passes supplied time and all available turns including earlier authorization', async () => {
+	it('passes supplied time and the recent turn window, including an earlier authorization inside it', async () => {
 		const callerDateTime = '2030-02-01 12:00 Europe/London'
 		const { create, client } = fixture({})
 		await watchForToolAction(client, {
 			...input,
 			callerDateTime,
 			recentTurns: [
+				{ role: 'user', content: 'ANCIENT_REQUEST' },
+				...Array.from({ length: watcherTurnWindow - 1 }, () => ({ role: 'agent' as const, content: 'Filler turn.' })),
 				{ role: 'user', content: 'EARLIER_REQUEST' },
 				...Array.from({ length: 12 }, () => ({ role: 'agent' as const, content: 'A later turn.' })),
 			],
 		})
 		const request = create.mock.calls[0].arguments[0]
 		assert.match(request.input, /EARLIER_REQUEST/)
+		assert.doesNotMatch(request.input, /ANCIENT_REQUEST/)
 		assert.ok(request.input.includes(callerDateTime))
 	})
 })

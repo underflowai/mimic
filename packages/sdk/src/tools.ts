@@ -1,7 +1,16 @@
-import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 import type { ZodError, ZodType } from 'zod'
+import { toJSONSchema as zod4ToJsonSchema, type $ZodType } from 'zod/v4/core'
+import { zodToJsonSchema } from 'zod-to-json-schema'
 
 import type { MimicTool, ToolInput, ToolSchema } from './types.js'
+
+/**
+ * A tool with no declared `kind` is a read: it runs as soon as the caller's
+ * request and its arguments are clear, which is how every tool behaved before
+ * `kind` existed. Declare `kind: 'write'` for anything with side effects so
+ * the agent waits for the caller's explicit go-ahead before running it.
+ */
+export const defaultToolKind = 'read'
 
 // ── tool() helper ─────────────────────────────────────────────────────
 
@@ -29,7 +38,11 @@ import type { MimicTool, ToolInput, ToolSchema } from './types.js'
  */
 export function tool<T extends ZodType>(opts: {
 	description: string
-	/** Defaults to write. Declare read only for tools that retrieve information without side effects. */
+	/**
+	 * `'read'` (default) runs as soon as the request is clear. `'write'` is for
+	 * anything with side effects — booking, sending, updating — and waits for the
+	 * caller's explicit go-ahead.
+	 */
 	kind?: 'read' | 'write'
 	parameters: T
 	run: (input: T extends ZodType<infer U> ? U : never) => Promise<string> | string
@@ -37,13 +50,28 @@ export function tool<T extends ZodType>(opts: {
 	return {
 		__mimicTool: true,
 		description: opts.description,
-		kind: opts.kind ?? 'write',
+		kind: opts.kind ?? defaultToolKind,
 		schema: opts.parameters,
 		run: opts.run as (input: unknown) => Promise<string> | string,
 	}
 }
 
 // ── Schema → wire format ──────────────────────────────────────────────
+
+/**
+ * JSON Schema for a tool's parameters, preserving types, enums, nesting, and
+ * required/optional. Accepts both Zod 3 schemas (the `zod` import) and Zod 4
+ * schemas (`zod/v4`), which ship in the same package.
+ */
+export function toolParameterSchema(schema: ZodType): Record<string, unknown> {
+	const json: Record<string, unknown> =
+		'_zod' in schema
+			? zod4ToJsonSchema(schema as unknown as $ZodType, { io: 'input', unrepresentable: 'any' })
+			: zodToJsonSchema(schema, { $refStrategy: 'none', target: 'jsonSchema7', pipeStrategy: 'input' })
+	// The draft URL is noise on the wire; the server reads the shape, not the dialect.
+	const { $schema: _dialect, ...parameters } = json
+	return parameters
+}
 
 /**
  * Build tool schemas from a tools record for the API wire format.
@@ -55,8 +83,8 @@ export function tool<T extends ZodType>(opts: {
  */
 export function introspectTools(tools: Record<string, ToolInput>): ToolSchema[] {
 	return Object.entries(tools).map(([name, t]) => {
-		const parameters = t._mcpMeta?.inputSchema ?? toJsonSchemaCompat(t.schema, { pipeStrategy: 'input' })
-		return { name, description: t.description, kind: t.kind ?? 'write', parameters }
+		const parameters = t._mcpMeta?.inputSchema ?? toolParameterSchema(t.schema)
+		return { name, description: t.description, kind: t.kind ?? defaultToolKind, parameters }
 	})
 }
 

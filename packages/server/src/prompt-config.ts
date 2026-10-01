@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import type { GoalRecipient, GoalToolDefinition } from './goal-compiler.js'
+import type { GoalToolDefinition } from './goal-compiler.js'
 
 // Bump when compiler instructions or the compiler's runtime input contract changes.
-export const compilerRevision = 'voice-prompts-v2'
+// v3: recipient removed from the compiler input (runtime-injected instead).
+export const compilerRevision = 'voice-prompts-v3'
 
 export interface ApiToolInput {
 	name: string
@@ -11,12 +12,20 @@ export interface ApiToolInput {
 	parameters?: Record<string, unknown>
 }
 
+/**
+ * A tool without a declared `kind` is treated as a read: it runs as soon as
+ * the caller's request and its arguments are clear, which is what every
+ * integration got before `kind` existed. Writes (anything with side effects)
+ * must be declared so the watcher gates them on explicit caller authorization.
+ */
+export const defaultToolKind = 'read'
+
 export function normalizeCallTools(tools: ApiToolInput[] = []): GoalToolDefinition[] {
 	return tools.map((tool) => {
 		if (tool.kind !== undefined && tool.kind !== 'read' && tool.kind !== 'write') {
 			throw new Error(`Tool "${tool.name}" kind must be read or write`)
 		}
-		return { ...tool, kind: tool.kind ?? 'write', parameters: tool.parameters ?? {} }
+		return { ...tool, kind: tool.kind ?? defaultToolKind, parameters: tool.parameters ?? {} }
 	})
 }
 
@@ -27,12 +36,17 @@ function stableStringify(value: unknown): string {
 	return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`
 }
 
+/**
+ * Everything that shapes the compiled prompt. The recipient is deliberately
+ * absent: the compiled prompt is recipient-agnostic and the runtime injects
+ * caller details into every turn's context block, so one goal compiles once
+ * no matter how many people it is used to call.
+ */
 export interface PromptConfig {
 	goal: string
 	voice: string
 	context?: string
 	data?: Record<string, unknown>
-	recipient?: GoalRecipient
 	tools: unknown[]
 	results: unknown
 	aiDisclosure?: boolean
@@ -52,9 +66,7 @@ export function hashPromptConfig(apiKeyId: string, config: PromptConfig, revisio
 		results: config.results,
 		aiDisclosure: config.aiDisclosure,
 		ambience: config.ambience,
-		...(config.persona
-			? { persona: config.persona }
-			: { compilerRevision: revision, recipient: config.recipient ?? null }),
+		...(config.persona ? { persona: config.persona } : { compilerRevision: revision }),
 		...(config.webhook && { webhook: config.webhook }),
 	})
 	return createHash('sha256').update(payload).digest('hex')

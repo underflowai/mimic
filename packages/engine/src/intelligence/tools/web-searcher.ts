@@ -138,16 +138,32 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 			return null
 		}
 
-		const enrichment = parsed?.enrichment?.trim() || null
-		if (enrichment && enrichment.split(/\s+/u).length > 150) {
-			log.warn('discarding enrichment that exceeds the 150-word handoff limit')
-			return null
-		}
+		const enrichment = truncateHandoff(parsed?.enrichment?.trim() || null)
 		log.info({ enrichmentPreview: enrichment?.slice(0, 200) ?? null }, 'search result')
 		return enrichment
 	}
 
 	return { search }
+}
+
+/** Spoken-handoff ceiling. The prompt asks for it; this enforces it without throwing the answer away. */
+export const maxHandoffWords = 150
+
+/**
+ * Keeps the first `maxHandoffWords` words, cut back to the last sentence end
+ * when one exists past the halfway mark. The prompt tells the researcher to
+ * lead with the direct answer, so the front of an over-long briefing is the
+ * part worth keeping.
+ */
+export function truncateHandoff(enrichment: string | null): string | null {
+	if (!enrichment) return null
+	const words = enrichment.split(/\s+/u)
+	if (words.length <= maxHandoffWords) return enrichment
+	const clipped = words.slice(0, maxHandoffWords).join(' ')
+	const lastSentenceEnd = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('? '), clipped.lastIndexOf('! '))
+	const truncated = lastSentenceEnd > clipped.length / 2 ? clipped.slice(0, lastSentenceEnd + 1) : `${clipped}…`
+	log.warn({ words: words.length, kept: truncated.split(/\s+/u).length }, 'truncating enrichment to the handoff limit')
+	return truncated
 }
 
 export type WebSearcher = ReturnType<typeof createWebSearcher>

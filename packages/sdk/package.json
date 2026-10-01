@@ -1,6 +1,6 @@
 {
 	"name": "@underflowai/mimic",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"type": "module",
 	"description": "Make AI phone calls with a few lines of code. Tools run locally — no webhooks needed.",
 	"license": "MIT",
@@ -14,7 +14,8 @@
 		}
 	},
 	"files": [
-		"build/"
+		"build/",
+		"CHANGELOG.md"
 	],
 	"engines": {
 		"node": ">=22.0.0"
@@ -40,6 +41,7 @@
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "^1.29.0",
-		"zod": "^3.25.0"
+		"zod": "^3.25.0",
+		"zod-to-json-schema": "^3.25.2"
 	}
 }

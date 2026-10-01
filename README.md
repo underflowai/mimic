@@ -90,9 +90,11 @@ const call = mimic.call({
 })
 ```
 
-Tools execute locally in your process. Declare `kind: 'read'` for lookups and
-`kind: 'write'` for actions such as booking or sending. Unclassified tools default
-to write. A calendar lookup does not book an appointment; add a write tool for that.
+Tools execute locally in your process. Declare `kind: 'write'` for actions
+such as booking or sending; the agent waits for the caller's explicit go-ahead
+before running a write. Tools without a `kind` are reads and run as soon as the
+request is clear. A calendar lookup does not book an appointment; add a write
+tool for that.
 
 Or connect to an MCP server:
 

@@ -17,10 +17,13 @@
  * ## Model + prompt
  *
  * Runs on the shared background model (`models.background`) with the prompt
- * in `prompts/instructions/eager-promotion-classifier.md`. The prompt was
- * designed to reject material changes even on the same topic. The opt-in
- * live cases in eager-promotion-classifier.test.ts evaluate the current prompt;
- * historical evaluations of earlier prompts do not validate this version.
+ * in `prompts/instructions/eager-promotion-classifier.md`. The prompt and its
+ * labeled input format were chosen by an offline eval (42 cases × 6 prompts ×
+ * 3 models × 3 runs): terse prompts on small models collapsed into
+ * always-promote (27 FPs out of 42), while the explicit prompt reached 97.6%
+ * accuracy with zero FPs. Re-run that eval before changing the prompt, the
+ * input format, or the background model. The opt-in live cases in
+ * eager-promotion-classifier.test.ts are a smoke check, not a replacement.
  *
  * ### Latency is masked on the critical path
  *
@@ -57,13 +60,44 @@ function normalizeForComparison(text: string): string {
 }
 
 /**
- * Skip the classifier only for nonempty equivalent transcripts. Every new
- * substantive word must be checked against the draft, even a one-word suffix.
+ * Non-lexical hesitations only. ASR emits and drops these inconsistently
+ * between interim and final transcripts, and none of them can carry intent.
+ * Words that are sometimes fillers and sometimes content ("like", "right",
+ * "so", "yeah") are deliberately absent: "turn right" is not "turn".
+ */
+const hesitationTokens = new Set(['uh', 'uhh', 'um', 'umm', 'ah', 'er', 'erm', 'hm', 'hmm', 'mm', 'mhm'])
+
+/**
+ * Tokenizes on whitespace and strips separator punctuation that hangs off a
+ * token's edges ("uh," → "uh") while keeping punctuation inside a token
+ * ("1.5") and a question mark anywhere: "you booked it?" is not "you booked it".
+ */
+const edgePunctuation = /^[,.;:!"'()\-—–…]+|[,.;:!"'()\-—–…]+$/gu
+
+function stripHesitations(normalized: string): string {
+	return normalized
+		.split(' ')
+		.map((token) => token.replace(edgePunctuation, ''))
+		.filter((token) => token.length > 0 && !hesitationTokens.has(token))
+		.join(' ')
+}
+
+/**
+ * Skip the classifier only when the final transcript says the same thing as
+ * the one the draft was generated against: identical after normalizing
+ * presentation, or identical once pure hesitations are removed. Every
+ * substantive difference, including a one-word suffix ("book it" → "book it
+ * tomorrow"), goes to the classifier.
  */
 export function canFastPathPromote(spec: string, final: string): boolean {
 	const normSpec = normalizeForComparison(spec)
 	const normFinal = normalizeForComparison(final)
-	return normSpec.length > 0 && normSpec === normFinal
+	if (normSpec.length === 0 || normFinal.length === 0) return false
+	if (normSpec === normFinal) return true
+
+	const strippedSpec = stripHesitations(normSpec)
+	const strippedFinal = stripHesitations(normFinal)
+	return strippedSpec.length > 0 && strippedSpec === strippedFinal
 }
 
 export async function classifyEagerPromotion(
@@ -78,16 +112,18 @@ export async function classifyEagerPromotion(
 	}
 
 	const systemPrompt = await getSystemPrompt()
-	const evidence = {
-		partialTranscript: speculativeTranscript,
-		fullTranscript: finalTranscript,
-		draftResponse,
+	const userParts = [
+		`Generation-basis transcript (what we prepared against): "${speculativeTranscript}"`,
+		`Full transcript (what the caller actually said): "${finalTranscript}"`,
+	]
+	if (draftResponse) {
+		userParts.push(`Agent's prepared response: "${draftResponse}"`)
 	}
 
 	const parsed = await callBackgroundModel(
 		client,
 		systemPrompt,
-		JSON.stringify(evidence),
+		userParts.join('\n\n'),
 		promotionSchema,
 		'eager-promo',
 		{

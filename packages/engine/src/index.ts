@@ -34,4 +34,8 @@ export { loadBackchannelClips } from './backchannel/clips.js'
 export { backchannelTokens } from './backchannel/tokens.js'
 export type { BackchannelToken } from './backchannel/tokens.js'
 
-export { formatUserDateTime } from './intelligence/control-block-utils.js'
+export {
+	formatUserDateTime,
+	inferredTimezoneLabel,
+	type FormatUserDateTimeOptions,
+} from './intelligence/control-block-utils.js'

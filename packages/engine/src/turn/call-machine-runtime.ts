@@ -45,7 +45,7 @@ import {
 	type ToolSupervisorSnapshot,
 } from '../intelligence/tools/supervisor-machine.js'
 import { createToolTransport } from '../intelligence/tools/transport.js'
-import { watchForToolAction } from '../intelligence/tools/watcher.js'
+import { watchForToolAction, watcherTurnWindow } from '../intelligence/tools/watcher.js'
 import type { BackgroundIntelligence, Director, EagerAudioSink } from '../intelligence/types.js'
 import { isAbortLikeError } from '../shared/async-utils.js'
 import { monotonicClock, type Clock } from '../shared/clock.js'
@@ -596,7 +596,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					type: 'DETECT_INTENT',
 					transcript: p.transcript,
 					turnId: context.nextTurnId,
-					recentTurns: deps.getDirectorTurns(),
+					recentTurns: deps.getDirectorTurns().slice(-watcherTurnWindow),
 				})
 				enqueue.raise({
 					type: 'turn_complete',

@@ -17,6 +17,8 @@ export interface TurnControlBlockContext {
 		email?: string
 	}
 	userTimezone?: string
+	/** `userTimezone` is an unconfirmed guess (area code); render the date line with that caveat. */
+	userTimezoneInferred?: boolean
 	interruptContext: InterruptContext | null
 	hasActiveTools?: boolean
 	pendingTools?: string[]
@@ -45,6 +47,8 @@ export interface TurnControlBlockBuilderDeps {
 	getUserFirstName: () => string
 	getRecipient: () => TurnControlBlockContext['recipient']
 	getUserTimezone: () => string | undefined
+	/** True while the timezone is an area-code guess the caller hasn't confirmed. */
+	getUserTimezoneInferred?: () => boolean
 	buildTurnControlBlock: (ctx: TurnControlBlockContext) => string
 	/** Compiler-generated text quality block. Replaces generic transcript guidance when set. */
 	textQualityBlock?: string
@@ -84,6 +88,7 @@ function appendSharedSignals(
 		prompts,
 	)
 	if (deps.endCallEnabled) appendEndCallGuidance(parts, prompts)
+	if (ctx.userTimezoneInferred && ctx.userTimezone) parts.push(prompts.timezoneGuess)
 	appendInterruptContext(parts, ctx.interruptContext, prompts)
 }
 
@@ -107,6 +112,7 @@ export async function createTurnControlBlockBuilder(deps: TurnControlBlockBuilde
 			userFirstName: deps.getUserFirstName(),
 			recipient: deps.getRecipient(),
 			userTimezone: deps.getUserTimezone(),
+			userTimezoneInferred: deps.getUserTimezoneInferred?.() ?? false,
 			interruptContext: outcome.interruptContext,
 			hasActiveTools: opts?.hasActiveTools,
 			pendingTools: basePendingTools.length > 0 ? basePendingTools : undefined,

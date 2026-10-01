@@ -141,9 +141,37 @@ describe('createTurnControlBlockBuilder', () => {
 		const persona = await createTurnControlBlockBuilder(deps)
 		const personaBlock = persona.build('hi', { interruptContext: null })
 		assert.match(personaBlock, /mid-conversation on a live phone call/)
-		assert.match(personaBlock, /without forced fillers/)
+		assert.match(personaBlock, /one turn in three, open with a filler/)
 		assert.match(personaBlock, /Voice transcription/)
 		assert.match(personaBlock, /Follow the caller's latest intent/)
+	})
+
+	it('adds the confirm-lightly steer only while the timezone is an unconfirmed guess', async () => {
+		const deps = {
+			getUserFirstName: () => 'Ola',
+			getRecipient: () => undefined,
+			buildTurnControlBlock: () => '',
+		}
+		const guessed = await createTurnControlBlockBuilder({
+			...deps,
+			getUserTimezone: () => 'America/New_York',
+			getUserTimezoneInferred: () => true,
+		})
+		assert.match(guessed.build('hi', { interruptContext: null }), /guess from their area code/)
+
+		const confirmed = await createTurnControlBlockBuilder({
+			...deps,
+			getUserTimezone: () => 'America/New_York',
+			getUserTimezoneInferred: () => false,
+		})
+		assert.doesNotMatch(confirmed.build('hi', { interruptContext: null }), /area code/)
+
+		const unknown = await createTurnControlBlockBuilder({
+			...deps,
+			getUserTimezone: () => undefined,
+			getUserTimezoneInferred: () => true,
+		})
+		assert.doesNotMatch(unknown.build('hi', { interruptContext: null }), /area code/)
 	})
 
 	it('appends the end-call tag guidance only when enabled', async () => {

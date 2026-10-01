@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { z } from 'zod'
+import * as z4 from 'zod/v4'
 
 import { executeTool, introspectTools, tool } from './tools.js'
 import { Mimic } from './index.js'
@@ -19,7 +20,7 @@ describe('tool()', () => {
 		})
 		assert.equal(t.__mimicTool, true)
 		assert.equal(t.description, 'Check slots')
-		assert.equal(t.kind, 'write')
+		assert.equal(t.kind, 'read')
 	})
 
 	it('run receives validated input from schema', async () => {
@@ -69,7 +70,8 @@ describe('introspectTools', () => {
 		})
 		const schemas = introspectTools({ simple: t })
 		assert.deepEqual(schemas[0]!.parameters.properties, { query: { type: 'string' } })
-		assert.equal(schemas[0]!.kind, 'write')
+		assert.equal(schemas[0]!.kind, 'read')
+		assert.equal('$schema' in schemas[0]!.parameters, false)
 	})
 
 	it('preserves booleans, numbers, arrays, enums, nested objects, and optional fields', () => {
@@ -101,14 +103,27 @@ describe('introspectTools', () => {
 		})
 	})
 
-	it('defaults legacy tool objects without a kind to write', () => {
+	it('defaults legacy tool objects without a kind to read, matching pre-kind behavior', () => {
 		const legacy = {
 			__mimicTool: true as const,
 			description: 'Legacy tool',
 			schema: z.object({}),
 			run: async () => 'ok',
 		}
-		assert.equal(introspectTools({ legacy })[0]!.kind, 'write')
+		assert.equal(introspectTools({ legacy })[0]!.kind, 'read')
+	})
+
+	it('accepts Zod 4 schemas from the zod/v4 subpath', () => {
+		const v4 = tool({
+			description: 'Zod 4 tool',
+			parameters: z4.object({ when: z4.string().describe('When'), count: z4.number().int().optional() }) as never,
+			run: async () => 'ok',
+		})
+		const [schema] = introspectTools({ v4 })
+		assert.deepEqual(schema!.parameters.required, ['when'])
+		const properties = schema!.parameters.properties as Record<string, { type: string; description?: string }>
+		assert.deepEqual(properties.when, { type: 'string', description: 'When' })
+		assert.equal(properties.count!.type, 'integer')
 	})
 
 	it('sends tool kinds and complete parameter schemas on the call request', async () => {
@@ -139,7 +154,12 @@ describe('introspectTools', () => {
 				parameters: z.object({ enabled: z.boolean(), count: z.number().optional() }),
 				run: async () => 'ok',
 			}),
-			book: tool({ description: 'Book', parameters: z.object({ guests: z.number() }), run: async () => 'ok' }),
+			book: tool({
+				kind: 'write',
+				description: 'Book',
+				parameters: z.object({ guests: z.number() }),
+				run: async () => 'ok',
+			}),
 		}
 		await mimic.call({ to: '+15551234567', goal: 'Check options', tools, pollIntervalMs: 1 }).result
 		assert.deepEqual(sentTools, introspectTools(tools))

@@ -69,14 +69,18 @@ const call = mimic.call({
 })
 ```
 
-`data` names and values are supplied to the prompt compiler. The compiled
-prompt cache includes that data and the recipient, so another person's
-values do not reuse a prompt containing the previous person's details.
+`data` names and values are supplied to the prompt compiler, and the compiled
+prompt is cached by goal, context, data, tools, and results. `recipient` is
+not part of that cache: the compiled prompt never contains a specific person,
+and the recipient's name and email are injected into each turn's runtime
+context instead, so one goal compiles once however many people you call.
 
-`recipient` is also available in each turn's runtime context. Set
-`userTimezone` to the caller's IANA timezone (for example, `America/New_York`)
-to resolve “today” and “tomorrow” in their local time. Timezone is stored
-per call and does not require a separate compiled prompt.
+Set `userTimezone` to the caller's IANA timezone (for example,
+`America/New_York`) when you know it. If you don't, Mimic guesses from the
+phone number's area code, tells the agent the guess is unconfirmed, and the
+agent confirms it lightly the first time a specific time matters ("that's
+Eastern for you, right?"). Toll-free and other non-geographic numbers get no
+guess, and the agent asks instead.
 
 ## Tools
 
@@ -122,9 +126,11 @@ const call = mimic.call({
 })
 ```
 
-Use `kind: 'read'` for lookups and `kind: 'write'` for actions such as booking,
-updating a record, or sending a message. An omitted kind defaults to `write`;
-only tools explicitly marked read are eligible for speculative execution.
+Use `kind: 'write'` for actions such as booking, updating a record, or sending
+a message; the agent waits for the caller's explicit go-ahead before running a
+write. An omitted kind is `read`: the tool runs as soon as the caller's request
+and its arguments are clear. MCP tools are reads only when the server marks
+them `readOnlyHint: true`.
 
 Tools execute locally in your process. Tool arguments and returned results
 are sent through Mimic so the agent can use them; keep secrets inside your
@@ -304,7 +310,7 @@ mimic.call({
 
   // Voice
   voice: 'female',              // 'female' (Aurora) or 'male' (Arlo)
-  userTimezone: 'America/New_York', // Caller timezone for relative dates/times
+  userTimezone: 'America/New_York', // Caller timezone; guessed from the area code and confirmed if omitted
   aiDisclosure: true,           // Proactively disclose AI status
 
   // Audio

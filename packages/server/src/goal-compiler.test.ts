@@ -42,8 +42,37 @@ describe('buildOrchestratorConfigFromAgent', () => {
 			email: 'morgan@example.com',
 		})
 		assert.equal(orchestratorConfig.userTimezone, 'America/New_York')
+		assert.equal(orchestratorConfig.userTimezoneInferred, false)
 		assert.equal(orchestratorConfig.recipient?.firstName, 'Morgan')
-		assert.match(orchestratorConfig.buildOpeningBlock(), /callerEmail: morgan@example.com/)
+		const opening = orchestratorConfig.buildOpeningBlock()
+		assert.match(opening, /callerEmail: morgan@example.com/)
+		assert.doesNotMatch(opening, /guessed from the caller/)
+	})
+
+	it('labels an area-code timezone guess as unconfirmed on every date line', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent(), {
+			userTimezone: 'America/Chicago',
+			userTimezoneInferred: 'true',
+		})
+		assert.equal(orchestratorConfig.userTimezoneInferred, true)
+		assert.match(
+			orchestratorConfig.buildOpeningBlock(),
+			/now: .* C[DS]T \(timezone guessed from the caller’s area code — unconfirmed\)/,
+		)
+		const turn = orchestratorConfig.buildTurnControlBlock({
+			transcript: 'hello',
+			userFirstName: 'Casey',
+			userTimezone: 'America/Chicago',
+			userTimezoneInferred: true,
+			interruptContext: null,
+		})
+		assert.match(turn, /guessed from the caller’s area code — unconfirmed/)
+	})
+
+	it('ignores a stray inferred flag when no timezone is set', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent(), { userTimezoneInferred: 'true' })
+		assert.equal(orchestratorConfig.userTimezoneInferred, false)
+		assert.match(orchestratorConfig.buildOpeningBlock(), /caller timezone unavailable; UTC reference/)
 	})
 
 	it('enables the existing hangup protocol for API calls', () => {

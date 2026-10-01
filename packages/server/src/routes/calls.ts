@@ -5,6 +5,7 @@ import { RoomServiceClient } from 'livekit-server-sdk'
 import { config } from '@mimic/engine'
 
 import { publishCallEvent } from '../call-bus.js'
+import { inferCallerTimezone } from '../caller-timezone.js'
 import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls, type ApiCallRow } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
@@ -106,7 +107,6 @@ calls.post('/', async (c) => {
 			voice,
 			context: body.context,
 			data: body.data,
-			recipient: body.recipient,
 			tools,
 			results,
 			aiDisclosure: body.aiDisclosure,
@@ -177,7 +177,17 @@ calls.post('/', async (c) => {
 	}
 
 	const callContext: Record<string, string> = {}
-	if (body.userTimezone) callContext.userTimezone = body.userTimezone
+	if (body.userTimezone) {
+		callContext.userTimezone = body.userTimezone
+	} else {
+		// No zone supplied: guess from the area code. The engine labels the guess
+		// unconfirmed and the agent checks it with the caller before relying on it.
+		const guess = inferCallerTimezone(body.to)
+		if (guess) {
+			callContext.userTimezone = guess
+			callContext.userTimezoneInferred = 'true'
+		}
+	}
 	if (body.recipient?.firstName) callContext.firstName = body.recipient.firstName
 	if (body.recipient?.lastName) callContext.lastName = body.recipient.lastName
 	if (body.recipient?.email) callContext.email = body.recipient.email
@@ -246,7 +256,6 @@ calls.post('/', async (c) => {
 					voice: body.voice ?? 'female',
 					context: body.context ?? '',
 					data: body.data,
-					recipient: body.recipient,
 					tools,
 					results: body.results ?? body.extract ?? {},
 					aiDisclosure: body.aiDisclosure,

@@ -3,7 +3,7 @@ import { describe, it, mock } from 'node:test'
 
 import OpenAI from 'openai'
 
-import { createWebSearcher } from './web-searcher.js'
+import { createWebSearcher, maxHandoffWords, truncateHandoff } from './web-searcher.js'
 
 describe('web-searcher', () => {
 	it('createWebSearcher exposes search method', async () => {
@@ -89,13 +89,28 @@ describe('web-searcher', () => {
 		assert.equal(create.mock.calls.length, 2)
 	})
 
-	it('rejects an oversized handoff without cutting off its caveats', async () => {
+	it('truncates an oversized handoff at a sentence boundary instead of discarding it', async () => {
+		const sentence = 'The rate rose to four percent in March according to the central bank.'
 		const create = mock.fn(async () => ({
 			output: [{ type: 'web_search_call', status: 'completed' }],
-			output_text: JSON.stringify({ enrichment: Array(151).fill('word').join(' ') }),
+			output_text: JSON.stringify({ enrichment: Array(20).fill(sentence).join(' ') }),
 		}))
 		const searcher = createWebSearcher({ responses: { create } } as unknown as OpenAI, { agentName: 'Arlo' })
-		assert.equal(await searcher.search('topic', []), null)
+		const result = await searcher.search('topic', [])
+		assert.ok(result)
+		const sentenceWords = sentence.split(' ').length
+		const wholeSentences = Math.floor(maxHandoffWords / sentenceWords)
+		assert.equal(result, Array(wholeSentences).fill(sentence).join(' '))
+		assert.ok(result.split(/\s+/u).length <= maxHandoffWords)
+	})
+
+	it('clips with an ellipsis when no sentence end exists past the halfway mark', () => {
+		const result = truncateHandoff(Array(200).fill('word').join(' '))
+		assert.ok(result)
+		assert.equal(result.split(/\s+/u).length, maxHandoffWords)
+		assert.match(result, /word…$/)
+		assert.equal(truncateHandoff('short answer'), 'short answer')
+		assert.equal(truncateHandoff(null), null)
 	})
 
 	it('provides authoritative caller time or a labeled UTC fallback', async () => {

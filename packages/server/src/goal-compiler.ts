@@ -35,9 +35,14 @@ export type GoalData = Record<string, unknown>
 
 export type GoalResults = Record<string, unknown>
 
+/**
+ * What the compiler sees. Recipient details are deliberately not here: the
+ * compiled prompt is recipient-agnostic and the runtime injects
+ * callerFirstName / callerLastName / callerEmail into every turn's context
+ * block, so a goal compiles once however many people it is used to call.
+ */
 export interface GoalCompilerInput {
 	goal: string
-	recipient?: GoalRecipient
 	context: GoalContext
 	data?: GoalData
 	tools: GoalToolDefinition[]
@@ -202,17 +207,7 @@ function buildCompilerInput(input: GoalCompilerInput) {
 	const parts = [
 		`Voice: ${input.voice}`,
 		`Voice-based fallback agent name: ${defaultAgentName(input.voice)}`,
-		`Recipient: ${
-			input.recipient
-				? [
-						input.recipient.firstName,
-						input.recipient.lastName,
-						input.recipient.email ? `<${input.recipient.email}>` : undefined,
-					]
-						.filter(Boolean)
-						.join(' ')
-				: 'Not supplied. Runtime may provide caller details in the control block.'
-		}`,
+		'Recipient: supplied per call at runtime as callerFirstName / callerLastName / callerEmail in the context block; the compiled prompt must not assume a specific person.',
 		`AI disclosure: ${formatAiDisclosure(input.aiDisclosure)}`,
 		'Runtime speech capabilities: Cartesia Sonic 3.6; only break and spell SSML tags pass through. Emotion, speed, and volume tags are stripped. Omit laughter unless the task explicitly calls for it.',
 		'Recording status or notice: not supplied as a dedicated setting. Do not infer it from AI disclosure; follow only explicit recording instructions in the goal or context.',
@@ -305,9 +300,13 @@ function resolveRecipient(agent: AgentConfig, callContext?: Record<string, strin
 	return { firstName, lastName, email }
 }
 
-function buildOpeningContextBlock(userTimezone?: string, recipient?: ReturnType<typeof resolveRecipient>) {
+function buildOpeningContextBlock(
+	userTimezone: string | undefined,
+	userTimezoneInferred: boolean,
+	recipient?: ReturnType<typeof resolveRecipient>,
+) {
 	const parts: string[] = ['<context>']
-	parts.push(`now: ${formatUserDateTime(userTimezone)}`)
+	parts.push(`now: ${formatUserDateTime(userTimezone, { inferred: userTimezoneInferred })}`)
 	if (recipient?.firstName) parts.push(`callerFirstName: ${recipient.firstName}`)
 	if (recipient?.lastName) parts.push(`callerLastName: ${recipient.lastName}`)
 	if (recipient?.email) parts.push(`callerEmail: ${recipient.email}`)
@@ -321,7 +320,7 @@ function buildTurnControlBlock(ctx: TurnControlBlockContext) {
 	const sections: string[] = []
 
 	const lateParts = ['<context>']
-	lateParts.push(`now: ${formatUserDateTime(ctx.userTimezone)}`)
+	lateParts.push(`now: ${formatUserDateTime(ctx.userTimezone, { inferred: ctx.userTimezoneInferred === true })}`)
 	if (ctx.recipient?.firstName) lateParts.push(`callerFirstName: ${ctx.recipient.firstName}`)
 	if (ctx.recipient?.lastName) lateParts.push(`callerLastName: ${ctx.recipient.lastName}`)
 	if (ctx.recipient?.email) lateParts.push(`callerEmail: ${ctx.recipient.email}`)
@@ -346,6 +345,7 @@ export function buildOrchestratorConfigFromAgent(
 	const voicePersona = agent.voice === 'male' ? arloPersona : auroraPersona
 	const persona = { ...voicePersona, firstName: agent.agentName.trim() || voicePersona.firstName }
 	const userTimezone = callContext?.userTimezone
+	const userTimezoneInferred = Boolean(userTimezone) && callContext?.userTimezoneInferred === 'true'
 	const recipient = resolveRecipient(agent, callContext)
 	return {
 		orchestratorConfig: {
@@ -354,8 +354,9 @@ export function buildOrchestratorConfigFromAgent(
 			maxCompletionTokens: 384,
 			userFirstName: resolveFirstName(agent, callContext),
 			userTimezone,
+			userTimezoneInferred,
 			recipient,
-			buildOpeningBlock: () => buildOpeningContextBlock(userTimezone, recipient),
+			buildOpeningBlock: () => buildOpeningContextBlock(userTimezone, userTimezoneInferred, recipient),
 			buildTurnControlBlock,
 			textQualityBlock: agent.turnControlBlock?.replaceAll('[AGENT_NAME]', persona.firstName),
 			endCallEnabled: true,

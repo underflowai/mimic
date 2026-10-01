@@ -69,3 +69,17 @@ Each extracted field can be `null` when the call did not establish it, including
 - Changed-file formatting and `git diff --check` passed.
 
 No live phone calls or paid model evaluations were performed as part of this review. Validation uses mocked model/tool responses, state-machine tests, SDK serialization tests, TypeScript checks, and workspace builds.
+
+## Follow-up changes
+
+A second pass kept most of the above and reversed or adjusted the following. Where this section disagrees with the text above, this section describes the shipped behavior.
+
+- **Unclassified tools default to `read`, not `write`.** Tools that predate `kind` are lookups in practice; forcing them through the authorization gate stalled reads. Declare `kind: 'write'` for anything that acts.
+- **Recipient details are out of the compiler input and the cache key.** The compiled prompt refers to `callerFirstName` / `callerLastName` / `callerEmail`, which the runtime injects per call, so one goal compiles once however many people are called. `compilerRevision` is `voice-prompts-v3`.
+- **Spoken cadence keeps the one-in-three filler line.** Removing it flattened the voice; the SSML `<break>` markup is what the TTS layer expects.
+- **Eager promotion prompt restored.** The original wording and labeled input format were validated on a 42×6×3×3 eval (97.6%, no false positives); the rewrite was not. The fast path now also accepts finals that differ from the spec only by hesitation tokens (`um`, `uh`, …), which the classifier handled identically.
+- **Web search enrichment over 150 words is truncated at a sentence boundary** rather than discarded, so a long result still yields a handoff.
+- **Tool watcher.** `writeAuthorizationQuote` is checked with normalized substring containment against caller turns (punctuation, case, and curly quotes no longer cause false rejections); the quote must still be the caller's words. One tool with an unusable schema no longer disables the others. The watcher sees the last 20 turns rather than the full call.
+- **Backchannel classifier** picks from a named neutral subset exported from `tokens.ts` and runs at temperature 1 again.
+- **Caller timezone is guessed from the area code when not supplied.** The server infers an IANA zone from the dialed number (one guess when the area code maps to one or two zones; none for toll-free or country-wide prefixes). The date line is labeled as an unconfirmed guess, the director is told to confirm it in passing the first time a specific time matters and to make light of it if wrong, and the tool watcher does not schedule against the guessed zone until the caller confirms or names one.
+- **SDK 0.3.0.** Tool parameters serialize through `zod-to-json-schema` (Zod 3) or `zod/v4/core` (Zod 4); the MCP SDK is loaded only when `mcp()` is used. See `packages/sdk/CHANGELOG.md`.

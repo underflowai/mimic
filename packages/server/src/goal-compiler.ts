@@ -14,6 +14,8 @@ import {
 	type TurnControlBlockContext,
 } from '@mimic/engine'
 
+import { renderDataBlock, renderDataSchema, type CallData } from './call-data.js'
+
 export type GoalVoice = 'female' | 'male'
 
 export interface GoalToolDefinition {
@@ -31,7 +33,7 @@ export interface GoalRecipient {
 
 export type GoalContext = string | Record<string, string>
 
-export type GoalData = Record<string, unknown>
+export type GoalData = CallData
 
 export type GoalResults = Record<string, unknown>
 
@@ -40,6 +42,8 @@ export type GoalResults = Record<string, unknown>
  * compiled prompt is recipient-agnostic and the runtime injects
  * callerFirstName / callerLastName / callerEmail into every turn's context
  * block, so a goal compiles once however many people it is used to call.
+ * `data` is passed through but only its shape reaches the compiler; the
+ * values are injected per call (`buildOrchestratorConfigFromAgent`).
  */
 export interface GoalCompilerInput {
 	goal: string
@@ -87,89 +91,11 @@ function defaultAgentName(voice: GoalVoice) {
 	return voice === 'male' ? arloPersona.firstName : auroraPersona.firstName
 }
 
-function isConstrainedField(value: unknown): value is { value: unknown; validOptions: string[] } {
-	if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
-	const obj = value as Record<string, unknown>
-	return 'value' in obj && 'validOptions' in obj && Array.isArray(obj.validOptions)
-}
-
-function serializeValue(value: unknown, indent: string): string {
-	if (value === null || value === undefined) return 'MISSING'
-	if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
-
-	if (isConstrainedField(value)) {
-		const display = value.value === null || value.value === undefined ? 'MISSING' : String(value.value)
-		// Preserve field semantics such as conditions, provenance, and collection
-		// instructions alongside the value and options supplied for compilation.
-		const metadata = Object.fromEntries(
-			Object.entries(value).filter(([key]) => key !== 'value' && key !== 'validOptions'),
-		)
-		const metadataText = Object.keys(metadata).length > 0 ? `; metadata: ${JSON.stringify(metadata)}` : ''
-		return `${display} (valid options: ${value.validOptions.join(', ')}${metadataText})`
-	}
-
-	if (Array.isArray(value)) {
-		if (value.length === 0) return 'none'
-		if (value.every((item) => typeof item === 'string' || typeof item === 'number')) return value.join(', ')
-		const childIndent = indent + '   '
-		return value
-			.map((item, i) => {
-				if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
-					const fields = serializeObject(item as Record<string, unknown>, childIndent)
-					const firstLine = fields[0]
-					const rest = fields.slice(1)
-					return [`${indent}${i + 1}. ${firstLine}`, ...rest.map((line) => `${indent}   ${line}`)].join('\n')
-				}
-				return `${indent}${i + 1}. ${serializeValue(item, childIndent)}`
-			})
-			.join('\n')
-	}
-
-	if (typeof value === 'object') {
-		const lines = serializeObject(value as Record<string, unknown>, indent + '  ')
-		return '\n' + lines.map((line) => `${indent}  ${line}`).join('\n')
-	}
-
-	return String(value)
-}
-
-function serializeObject(obj: Record<string, unknown>, _indent: string): string[] {
-	return Object.entries(obj).map(([key, val]) => {
-		const rendered = serializeValue(val, _indent)
-		if (rendered.startsWith('\n')) return `${key}:${rendered}`
-		return `${key}: ${rendered}`
-	})
-}
-
 function normalizeContext(context: GoalContext): string {
 	if (typeof context === 'string') return context
 	const entries = Object.entries(context)
 	if (entries.length === 0) return 'No additional context provided.'
 	return entries.map(([key, value]) => `${key}: ${value}`).join('\n')
-}
-
-function normalizeData(data: GoalData): string {
-	const entries = Object.entries(data)
-	if (entries.length === 0) return 'No structured data provided.'
-
-	const sections: string[] = []
-	for (const [key, value] of entries) {
-		if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-			sections.push(`${key}: ${value}`)
-		} else if (value === null || value === undefined) {
-			sections.push(`${key}: MISSING`)
-		} else if (isConstrainedField(value)) {
-			sections.push(`${key}: ${serializeValue(value, '')}`)
-		} else if (Array.isArray(value)) {
-			sections.push(`${key}:\n${serializeValue(value, '  ')}`)
-		} else if (typeof value === 'object') {
-			const lines = serializeObject(value as Record<string, unknown>, '  ')
-			sections.push(`${key}:\n${lines.map((line) => `  ${line}`).join('\n')}`)
-		} else {
-			sections.push(`${key}: ${serializeValue(value, '')}`)
-		}
-	}
-	return sections.join('\n\n')
 }
 
 function formatObjectBlock(value: Record<string, unknown>) {
@@ -221,8 +147,8 @@ function buildCompilerInput(input: GoalCompilerInput) {
 	if (input.data && Object.keys(input.data).length > 0) {
 		parts.push(
 			'',
-			'Structured data (determine each field’s role from its meaning and the goal; do not assume every field must be collected):',
-			normalizeData(input.data),
+			'Structured data fields (values are supplied per call at runtime in a <data> block in the context; refer to fields by name and do not assume specific values — the same compiled prompt serves every call with these fields). "provided" fields hold facts already known about this call; "missing" fields were not supplied. Determine each field’s role from its meaning and the goal; do not assume every field must be collected:',
+			renderDataSchema(input.data),
 		)
 	}
 	parts.push(
@@ -314,6 +240,17 @@ function buildOpeningContextBlock(
 	return parts.join('\n')
 }
 
+/**
+ * Per-call data values ride on the system prompt rather than on every turn's
+ * control block: the prompt is already assembled per call (agent name
+ * substitution), it sits in the cached prefix so the values cost tokens once,
+ * and the director sees it on every turn.
+ */
+function withCallData(systemPrompt: string, dataBlock: string) {
+	if (!dataBlock) return systemPrompt
+	return `${systemPrompt.trimEnd()}\n\nValues for this call (the instructions above refer to these fields by name):\n${dataBlock}\n`
+}
+
 function buildTurnControlBlock(ctx: TurnControlBlockContext) {
 	const hasToolResults = ctx.toolResults && ctx.toolResults.length > 0
 
@@ -341,16 +278,18 @@ function buildTurnControlBlock(ctx: TurnControlBlockContext) {
 export function buildOrchestratorConfigFromAgent(
 	agent: AgentConfig,
 	callContext?: Record<string, string>,
+	callData?: CallData | null,
 ): { orchestratorConfig: Omit<CallOrchestratorConfig, 'audioTransport'> } {
 	const voicePersona = agent.voice === 'male' ? arloPersona : auroraPersona
 	const persona = { ...voicePersona, firstName: agent.agentName.trim() || voicePersona.firstName }
 	const userTimezone = callContext?.userTimezone
 	const userTimezoneInferred = Boolean(userTimezone) && callContext?.userTimezoneInferred === 'true'
 	const recipient = resolveRecipient(agent, callContext)
+	const dataBlock = renderDataBlock(callData ?? agent.data)
 	return {
 		orchestratorConfig: {
 			persona,
-			systemPrompt: agent.systemPrompt.replaceAll('[AGENT_NAME]', persona.firstName),
+			systemPrompt: withCallData(agent.systemPrompt.replaceAll('[AGENT_NAME]', persona.firstName), dataBlock),
 			maxCompletionTokens: 384,
 			userFirstName: resolveFirstName(agent, callContext),
 			userTimezone,

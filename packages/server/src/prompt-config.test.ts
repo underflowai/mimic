@@ -11,8 +11,8 @@ import {
 const config: PromptConfig = { goal: 'Confirm a time', voice: 'female', tools: [], results: {} }
 
 describe('prompt configuration', () => {
-	it('uses the caller-facing cadence compiler revision', () => {
-		assert.equal(compilerRevision, 'voice-prompts-v4')
+	it('uses the shape-only data compiler revision', () => {
+		assert.equal(compilerRevision, 'voice-prompts-v5')
 	})
 
 	it('preserves declared kinds and parameter types; an undeclared kind is a read, as before kind existed', () => {
@@ -56,6 +56,37 @@ describe('prompt configuration', () => {
 		assert.equal(
 			hashPromptConfig('key', { ...config, data: { a: 1, b: 2 } }),
 			hashPromptConfig('key', { ...config, data: { b: 2, a: 1 } }),
+		)
+	})
+
+	it('compiles once per data shape: values are runtime context, not part of the cache key', () => {
+		const tuesday = { ...config, data: { appointmentTime: 'Tuesday 3 PM', provider: 'Dr. Patel' } }
+		const thursday = { ...config, data: { appointmentTime: 'Thursday 9 AM', provider: 'Dr. Lee' } }
+		assert.equal(hashPromptConfig('key', tuesday), hashPromptConfig('key', thursday))
+
+		// A different set of fields, or a field flipping between supplied and
+		// missing, changes what the agent has to do and recompiles.
+		assert.notEqual(hashPromptConfig('key', tuesday), hashPromptConfig('key', { ...config, data: { provider: 'x' } }))
+		assert.notEqual(
+			hashPromptConfig('key', tuesday),
+			hashPromptConfig('key', { ...config, data: { appointmentTime: null, provider: 'Dr. Lee' } }),
+		)
+		assert.notEqual(hashPromptConfig('key', tuesday), hashPromptConfig('key', config))
+	})
+
+	it('keeps valid options and field metadata in the key, but not the constrained value', () => {
+		const field = (value: string | null) => ({
+			...config,
+			data: { preference: { value, validOptions: ['morning', 'afternoon'], condition: 'Only when rescheduling' } },
+		})
+		assert.equal(hashPromptConfig('key', field('morning')), hashPromptConfig('key', field('afternoon')))
+		assert.notEqual(hashPromptConfig('key', field('morning')), hashPromptConfig('key', field(null)))
+		assert.notEqual(
+			hashPromptConfig('key', field('morning')),
+			hashPromptConfig('key', {
+				...config,
+				data: { preference: { value: 'morning', validOptions: ['morning', 'evening'] } },
+			}),
 		)
 	})
 })

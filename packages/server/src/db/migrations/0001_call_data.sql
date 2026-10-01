@@ -1,0 +1,1 @@
+ALTER TABLE "api_calls" ADD COLUMN "call_data" jsonb;

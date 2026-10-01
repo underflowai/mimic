@@ -84,6 +84,42 @@ describe('buildOrchestratorConfigFromAgent', () => {
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent({ agentName: '  ' }))
 		assert.equal(orchestratorConfig.persona?.firstName, 'Arlo')
 	})
+
+	it('injects the per-call data values into the system prompt, so the shared compiled prompt can refer to them by name', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent(), undefined, {
+			appointmentTime: 'Tuesday 3 PM',
+			provider: 'Dr. Patel',
+			preference: { value: null, validOptions: ['morning', 'afternoon'] },
+			visits: [{ date: 'May 2', reason: 'cleaning' }],
+		})
+		const prompt = orchestratorConfig.systemPrompt
+		assert.match(prompt, /^You are Casey\./)
+		assert.match(prompt, /<data>[\s\S]*appointmentTime: Tuesday 3 PM[\s\S]*<\/data>/)
+		assert.match(prompt, /provider: Dr\. Patel/)
+		assert.match(prompt, /preference: MISSING \(valid options: morning, afternoon\)/)
+		assert.match(prompt, /1\. date: May 2/)
+		assert.doesNotMatch(
+			orchestratorConfig.buildOpeningBlock(),
+			/<data>/,
+			'values are not repeated in the opening block',
+		)
+	})
+
+	it('leaves the prompt alone when a call has no data', () => {
+		assert.equal(
+			buildOrchestratorConfigFromAgent(agent(), undefined, null).orchestratorConfig.systemPrompt,
+			'You are Casey.',
+		)
+		assert.equal(
+			buildOrchestratorConfigFromAgent(agent(), undefined, {}).orchestratorConfig.systemPrompt,
+			'You are Casey.',
+		)
+	})
+
+	it('falls back to data stored on the agent config for direct (non-API) callers', () => {
+		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent({ data: { office: 'Bright Smiles' } }))
+		assert.match(orchestratorConfig.systemPrompt, /office: Bright Smiles/)
+	})
 })
 
 describe('compileGoal', () => {
@@ -105,8 +141,10 @@ describe('compileGoal', () => {
 			tools: [],
 			results: { booked: 'Whether a booking was confirmed.' },
 			data: {
+				appointmentTime: 'Tuesday 3 PM',
+				notes: null,
 				preference: {
-					value: null,
+					value: 'morning',
 					validOptions: ['morning', 'afternoon'],
 					required: false,
 					optional: true,
@@ -114,6 +152,7 @@ describe('compileGoal', () => {
 					condition: 'Collect only when rescheduling',
 					source: 'caller',
 				},
+				visits: [{ date: 'May 2', reason: 'cleaning' }],
 			},
 		}
 		const result = await compileGoal(input, client)
@@ -136,5 +175,17 @@ describe('compileGoal', () => {
 		assert.match(userInput, /Collect only when rescheduling/)
 		assert.match(userInput, /"source":"caller"/)
 		assert.match(userInput, /Requested post-call result fields \(desired extraction, not evidence/)
+
+		// The compiler sees which fields exist and which are supplied, never the
+		// values: one compiled prompt serves every call with this data shape.
+		assert.match(userInput, /appointmentTime: provided \(text\)/)
+		assert.match(userInput, /notes: missing/)
+		assert.match(userInput, /preference: provided \(valid options: morning, afternoon; metadata: /)
+		assert.match(
+			userInput,
+			/visits: list of items, each with:\n {2}date: provided \(text\)\n {2}reason: provided \(text\)/,
+		)
+		assert.doesNotMatch(userInput, /Tuesday 3 PM|May 2|cleaning/)
+		assert.match(userInput, /supplied per call at runtime in a <data> block/)
 	})
 })

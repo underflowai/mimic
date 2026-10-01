@@ -40,16 +40,15 @@ function agentRowToConfig(row: ApiAgentRow): AgentConfig {
 
 async function updateCall(callId: string, updates: Partial<ApiCallRow>) {
 	const db = getDb()
-	await db.update(apiCalls).set({ ...updates, updatedAt: new Date() }).where(eq(apiCalls.id, callId))
+	await db
+		.update(apiCalls)
+		.set({ ...updates, updatedAt: new Date() })
+		.where(eq(apiCalls.id, callId))
 }
 
 async function getCallStatus(callId: string): Promise<ApiCallRow['status'] | null> {
 	const db = getDb()
-	const [call] = await db
-		.select({ status: apiCalls.status })
-		.from(apiCalls)
-		.where(eq(apiCalls.id, callId))
-		.limit(1)
+	const [call] = await db.select({ status: apiCalls.status }).from(apiCalls).where(eq(apiCalls.id, callId)).limit(1)
 	return call?.status ?? null
 }
 
@@ -88,6 +87,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(
 			agentConfig,
 			call.callContext as Record<string, string> | undefined,
+			call.callData as Record<string, unknown> | null,
 		)
 
 		let orchestratorRef: Awaited<ReturnType<typeof createCallOrchestrator>> | null = null

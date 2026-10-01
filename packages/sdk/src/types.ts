@@ -153,6 +153,10 @@ export interface CallOptions {
 	 * Structured data the agent should confirm or collect on the call.
 	 * These become fields the agent walks through in conversation.
 	 *
+	 * Only the shape (field names, which fields are supplied, valid options)
+	 * affects the compiled prompt; the values are injected per call. Calling
+	 * fifty people with the same fields and different values compiles once.
+	 *
 	 * @example
 	 * ```typescript
 	 * data: {

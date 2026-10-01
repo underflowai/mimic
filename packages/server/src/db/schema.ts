@@ -17,7 +17,9 @@ export const callStatusEnum = pgEnum('call_status', ['pending', 'in_progress', '
 
 export const apiAgents = pgTable('api_agents', {
 	id: uuid('id').primaryKey().defaultRandom(),
-	apiKeyId: uuid('api_key_id').notNull().references(() => apiKeys.id),
+	apiKeyId: uuid('api_key_id')
+		.notNull()
+		.references(() => apiKeys.id),
 	name: text('name').notNull(),
 	goal: text('goal').notNull(),
 	voice: voiceEnum('voice').notNull().default('female'),
@@ -38,11 +40,17 @@ export const apiCalls = pgTable(
 	'api_calls',
 	{
 		id: uuid('id').primaryKey().defaultRandom(),
-		apiKeyId: uuid('api_key_id').notNull().references(() => apiKeys.id),
-		agentId: uuid('agent_id').notNull().references(() => apiAgents.id),
+		apiKeyId: uuid('api_key_id')
+			.notNull()
+			.references(() => apiKeys.id),
+		agentId: uuid('agent_id')
+			.notNull()
+			.references(() => apiAgents.id),
 		toPhone: text('to_phone').notNull(),
 		status: callStatusEnum('status').notNull().default('pending'),
 		callContext: jsonb('call_context').notNull().default({}),
+		/** Per-call `data` values; the compiled agent only knows their shape. */
+		callData: jsonb('call_data'),
 		transcript: jsonb('transcript'),
 		toolCalls: jsonb('tool_calls'),
 		result: jsonb('result'),

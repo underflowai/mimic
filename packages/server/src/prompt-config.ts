@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
+import { describeDataShape } from './call-data.js'
 import type { GoalToolDefinition } from './goal-compiler.js'
 
 // Bump when compiler instructions or the compiler's runtime input contract changes.
 // v3: recipient removed from the compiler input (runtime-injected instead).
 // v4: compact caller-facing compiler; runtime owns situational cadence.
-export const compilerRevision = 'voice-prompts-v4'
+// v5: data values masked from the compiler (shape only); runtime injects them per call.
+export const compilerRevision = 'voice-prompts-v5'
 
 export interface ApiToolInput {
 	name: string
@@ -41,7 +43,9 @@ function stableStringify(value: unknown): string {
  * Everything that shapes the compiled prompt. The recipient is deliberately
  * absent: the compiled prompt is recipient-agnostic and the runtime injects
  * caller details into every turn's context block, so one goal compiles once
- * no matter how many people it is used to call.
+ * no matter how many people it is used to call. Likewise only the *shape* of
+ * `data` is part of the key (see `describeDataShape`); the values are stored
+ * per call and injected at runtime.
  */
 export interface PromptConfig {
 	goal: string
@@ -62,7 +66,7 @@ export function hashPromptConfig(apiKeyId: string, config: PromptConfig, revisio
 		goal: config.goal,
 		voice: config.voice,
 		context: config.context ?? '',
-		data: config.data ?? null,
+		dataShape: describeDataShape(config.data),
 		tools: config.tools,
 		results: config.results,
 		aiDisclosure: config.aiDisclosure,

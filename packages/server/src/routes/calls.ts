@@ -192,6 +192,10 @@ calls.post('/', async (c) => {
 	if (body.recipient?.lastName) callContext.lastName = body.recipient.lastName
 	if (body.recipient?.email) callContext.email = body.recipient.email
 
+	// The compiled agent is shared by every call with the same data *shape*;
+	// the values belong to this call and are injected into its prompt at runtime.
+	const callData = body.data && Object.keys(body.data).length > 0 ? body.data : null
+
 	const [concurrencyRow] = await db
 		.select({ activeCalls: sql<number>`count(*)::int` })
 		.from(apiCalls)
@@ -212,6 +216,7 @@ calls.post('/', async (c) => {
 				agentId,
 				toPhone: body.to,
 				callContext,
+				callData,
 				idempotencyKey: body.idempotencyKey,
 			})
 			.onConflictDoNothing({ target: [apiCalls.apiKeyId, apiCalls.idempotencyKey] })
@@ -237,6 +242,7 @@ calls.post('/', async (c) => {
 				agentId,
 				toPhone: body.to,
 				callContext,
+				callData,
 				idempotencyKey: null,
 			})
 			.returning()

@@ -138,19 +138,19 @@ function buildArgsSchemaForTools(tools: ToolDefinition[]) {
 		}
 	}
 	if (duplicateKeys.size > 0) {
+		// Colliding keys share one nullable-string slot; the model picks by tool name.
+		// A permissive `additionalProperties` schema is rejected by strict mode, so stay strict.
 		log.warn(
 			{ duplicateKeys: Array.from(duplicateKeys.values()) },
-			'tool watcher arg names collide across tools; using permissive args schema',
+			'tool watcher arg names collide across tools; sharing arg slots',
 		)
-		return {
-			type: 'object' as const,
-			additionalProperties: { type: ['string', 'number', 'boolean', 'null'] as const },
-		}
 	}
+	// Strict mode requires every property to be listed in `required`; nullability is how the
+	// model leaves an arg unset.
 	return {
 		type: 'object' as const,
 		properties: allProps,
-		required: [],
+		required: Object.keys(allProps),
 		additionalProperties: false as const,
 	}
 }
@@ -239,6 +239,11 @@ export async function watchForToolAction(_client: unknown, input: ToolWatcherInp
 			return FALLBACK
 		}
 		const parsed = parsedResult.data
+		if (parsed.args) {
+			// Every arg is required-but-nullable in the strict schema; drop the nulls so unset
+			// args don't overwrite values collected on earlier turns.
+			parsed.args = Object.fromEntries(Object.entries(parsed.args).filter(([, v]) => v != null))
+		}
 		log.info(
 			{ decision: parsed.decision, tool: parsed.tool, directorNote: parsed.directorNote, reasoning: parsed.reasoning },
 			'watcher decision',

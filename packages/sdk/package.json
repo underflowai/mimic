@@ -19,8 +19,16 @@
 	"engines": {
 		"node": ">=22.0.0"
 	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/underflowai/mimic.git",
+		"directory": "packages/sdk"
+	},
+	"homepage": "https://github.com/underflowai/mimic#readme",
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json",
+		"prepack": "cp ../../README.md ./README.md",
+		"postpack": "rm -f ./README.md",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"test": "tsx --test 'src/**/*.test.ts'"
 	},

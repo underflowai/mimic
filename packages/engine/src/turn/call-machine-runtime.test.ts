@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { describe, it, mock } from 'node:test'
 
 import { createMockRuntimeDeps } from '#test/support/mock-runtime-deps.js'
+import type { TtsSynthesisListener } from '../audio/tts-speaker.js'
 import { createCallEventRecorder } from '../replay/event-log.js'
+import { ttsFrameBytes } from '../shared/audio-format.js'
 import { createCallMachineRuntime, type CallMachineRuntimeDeps } from './call-machine-runtime.js'
 import type { TurnOutcome } from './types.js'
 
@@ -407,5 +409,120 @@ describe('call-machine runtime: event log', () => {
 		}
 
 		engine.stop()
+	})
+})
+
+describe('call-machine runtime: acknowledgements while the agent speaks', () => {
+	/** A TTS whose audio only completes when the test says so, keeping the turn in `streaming`. */
+	function gatedTts() {
+		let release!: () => void
+		const audioComplete = new Promise<void>((resolve) => {
+			release = resolve
+		})
+		const tts = {
+			connect: mock.fn(async () => {}),
+			close: mock.fn(() => {}),
+			interrupt: mock.fn(),
+			preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => ({
+				pushTextDelta: () => {},
+				triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
+				audioComplete,
+			})),
+		} as unknown as CallMachineRuntimeDeps['tts']
+		return { tts, release }
+	}
+
+	async function resumeOverAcknowledgment(words: string) {
+		process.env.MIMIC_SUBSTANTIVE_SPEECH_MS = '20'
+		const eventRecorder = createCallEventRecorder()
+		const { tts, release } = gatedTts()
+		const { deps } = createMockRuntimeDeps({ overrides: { tts, eventRecorder } })
+		const engine = createCallMachineRuntime(deps)
+		const buildControlBlock = deps.buildControlBlock as unknown as ReturnType<typeof mock.fn>
+
+		const { turnId, outcomePromise } = startCallerTurnComplete(engine, 'what are your hours', 0.9)
+		await new Promise((r) => setTimeout(r, 30))
+		assert.equal(engine.actor.getSnapshot().value, 'inTurn')
+
+		// The caller acknowledges while the agent is mid-sentence; the agent keeps going.
+		engine.sendToCallMachine({ type: 'vad_speech_start' })
+		engine.sendToCallMachine({ type: 'caller_turn_start', transcript: words })
+		engine.sendToCallMachine({ type: 'caller_update', transcript: words, confidence: 0.5 })
+		await new Promise((r) => setTimeout(r, 60))
+		assert.equal(engine.actor.getSnapshot().context.resumedOverCallerTurn, true)
+		engine.sendToCallMachine({ type: 'vad_speech_end' })
+
+		return { engine, deps, buildControlBlock, eventRecorder, release, turnId, outcomePromise }
+	}
+
+	it('drops the end-of-turn of the acknowledgement while still speaking', async () => {
+		const { engine, deps, release, turnId, outcomePromise } = await resumeOverAcknowledgment('yeah')
+		try {
+			const stream = deps.director.streamDraftTokenized as unknown as ReturnType<typeof mock.fn>
+			const dropId = engine.actor.getSnapshot().context.nextTurnId
+			const dropped = waitForTurnOutcome(engine, dropId)
+			engine.sendToCallMachine({ type: 'caller_turn_complete', transcript: 'yeah', confidence: 0.8 })
+			const drop = await dropped
+			assert.equal(drop.kind, 'discarded')
+			if (drop.kind === 'discarded') assert.equal(drop.reason, 'backchannel_handled')
+			assert.ok(!stream.mock.calls.some((c) => c.arguments[0] === 'yeah'), 'the director never drafts a reply to it')
+
+			release()
+			const original = await outcomePromise
+			assert.equal(original.turnId, turnId)
+			assert.equal(original.kind, 'committed')
+			assert.equal(engine.actor.getSnapshot().context.acknowledgedWhileSpeaking, false, 'nothing left to hint')
+		} finally {
+			delete process.env.MIMIC_SUBSTANTIVE_SPEECH_MS
+			engine.stop()
+		}
+	})
+
+	it('hands a late acknowledgement end-of-turn to the director with the overlap hint, then clears it', async () => {
+		const { engine, buildControlBlock, release, outcomePromise } = await resumeOverAcknowledgment('okay')
+		try {
+			release()
+			const original = await outcomePromise
+			assert.equal(original.kind, 'committed')
+			assert.equal(engine.actor.getSnapshot().context.acknowledgedWhileSpeaking, true)
+
+			// Flux commits the acknowledgement after the agent has stopped: a real turn, hinted.
+			const { outcomePromise: hinted } = startCallerTurnComplete(engine, 'okay', 0.8)
+			await hinted
+			const call = buildControlBlock.mock.calls.find((c) => c.arguments[0] === 'okay')
+			assert.ok(call, 'the director sees the acknowledgement')
+			assert.equal((call.arguments[1] as { overlapAcknowledgment?: boolean }).overlapAcknowledgment, true)
+			assert.equal(engine.actor.getSnapshot().context.acknowledgedWhileSpeaking, false)
+
+			// The following ordinary turn carries no hint.
+			const { outcomePromise: plain } = startCallerTurnComplete(engine, 'and are you open sundays', 0.9)
+			await plain
+			const plainCall = buildControlBlock.mock.calls.find((c) => c.arguments[0] === 'and are you open sundays')
+			assert.equal((plainCall!.arguments[1] as { overlapAcknowledgment?: boolean }).overlapAcknowledgment, false)
+		} finally {
+			delete process.env.MIMIC_SUBSTANTIVE_SPEECH_MS
+			engine.stop()
+		}
+	})
+
+	it('a new caller turn start clears the hint without a director call', async () => {
+		const { engine, deps, release, outcomePromise } = await resumeOverAcknowledgment('right')
+		try {
+			release()
+			await outcomePromise
+			assert.equal(engine.actor.getSnapshot().context.acknowledgedWhileSpeaking, true)
+			const stream = deps.director.streamDraftTokenized as unknown as ReturnType<typeof mock.fn>
+			const before = stream.mock.callCount()
+
+			// No speculation on the acknowledgement; a fresh Flux turn resets the bookkeeping.
+			engine.sendToCallMachine({ type: 'caller_eager_turn', transcript: 'right', confidence: 0.8 })
+			await new Promise((r) => setTimeout(r, 10))
+			assert.equal(stream.mock.callCount(), before, 'no eager draft for the overlapping acknowledgement')
+			engine.sendToCallMachine({ type: 'caller_turn_start', transcript: 'so' })
+			assert.equal(engine.actor.getSnapshot().context.acknowledgedWhileSpeaking, false)
+		} finally {
+			delete process.env.MIMIC_SUBSTANTIVE_SPEECH_MS
+			engine.stop()
+		}
 	})
 })

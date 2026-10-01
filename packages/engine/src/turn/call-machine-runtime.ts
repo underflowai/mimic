@@ -59,7 +59,7 @@ import {
 	isAgentSpeaking as isAgentSpeakingSelector,
 	shouldSuppressBackchannel as shouldSuppressBackchannelSelector,
 } from './call-machine-selectors.js'
-import { callMachine, getTurnActorSnapshot } from './call-machine.js'
+import { callMachine } from './call-machine.js'
 import { runTurnActorLogic, turnActorMachine, type CommitActorDeps, type RunTurnActorDeps } from './turn-actor.js'
 import {
 	emptyPlaybackSnapshot,
@@ -82,6 +82,7 @@ function describeOutcomeForLog(outcome: TurnOutcome): Record<string, unknown> {
 				userTranscript: outcome.turn.userTranscript,
 				agentResponse: outcome.turn.agentResponse,
 				endCallRequested: outcome.turn.endCallRequested,
+				holdRequested: outcome.turn.holdRequested,
 			}
 		case 'interrupted':
 			return {
@@ -133,6 +134,8 @@ export interface CallMachineRuntimeDeps {
 			silenceClosing?: boolean
 			silenceFollowUpCount?: number
 			trailingOff?: boolean
+			/** The caller's words overlapped the agent's last line; the director may answer with nothing. */
+			overlapAcknowledgment?: boolean
 			toolResult?: { topic: string; result: string } | null
 			toolResults?: Array<{ topic: string; result: string }>
 			hasActiveTools?: boolean
@@ -418,9 +421,6 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	let lastEagerNormalized: string | null = null
 	let lastFinalNormalized: string | null = null
 
-	/** What the agent last said, for judging whether a short caller reply answers a question. */
-	let lastAgentResponse = ''
-
 	// ------------------------------------------------------------------
 	// Careful endpointing: after the agent asks for a value the caller reads
 	// out in pieces (email, phone, spelling), raise the end-of-turn bar for
@@ -646,10 +646,8 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 			},
 			recordBackchannelResume: (_, params) => {
 				log.info(
-					{ ...activeTurnLogFields(), callerTranscript: params.transcript, kind: params.kind },
-					params.kind === 'answer'
-						? 'caller answered mid-sentence, resuming (turn will be handled at end-of-turn)'
-						: 'caller backchanneled, resuming',
+					{ ...activeTurnLogFields(), callerTranscript: params.transcript },
+					'caller acknowledged mid-sentence, resuming (revocable)',
 				)
 				deps.metrics.recordBarge({
 					outcome: 'backchannel_resumed',
@@ -657,11 +655,21 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					elapsedMs: activeTurn?.tracker.snapshot().sentMs ?? 0,
 				})
 			},
+			recordResumeRevoked: (_, params) => {
+				log.info(
+					{ ...activeTurnLogFields(), resumedOver: params.resumedOver, callerTranscript: params.transcript },
+					'caller kept talking past the acknowledgement, yielding',
+				)
+				deps.eventRecorder?.record('resume_revoked', {
+					resumedOver: params.resumedOver,
+					transcript: params.transcript,
+				})
+			},
 			recordVadOnlyResume: () => {
 				log.info(activeTurnLogFields(), 'VAD active but transcriber heard no words, resuming (noise)')
 				deps.metrics.recordBarge({ outcome: 'timeout', wordCount: 0, elapsedMs: 0 })
 			},
-			markBackchannelResumed: () => actor.send({ type: 'backchannel_resumed' }),
+			markBackchannelResumed: (_, params) => actor.send({ type: 'backchannel_resumed', transcript: params.transcript }),
 			resetPauseState: () => {
 				// Pipeline/pause-gate are per-turn; nothing to reset here.
 			},
@@ -711,8 +719,6 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 				if (isDuplicateFinalTranscript(p.transcript)) return
 				lastEagerNormalized = null
 				restoreDefaultEndpointing()
-				const turnActorSnap = getTurnActorSnapshot(actor.getSnapshot())
-				const agentLastResponse = turnActorSnap?.context?.draftResponse || lastAgentResponse
 				// Flux only commits below the EOT threshold when its silence timeout
 				// fires; at very low confidence that means the caller trailed off.
 				const trailingOff = p.confidence < config.mimic.flux.lowConfidenceEot
@@ -723,7 +729,13 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					)
 				}
 				const sCtx = getToolState()
-				const controlBlock = deps.buildControlBlock(p.transcript, { ...sCtx, trailingOff })
+				// The caller's words overlapped the agent's last line and we kept
+				// talking; the director decides whether they need an answer.
+				const overlapAcknowledgment = context.acknowledgedWhileSpeaking
+				if (overlapAcknowledgment) {
+					log.info({ transcript: p.transcript }, 'end-of-turn overlapped the last response; director decides')
+				}
+				const controlBlock = deps.buildControlBlock(p.transcript, { ...sCtx, trailingOff, overlapAcknowledgment })
 				enqueue.sendTo('tool-pipeline', {
 					type: 'DETECT_INTENT',
 					transcript: p.transcript,
@@ -735,7 +747,6 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					transcript: p.transcript,
 					confidence: p.confidence,
 					controlBlock,
-					agentLastResponse,
 					trailingOff,
 				})
 			}),
@@ -779,6 +790,11 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					},
 					'silence watchdog firing director follow-up',
 				)
+				deps.eventRecorder?.record('silence_follow_up', {
+					count: p.silenceFollowUpCount,
+					closing: p.silenceClosing === true,
+					holdRequested: context.holdRequested,
+				})
 				enqueue.assign({
 					pendingStrategy: () => ({
 						strategy: { kind: 'fresh' as const, transcript: '', controlBlock },
@@ -827,11 +843,8 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	actor.on('turn_outcome', ({ outcome }) => {
 		deps.eventRecorder?.record('turn_outcome', describeOutcomeForLog(outcome))
 		releaseActiveTurn(outcome.turnId)
-		if (outcome.kind === 'committed') {
-			lastAgentResponse = outcome.turn.agentResponse
-			if (shouldUseCarefulEndpointing(outcome.turn.agentResponse)) useCarefulEndpointing()
-		} else if (outcome.kind === 'interrupted') {
-			lastAgentResponse = outcome.interruptContext.heardPortion || outcome.interruptContext.fullDraft
+		if (outcome.kind === 'committed' && shouldUseCarefulEndpointing(outcome.turn.agentResponse)) {
+			useCarefulEndpointing()
 		}
 	})
 

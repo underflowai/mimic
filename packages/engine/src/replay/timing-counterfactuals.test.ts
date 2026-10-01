@@ -6,8 +6,10 @@ import {
 	endpointingDelays,
 	extractBargeEpisodes,
 	extractCallerGaps,
+	extractOverlapSignatures,
 	extractUtteranceGroups,
 	histogramEotConfidence,
+	mergeOverlapSignatures,
 	normalizeTranscript,
 	summarizeSeries,
 	summarizeSoftPauses,
@@ -168,5 +170,73 @@ describe('timing counterfactuals: caller gaps and confidence', () => {
 			middle: 1,
 			high: 1,
 		})
+	})
+})
+
+describe('timing counterfactuals: overlap signatures', () => {
+	it('counts resumes, drops while speaking, and hinted overlap turns the director answered with nothing', () => {
+		const events = log([
+			[0, 'first_audio_sent'],
+			[1_000, 'caller_turn_start', { transcript: 'yeah' }],
+			[1_300, 'backchannel_resumed', { transcript: 'yeah' }],
+			// Still speaking: the acknowledgement's end-of-turn is dropped.
+			[2_000, 'turn_outcome', { kind: 'discarded', turnId: 2, reason: 'backchannel_handled' }, undefined],
+			[3_000, 'turn_outcome', { kind: 'committed', turnId: 1 }, undefined],
+			// Next line: another acknowledgement, but the agent finished first.
+			[3_100, 'first_audio_sent'],
+			[4_000, 'caller_turn_start', { transcript: 'okay' }],
+			[4_300, 'backchannel_resumed', { transcript: 'okay' }],
+			[5_000, 'turn_outcome', { kind: 'committed', turnId: 3 }, undefined],
+			[5_400, 'caller_turn_complete', { transcript: 'okay', confidence: 0.8 }],
+			[5_900, 'turn_outcome', { kind: 'discarded', turnId: 4, reason: 'empty_response' }, undefined],
+			// The caller then speaks again on their own: no answer was lost.
+			[7_000, 'vad_speech_start'],
+			[7_100, 'caller_turn_start', { transcript: 'so' }],
+		])
+		const sig = extractOverlapSignatures(events)
+		assert.equal(sig.resumes, 2)
+		assert.equal(sig.revoked, 0)
+		assert.equal(sig.talkedOver, 0)
+		assert.equal(sig.droppedAcknowledgments, 1)
+		assert.deepEqual(sig.overlapTurns, { total: 1, answeredWithNothing: 1, answered: 0 })
+		assert.equal(sig.lostAnswerCandidates, 0)
+		assert.deepEqual(sig.samples.dropped, ['yeah'])
+	})
+
+	it('flags a lost-answer candidate when quiet on the caller is followed by a silence follow-up', () => {
+		const events = log([
+			[0, 'first_audio_sent'],
+			[1_000, 'caller_turn_start', { transcript: 'yes' }],
+			[1_300, 'backchannel_resumed', { transcript: 'yes' }],
+			[2_000, 'turn_outcome', { kind: 'committed', turnId: 1 }, undefined],
+			[2_400, 'caller_turn_complete', { transcript: 'yes', confidence: 0.9 }],
+			[2_900, 'turn_outcome', { kind: 'discarded', turnId: 2, reason: 'empty_response' }, undefined],
+			[8_900, 'silence_follow_up', { count: 1, closing: false }, undefined],
+		])
+		const sig = extractOverlapSignatures(events)
+		assert.deepEqual(sig.overlapTurns, { total: 1, answeredWithNothing: 1, answered: 0 })
+		assert.equal(sig.lostAnswerCandidates, 1)
+		assert.deepEqual(sig.samples.lostAnswers, ['yes'])
+	})
+
+	it('separates revoked resumes from plain talk-overs', () => {
+		const revoked = log([
+			[0, 'first_audio_sent'],
+			[1_000, 'caller_turn_start', { transcript: 'yeah' }],
+			[1_300, 'backchannel_resumed', { transcript: 'yeah' }],
+			[1_700, 'resume_revoked', { resumedOver: 'yeah', transcript: 'yeah but hang on' }, undefined],
+			[1_750, 'turn_outcome', { kind: 'interrupted', turnId: 1, reason: 'caller_substantive_speech' }, undefined],
+		])
+		const talkedOver = log([
+			[0, 'first_audio_sent'],
+			[1_000, 'caller_turn_start', { transcript: 'right' }],
+			[1_300, 'backchannel_resumed', { transcript: 'right' }],
+			[2_200, 'turn_outcome', { kind: 'interrupted', turnId: 1, reason: 'caller_started_speaking' }, undefined],
+		])
+		const merged = mergeOverlapSignatures([extractOverlapSignatures(revoked), extractOverlapSignatures(talkedOver)])
+		assert.equal(merged.resumes, 2)
+		assert.equal(merged.revoked, 1)
+		assert.equal(merged.talkedOver, 1)
+		assert.deepEqual(merged.samples.revoked, ['yeah but hang on'])
 	})
 })

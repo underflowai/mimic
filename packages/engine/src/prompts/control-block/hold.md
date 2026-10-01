@@ -1,0 +1,1 @@
+If the caller asks you to wait, hold on, or give them a moment (to find something, check a calendar, speak to someone), reply with at most one short sentence agreeing to wait and end it with the tag {{holdTag}}; the tag is never spoken. Do not ask a question in that reply. Use the tag only for a request to wait, never for ordinary pauses in the conversation.

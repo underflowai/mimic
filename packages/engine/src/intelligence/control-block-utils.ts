@@ -10,7 +10,7 @@
 
 import { loadPrompt, loadPromptTemplate, type PromptTemplate } from '#engine/prompts.js'
 
-import { endCallTag } from '../audio/tts-sanitizer.js'
+import { endCallTag, holdTag } from '../audio/tts-sanitizer.js'
 import type { InterruptContext } from './types.js'
 
 export type { InterruptContext } from './types.js'
@@ -35,6 +35,10 @@ export interface ControlBlockPrompts {
 	timezoneGuess: string
 	/** Appended when the caller's turn was committed by the silence timeout at low end-of-turn confidence. */
 	trailingOff: string
+	/** Appended when the caller's words overlapped the agent's last line and the agent kept talking. */
+	overlapAcknowledgment: string
+	/** Always appended: how to signal that the caller asked us to wait (`[hold]`). */
+	hold: string
 }
 
 function text(name: string) {
@@ -62,6 +66,8 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 		text('tool-classification-failed'),
 		text('timezone-guess'),
 		text('trailing-off'),
+		text('overlap-acknowledgment'),
+		template('hold'),
 	]).then(
 		([
 			turnPriorities,
@@ -76,6 +82,8 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			toolClassificationFailed,
 			timezoneGuess,
 			trailingOff,
+			overlapAcknowledgment,
+			hold,
 		]) => ({
 			turnPriorities,
 			spokenCadence,
@@ -89,6 +97,8 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			toolClassificationFailed,
 			timezoneGuess,
 			trailingOff,
+			overlapAcknowledgment,
+			hold: hold({ holdTag }),
 		}),
 	)
 	return cachedPrompts

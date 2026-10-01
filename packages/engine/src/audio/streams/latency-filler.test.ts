@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import type { DirectorStreamEvent } from '../../shared/streaming-types.js'
-import { createLatencyFillerPicker, isQuestionLike, withLatencyFiller } from './latency-filler.js'
+import { createLatencyFillerPicker, withLatencyFiller } from './latency-filler.js'
 
 function deferred<T>() {
 	let resolve!: (value: T) => void
@@ -128,27 +128,26 @@ describe('withLatencyFiller', () => {
 })
 
 describe('latency filler picker', () => {
-	it('detects questions from punctuation or leading interrogatives', () => {
-		assert.ok(isQuestionLike('What time does it open?'))
-		assert.ok(isQuestionLike('can you do tuesday'))
-		assert.ok(isQuestionLike('Is parking included'))
-		assert.ok(!isQuestionLike('I need to move my appointment'))
-		assert.ok(!isQuestionLike(''))
-	})
-
-	it('uses thinking fillers for questions and acknowledgements for statements, never repeating', () => {
+	it('draws from one neutral pool regardless of what the caller said, never repeating', () => {
 		const pick = createLatencyFillerPicker(() => 0)
-		const question = pick({ transcript: 'how much is it' })
-		assert.ok(['Hmm.', 'Let me see.', 'One sec.'].includes(question))
-		const statement = pick({ transcript: 'my name is ola and i am calling about the invoice' })
-		assert.ok(['Mm-hmm.', 'Hmm.'].includes(statement))
+		const pool = ['Hmm.', 'Let me see.', 'One sec.']
+		assert.ok(pool.includes(pick({ transcript: 'how much is it' })))
+		assert.ok(pool.includes(pick({ transcript: 'my name is ola and i am calling about the invoice' })))
 
 		let previous = ''
 		for (let i = 0; i < 10; i++) {
 			const next = pick({ transcript: 'what about friday' })
 			assert.notEqual(next, previous)
-			assert.ok(next.length > 0)
+			assert.ok(pool.includes(next))
 			previous = next
+		}
+	})
+
+	it('never agrees with the caller: no filler is an acknowledgement', () => {
+		const pick = createLatencyFillerPicker()
+		for (let i = 0; i < 20; i++) {
+			const filler = pick({ transcript: 'cancel my account please' })
+			assert.ok(!/^(mm-hmm|yeah|okay|right|sure)/i.test(filler), filler)
 		}
 	})
 })

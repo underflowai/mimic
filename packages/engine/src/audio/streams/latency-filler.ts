@@ -3,8 +3,8 @@
  *
  * Wraps the director's token stream. If the model has not produced its
  * first token within `delayMs`, a short neutral filler ("Hmm.", "Let me
- * see.") is injected as a token so the caller hears the agent start
- * speaking instead of dead air. The model's own tokens then follow
+ * see.", "One sec.") is injected as a token so the caller hears the agent
+ * start speaking instead of dead air. The model's own tokens then follow
  * untouched; the filler simply becomes the first sentence of the turn.
  *
  * The wrapper also records when the model's real first token arrived so
@@ -129,28 +129,18 @@ export function withLatencyFiller(
 
 // ── Filler selection ─────────────────────────────────────────────────
 
-const questionFillers = ['Hmm.', 'Let me see.', 'One sec.'] as const
-const statementFillers = ['Mm-hmm.', 'Hmm.'] as const
-
-const questionStart =
-	/^(what|when|where|who|whom|whose|why|how|which|can|could|would|will|is|are|am|do|does|did|should|shall|may|might|have|has|had|was|were)\b/i
-
-/** True when the caller's turn reads as a question the agent now has to answer. */
-export function isQuestionLike(transcript: string): boolean {
-	const text = transcript.trim()
-	if (!text) return false
-	return /\?\s*$/.test(text) || questionStart.test(text)
-}
-
 /**
- * Creates a picker that varies the filler across turns and never repeats
- * the previous one. Questions get "thinking" fillers; statements get an
- * acknowledgement that commits the agent to nothing.
+ * One neutral pool. Every filler commits the agent to nothing: it neither
+ * agrees with a statement nor promises an answer to a question, so there
+ * is no need to guess which the caller just produced.
  */
+const fillers = ['Hmm.', 'Let me see.', 'One sec.'] as const
+
+/** Creates a picker that varies the filler across turns and never repeats the previous one. */
 export function createLatencyFillerPicker(random: () => number = Math.random): LatencyFillerOptions['pick'] {
 	let previous = ''
-	return ({ transcript }) => {
-		const pool = (isQuestionLike(transcript) ? questionFillers : statementFillers).filter((f) => f !== previous)
+	return () => {
+		const pool = fillers.filter((f) => f !== previous)
 		const choice = pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))] ?? ''
 		previous = choice
 		return choice

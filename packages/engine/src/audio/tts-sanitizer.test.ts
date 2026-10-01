@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 import {
 	endCallTag,
 	extractTtsControlTags,
+	holdTag,
 	sanitizeForTranscript,
 	sanitizeForTts,
 	speechTagTextCanStream,
@@ -136,9 +137,32 @@ describe('extractTtsControlTags', () => {
 	})
 
 	it('leaves other square-bracket tags alone', () => {
-		const { text, endCallRequested } = extractTtsControlTags('[laughter] That is funny.')
+		const { text, endCallRequested, holdRequested } = extractTtsControlTags('[laughter] That is funny.')
 		assert.equal(text, '[laughter] That is funny.')
 		assert.equal(endCallRequested, false)
+		assert.equal(holdRequested, false)
+	})
+
+	it('strips the hold tag and reports it', () => {
+		const { text, endCallRequested, holdRequested } = extractTtsControlTags(`Sure, take your time. ${holdTag}`)
+		assert.equal(text, 'Sure, take your time.')
+		assert.equal(holdRequested, true)
+		assert.equal(endCallRequested, false)
+	})
+
+	it('accepts variants of the hold tag', () => {
+		for (const variant of ['[HOLD]', '[hold on]', '[ hold_on ]', '[holding]']) {
+			const { text, holdRequested } = extractTtsControlTags(`Of course. ${variant}`)
+			assert.equal(text, 'Of course.', variant)
+			assert.equal(holdRequested, true, variant)
+		}
+	})
+
+	it('reports both tags independently', () => {
+		const { text, endCallRequested, holdRequested } = extractTtsControlTags(`Bye. ${holdTag} ${endCallTag}`)
+		assert.equal(text, 'Bye.')
+		assert.equal(endCallRequested, true)
+		assert.equal(holdRequested, true)
 	})
 
 	it('does not trim the ends of a delta, so streamed deltas still join correctly', () => {
@@ -149,5 +173,7 @@ describe('extractTtsControlTags', () => {
 	it('never reaches TTS or the transcript', () => {
 		assert.equal(sanitizeForTts(`Take care! ${endCallTag}`), 'Take care!')
 		assert.equal(sanitizeForTranscript(`Take care! ${endCallTag}`), 'Take care!')
+		assert.equal(sanitizeForTts(`One moment. ${holdTag}`), 'One moment.')
+		assert.equal(sanitizeForTranscript(`One moment. ${holdTag}`), 'One moment.')
 	})
 })

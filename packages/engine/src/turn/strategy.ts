@@ -62,7 +62,8 @@ export interface EagerSnapshot {
 export interface WorldSnapshot {
 	isClosing: boolean
 	inSoftPause: boolean
-	backchannelResumedPending: boolean
+	/** This end-of-turn is the acknowledgement the still-active turn already resumed over. */
+	resumedOverThisUtterance: boolean
 	lastTurnWasInterrupted: boolean
 	eagerSnapshot: EagerSnapshot | null
 }
@@ -88,7 +89,7 @@ export function selectStrategy(input: CallerCompleteInput, world: WorldSnapshot)
 		return { kind: 'defer', reason: 'soft_paused' } as const
 	}
 
-	if (world.backchannelResumedPending) {
+	if (world.resumedOverThisUtterance) {
 		return { kind: 'discard', reason: 'backchannel_handled' } as const
 	}
 

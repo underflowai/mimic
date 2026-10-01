@@ -19,7 +19,7 @@ import { config } from '#engine/config.js'
 import { eagerMachine, type EagerMachineActor } from '../intelligence/eager-machine.js'
 import { toolSupervisor, type ToolSupervisorActor } from '../intelligence/tools/supervisor-machine.js'
 import { monotonicClock, type Clock } from '../shared/clock.js'
-import { isBackchannelOnly, isHoldRequest } from './caller-speech.js'
+import { classifyCallerSpeech } from './caller-speech.js'
 import { selectStrategy, type EagerStateValue, type TurnStrategy } from './strategy.js'
 import {
 	turnActorMachine,
@@ -51,13 +51,6 @@ export type { InterruptReason } from './types.js'
 
 const { silenceIdleMs, maxSilenceFollowUps } = config.mimic.turnTaking
 
-/**
- * After a turn in which the caller backchanneled, their "mm-hmm" may still
- * be waiting on Flux's silence timeout; drop a backchannel-only end-of-turn
- * that lands within this window so the agent doesn't answer it.
- */
-const backchannelGraceMs = 4_000
-
 export interface PendingStrategy {
 	strategy: TurnActorExecutionStrategy
 	turnId: number
@@ -69,16 +62,25 @@ interface PendingTurnComplete {
 	transcript: string
 	confidence: number
 	controlBlock: string
-	agentLastResponse: string
 	trailingOff: boolean
 }
 
 export interface CallMachineContext {
-	/** The active turn resumed through a backchannel; its end-of-turn should not become a turn. */
-	backchannelResumedPending: boolean
-	/** Clock time until which a backchannel-only end-of-turn is still dropped after the turn ended. */
-	backchannelGraceUntil: number
-	/** The caller asked us to wait; the silence watchdog stretches to `holdIdleMs`. */
+	/**
+	 * The active turn resumed over the caller's current utterance ("mm-hmm",
+	 * "okay"). While the agent is still speaking, that utterance's end-of-turn
+	 * is the one we already talked through and is dropped; a new Flux turn
+	 * start clears it.
+	 */
+	resumedOverCallerTurn: boolean
+	/**
+	 * The agent finished while the caller's acknowledgement was still waiting
+	 * on its end-of-turn. That end-of-turn becomes a real turn, flagged so the
+	 * director knows the words overlapped its last line and may answer with
+	 * nothing.
+	 */
+	acknowledgedWhileSpeaking: boolean
+	/** The caller asked us to wait (director replied with `[hold]`); the silence watchdog stretches to `holdIdleMs`. */
 	holdRequested: boolean
 	/** The pending or active turn is a silence follow-up (used to detect "the director chose to stay quiet"). */
 	pendingSilenceFollowUp: boolean
@@ -111,7 +113,6 @@ type TurnCompleteEvent = {
 	transcript: string
 	confidence: number
 	controlBlock: string
-	agentLastResponse: string
 	/** The transcriber committed this turn on silence at low confidence; skip eager reuse. */
 	trailingOff?: boolean
 }
@@ -143,7 +144,7 @@ type CallEvent =
 	| { type: 'reset_idle' }
 	| { type: 'restart_turn_actor' }
 	| { type: 'cancel_eager_from_turn' }
-	| { type: 'backchannel_resumed' }
+	| { type: 'backchannel_resumed'; transcript: string }
 	| { type: 'tool_intent_resolved'; turnId: number; needsTool: boolean }
 	| { type: 'tool_awaiting_args'; turnId: number; taskId: number; toolName: string; missingArgs: string[] }
 
@@ -290,20 +291,22 @@ function buildPendingTurnComplete(event: TurnCompleteEvent): PendingTurnComplete
 		transcript: event.transcript,
 		confidence: event.confidence,
 		controlBlock: event.controlBlock,
-		agentLastResponse: event.agentLastResponse,
 		trailingOff: event.trailingOff === true,
 	}
 }
 
 /**
- * The caller's end-of-turn is just the backchannel we already talked through
- * ("mm-hmm", "right"): either the active turn resumed on it, or the turn
- * ended moments ago and Flux's silence timeout only now committed it.
+ * The caller's end-of-turn belongs to the utterance the active turn already
+ * resumed over, and the agent is still speaking. Identity comes from Flux's
+ * turn structure (no new turn start since the resume), not from the words;
+ * the classifier is only consulted in the conservative direction, so a final
+ * that grew into real speech is never dropped. Once the agent has stopped
+ * talking nothing is dropped: the end-of-turn becomes a turn with an overlap
+ * hint for the director.
  */
 function isHandledBackchannel(context: CallMachineContext, event: TurnCompleteEvent) {
-	const withinGrace = context.backchannelResumedPending || context.clock.now() < context.backchannelGraceUntil
-	if (!withinGrace) return false
-	return isBackchannelOnly(event.transcript, { agentDraft: event.agentLastResponse })
+	if (!context.resumedOverCallerTurn) return false
+	return classifyCallerSpeech(event.transcript) !== 'speech'
 }
 
 type CallEnqueue = Parameters<Parameters<(typeof callMachineSetup)['enqueueActions']>[0]>[0]['enqueue']
@@ -359,7 +362,7 @@ function buildWorldSnapshot(
 	return {
 		isClosing: context.isClosing,
 		inSoftPause,
-		backchannelResumedPending: isHandledBackchannel(context, event),
+		resumedOverThisUtterance: isHandledBackchannel(context, event),
 		lastTurnWasInterrupted: context.lastTurnWasInterrupted,
 		eagerSnapshot: eager,
 	}
@@ -450,6 +453,11 @@ function applyDispatch(enqueue: CallEnqueue, dispatch: DispatchResult) {
 function applyEmitDispatch(enqueue: CallEnqueue, dispatch: Extract<DispatchResult, { kind: 'emit' }>) {
 	if (dispatch.commitUserOnly) enqueue({ type: 'commitUserOnly', params: { userTranscript: dispatch.commitUserOnly } })
 	emitOutcome(enqueue, dispatch.outcome)
+	// The resumed-over utterance's end-of-turn has now been handled: nothing
+	// is left to hint when the active turn finishes.
+	if (dispatch.outcome.kind === 'discarded' && dispatch.outcome.reason === 'backchannel_handled') {
+		enqueue.assign({ resumedOverCallerTurn: false })
+	}
 	if (dispatch.interruptActive) enqueue.sendTo('turnActor', { type: 'interrupt', reason: dispatch.interruptActive })
 }
 
@@ -475,12 +483,8 @@ function applyStartDispatch(enqueue: CallEnqueue, dispatch: Extract<DispatchResu
 	enqueue.assign({ pendingSilenceClosing: false, pendingSilenceFollowUp: false })
 	enqueue.assign({ pendingStrategy: () => dispatch.pending })
 	enqueue.assign({ silenceFollowUpCount: 0 })
-	// A real caller turn consumes any lingering backchannel grace and sets the
-	// hold flag from what they said ("hang on, let me grab my calendar").
-	enqueue.assign({
-		backchannelGraceUntil: 0,
-		holdRequested: isHoldRequest(dispatch.pending.userTranscript),
-	})
+	// A real caller turn lifts any hold and consumes the overlap flag.
+	enqueue.assign({ holdRequested: false, acknowledgedWhileSpeaking: false })
 	enqueue.raise({ type: 'reset_idle' })
 }
 
@@ -495,18 +499,22 @@ function applyInterruptDispatch(enqueue: CallEnqueue, dispatch: Extract<Dispatch
 
 function updateAfterTurnDone(context: CallMachineContext, outcome: TurnOutcome) {
 	// A silence follow-up the director answered with nothing means it judged
-	// the caller asked us to wait; give them the hold budget.
+	// the caller asked us to wait; give them the hold budget. So does a reply
+	// the director ended with `[hold]`.
 	const stayedQuietOnFollowUp =
 		context.pendingSilenceFollowUp && outcome.kind === 'discarded' && outcome.reason === 'empty_response'
+	const holdTagged = outcome.kind === 'committed' && outcome.turn.holdRequested
 	return {
 		pendingStrategy: null,
 		pendingSilenceClosing: false,
 		pendingSilenceFollowUp: false,
-		backchannelResumedPending: false,
-		backchannelGraceUntil: context.backchannelResumedPending
-			? context.clock.now() + backchannelGraceMs
-			: context.backchannelGraceUntil,
-		holdRequested: context.holdRequested || stayedQuietOnFollowUp,
+		resumedOverCallerTurn: false,
+		// The agent finished its line over the acknowledgement before its
+		// end-of-turn arrived: that end-of-turn is a real turn, with the overlap
+		// hint. An interrupted turn already carries its own interrupt context.
+		acknowledgedWhileSpeaking:
+			(context.resumedOverCallerTurn && outcome.kind === 'committed') || context.acknowledgedWhileSpeaking,
+		holdRequested: context.holdRequested || stayedQuietOnFollowUp || holdTagged,
 		lastTurnWasInterrupted: outcome.kind === 'interrupted',
 	}
 }
@@ -528,7 +536,6 @@ function raisePendingTurnComplete(enqueue: CallEnqueue, pending: PendingTurnComp
 		transcript: pending.transcript,
 		confidence: pending.confidence,
 		controlBlock: pending.controlBlock,
-		agentLastResponse: pending.agentLastResponse,
 		trailingOff: pending.trailingOff,
 	})
 }
@@ -562,7 +569,6 @@ function turnCompleteFromInterrupted(event: CallEvent | CallInternalEvent) {
 		transcript: '',
 		confidence: 0,
 		controlBlock: '',
-		agentLastResponse: '',
 	}
 }
 
@@ -580,10 +586,12 @@ const callerUpdateHandler = {
 	actions: [callMachineSetup.assign({ callerActive: true, silenceFollowUpCount: 0 })],
 }
 
+// No speculation on an acknowledgement that overlapped the agent's last line:
+// its final goes through a fresh generation that carries the overlap hint.
 const callerEagerTurnHandler = {
 	target: 'idle' as const,
 	reenter: true,
-	guard: ({ context }: { context: CallMachineContext }) => !context.isClosing,
+	guard: ({ context }: { context: CallMachineContext }) => !context.isClosing && !context.acknowledgedWhileSpeaking,
 	actions: [
 		callMachineSetup.assign({ callerActive: true }),
 		{
@@ -602,10 +610,20 @@ const callerTurnResumedHandler = {
 	actions: ['markEagerTurnResumed' as const, callMachineSetup.assign({ callerActive: true, silenceFollowUpCount: 0 })],
 }
 
+// A new Flux turn: whatever acknowledgement we resumed over has had its
+// end-of-turn (or never produced one), so the overlap bookkeeping resets.
 const callerTurnStartHandler = {
 	target: 'idle' as const,
 	reenter: true,
-	actions: ['cancelEager' as const, callMachineSetup.assign({ callerActive: true, silenceFollowUpCount: 0 })],
+	actions: [
+		'cancelEager' as const,
+		callMachineSetup.assign({
+			callerActive: true,
+			silenceFollowUpCount: 0,
+			resumedOverCallerTurn: false,
+			acknowledgedWhileSpeaking: false,
+		}),
+	],
 }
 
 const callerTurnCompleteAction = {
@@ -625,8 +643,8 @@ export const callMachine = callMachineSetup.createMachine({
 	],
 	exit: [stopChild('eager-pipeline'), stopChild('tool-pipeline')],
 	context: ({ input }): CallMachineContext => ({
-		backchannelResumedPending: false,
-		backchannelGraceUntil: 0,
+		resumedOverCallerTurn: false,
+		acknowledgedWhileSpeaking: false,
 		holdRequested: false,
 		pendingSilenceFollowUp: false,
 		callerActive: false,
@@ -649,7 +667,7 @@ export const callMachine = callMachineSetup.createMachine({
 		allocate_turn_id: { actions: callMachineSetup.assign({ nextTurnId: ({ context }) => context.nextTurnId + 1 }) },
 		close: { actions: ['cancelEager', callMachineSetup.assign({ isClosing: true })] },
 		cancel_eager_from_turn: { actions: 'cancelEager' },
-		backchannel_resumed: { actions: callMachineSetup.assign({ backchannelResumedPending: true }) },
+		backchannel_resumed: { actions: callMachineSetup.assign({ resumedOverCallerTurn: true }) },
 		eager_promotion_metrics: {
 			actions: {
 				type: 'onEagerPromotionMetrics',
@@ -873,7 +891,7 @@ export const callMachine = callMachineSetup.createMachine({
 				},
 				caller_turn_start: {
 					actions: [
-						callMachineSetup.assign({ callerActive: true }),
+						callMachineSetup.assign({ callerActive: true, resumedOverCallerTurn: false }),
 						sendTo('turnActor', ({ event }) => ({
 							type: 'caller_turn_start',
 							transcript: event.type === 'caller_turn_start' ? event.transcript : undefined,

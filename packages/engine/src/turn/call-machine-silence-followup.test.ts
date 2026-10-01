@@ -342,10 +342,21 @@ describe('silence watchdog', () => {
 		engine.stop()
 	})
 
-	it('a caller hold request stretches the silence window to holdIdleMs', async () => {
+	it('a director reply ending in [hold] stretches the silence window to holdIdleMs', async () => {
 		const holder: { current?: ReturnType<typeof createCallMachineRuntime> } = {}
 		const buildControlBlock = buildControlBlockMock()
-		const engine = createCallMachineRuntime(createDeps({ buildControlBlock, onPlaybackComplete: autoPlayback(holder) }))
+		// The director, not a word list, decides the caller asked us to wait.
+		const streamDraftTokenized = mock.fn((t: string) => ({
+			userTranscript: t,
+			events: (async function* () {
+				const reply = t.includes('hang on') ? 'Sure, take your time. [hold]' : 'Still with me?'
+				yield { type: 'token' as const, value: reply }
+				return reply
+			})(),
+		}))
+		const deps = createDeps({ buildControlBlock, onPlaybackComplete: autoPlayback(holder) })
+		;(deps.director as unknown as { streamDraftTokenized: unknown }).streamDraftTokenized = streamDraftTokenized
+		const engine = createCallMachineRuntime(deps)
 		holder.current = engine
 
 		const openingId = engine.actor.getSnapshot().context.nextTurnId
@@ -360,7 +371,12 @@ describe('silence watchdog', () => {
 			transcript: 'hang on, let me grab my calendar',
 			confidence: 0.95,
 		})
-		await holdTurn
+		const holdOutcome = await holdTurn
+		assert.equal(holdOutcome.kind, 'committed')
+		if (holdOutcome.kind === 'committed') {
+			assert.equal(holdOutcome.turn.holdRequested, true)
+			assert.equal(holdOutcome.turn.agentResponse.includes('[hold]'), false, 'tag is never spoken or stored')
+		}
 		assert.equal(engine.actor.getSnapshot().context.holdRequested, true)
 
 		await advanceAndFlush(30_000)

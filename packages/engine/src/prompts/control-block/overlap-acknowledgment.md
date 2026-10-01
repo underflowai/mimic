@@ -1,0 +1,1 @@
+The caller said this while you were finishing your last line, and you kept talking. If it is only an acknowledgement of what you were saying ("yeah", "okay", "right", "mm-hmm"), return no spoken text and leave the floor to them. If it answers something you asked, or carries anything new, respond to it normally.

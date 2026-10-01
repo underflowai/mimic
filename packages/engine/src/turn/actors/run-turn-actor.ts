@@ -50,6 +50,7 @@ export interface StreamResult {
 	ttcMs: number | null
 	audioSent: boolean
 	endCallRequested: boolean
+	holdRequested: boolean
 }
 
 export interface ActiveTurnHandle {
@@ -94,7 +95,7 @@ export interface RunTurnActorInput {
 }
 
 export type RunTurnActorEvent =
-	| { type: 'audio_started'; agentResponse: string; endCallRequested?: boolean }
+	| { type: 'audio_started'; agentResponse: string; endCallRequested?: boolean; holdRequested?: boolean }
 	| { type: 'first_audio_sent'; at: number }
 	| { type: 'stream_done'; result: StreamResult }
 	| { type: 'stream_empty'; userTranscript: string }
@@ -183,14 +184,24 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 	// it is when the LLM stream has fully drained (before TTS playout).
 	if (initialResponse) {
 		agentResponseEmitted = true
-		sendBack({ type: 'audio_started', agentResponse: initialResponse, endCallRequested: handle.endCallRequested() })
+		sendBack({
+			type: 'audio_started',
+			agentResponse: initialResponse,
+			endCallRequested: handle.endCallRequested(),
+			holdRequested: handle.holdRequested(),
+		})
 	} else {
 		handle.agentResponseReady
 			.then((response) => {
 				if (agentResponseEmitted || canceled) return
 				if (!response) return
 				agentResponseEmitted = true
-				sendBack({ type: 'audio_started', agentResponse: response, endCallRequested: handle.endCallRequested() })
+				sendBack({
+					type: 'audio_started',
+					agentResponse: response,
+					endCallRequested: handle.endCallRequested(),
+					holdRequested: handle.holdRequested(),
+				})
 			})
 			.catch(() => {
 				/* pipeline failure handled separately */
@@ -206,6 +217,7 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 					type: 'audio_started',
 					agentResponse: result.agentResponse,
 					endCallRequested: result.endCallRequested,
+					holdRequested: result.holdRequested,
 				})
 			}
 			if (canceled) return
@@ -224,6 +236,7 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 					ttcMs: result.ttcMs,
 					audioSent: result.audioSent,
 					endCallRequested: result.endCallRequested,
+					holdRequested: result.holdRequested,
 				},
 			})
 		})

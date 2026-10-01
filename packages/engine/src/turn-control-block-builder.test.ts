@@ -196,6 +196,34 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.doesNotMatch(builder.build('', { interruptContext: null }, { trailingOff: true }), /mid-thought/)
 	})
 
+	it('appends the overlap hint only for finals that overlapped the agent and carry words', async () => {
+		const builder = await createTurnControlBlockBuilder({
+			getUserFirstName: () => 'Ola',
+			getRecipient: () => undefined,
+			getUserTimezone: () => undefined,
+			buildTurnControlBlock: () => '',
+		})
+		assert.match(
+			builder.build('yeah', { interruptContext: null }, { overlapAcknowledgment: true }),
+			/while you were finishing your last line/,
+		)
+		assert.doesNotMatch(builder.build('yeah', { interruptContext: null }), /while you were finishing/)
+		assert.doesNotMatch(
+			builder.build('', { interruptContext: null }, { overlapAcknowledgment: true }),
+			/while you were finishing/,
+		)
+	})
+
+	it('always tells the director how to signal a hold', async () => {
+		const builder = await createTurnControlBlockBuilder({
+			getUserFirstName: () => 'Ola',
+			getRecipient: () => undefined,
+			getUserTimezone: () => undefined,
+			buildTurnControlBlock: () => '',
+		})
+		assert.match(builder.build('hang on a sec', { interruptContext: null }), /end it with the tag \[hold\]/)
+	})
+
 	it('appends the end-call tag guidance only when enabled', async () => {
 		const deps = {
 			getUserFirstName: () => 'Ola',

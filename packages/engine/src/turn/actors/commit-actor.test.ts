@@ -38,6 +38,7 @@ function makeInput(deps: CommitActorDeps, overrides?: Partial<CommitActorInput>)
 		generationToAudioCompleteMs: 50,
 		firstAudioAt: 200,
 		endCallRequested: false,
+		holdRequested: false,
 		ttsFirstByteMs: null,
 		llmFirstTokenMs: null,
 		llmCompleteMs: null,

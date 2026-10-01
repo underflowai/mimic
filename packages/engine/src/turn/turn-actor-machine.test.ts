@@ -114,6 +114,7 @@ function defaultStreamResult(): StreamResult {
 		ttcMs: 120,
 		audioSent: true,
 		endCallRequested: false,
+		holdRequested: false,
 	}
 }
 
@@ -123,6 +124,7 @@ function defaultCommittedTurn(): CommittedTurn {
 		userTranscript: 'hello',
 		agentResponse: 'Sure, I can help with that.',
 		endCallRequested: false,
+		holdRequested: false,
 	}
 }
 
@@ -214,13 +216,16 @@ function createTestMachine(pipeline: ReturnType<typeof createControllablePipelin
 				actionCalls.push('recordShortResumedBarge')
 			},
 			recordBackchannelResume: (_, params) => {
-				actionCalls.push(`recordBackchannelResume:${params.kind}:${params.transcript}`)
+				actionCalls.push(`recordBackchannelResume:${params.transcript}`)
+			},
+			recordResumeRevoked: (_, params) => {
+				actionCalls.push(`recordResumeRevoked:${params.resumedOver}:${params.transcript}`)
 			},
 			recordVadOnlyResume: () => {
 				actionCalls.push('recordVadOnlyResume')
 			},
-			markBackchannelResumed: () => {
-				actionCalls.push('markBackchannelResumed')
+			markBackchannelResumed: (_, params) => {
+				actionCalls.push(`markBackchannelResumed:${params.transcript}`)
 			},
 			resetPauseState: () => {
 				actionCalls.push('resetPauseState')
@@ -430,7 +435,7 @@ describe('TurnActor machine', () => {
 			return started
 		}
 
-		it('resumes on a backchannel and flags its end-of-turn for discard', async () => {
+		it('resumes on a backchannel and tells the call machine what it resumed over', async () => {
 			const { actor, actionCalls } = await pauseWhileStreaming()
 
 			actor.send({ type: 'caller_turn_start', transcript: 'Mm-hmm.' })
@@ -438,19 +443,76 @@ describe('TurnActor machine', () => {
 
 			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
 			assert.ok(actionCalls.includes('flushPausedBuffer'))
-			assert.ok(actionCalls.includes('recordBackchannelResume:backchannel:Mm-hmm.'))
-			assert.ok(actionCalls.includes('markBackchannelResumed'))
+			assert.ok(actionCalls.includes('recordBackchannelResume:Mm-hmm.'))
+			assert.ok(actionCalls.includes('markBackchannelResumed:Mm-hmm.'))
 			assert.ok(!actionCalls.includes('onSubstantiveSpeechTimeout'))
 			assert.equal(actor.getSnapshot().context.pauseTranscript, '')
+			assert.equal(actor.getSnapshot().context.resumedOverTranscript, 'Mm-hmm.')
 		})
 
-		it('resumes on a short answer to the agent question without flagging a discard', async () => {
+		it('resumes over a short affirmative even when the agent asked a question', async () => {
 			const { actor, actionCalls } = await pauseWhileStreaming('Does Tuesday at three work for you?')
 
 			actor.send({ type: 'caller_turn_start', transcript: 'yeah' })
 			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
-			assert.ok(actionCalls.includes('recordBackchannelResume:answer:yeah'))
-			assert.ok(!actionCalls.includes('markBackchannelResumed'))
+			assert.ok(actionCalls.includes('recordBackchannelResume:yeah'))
+			assert.ok(actionCalls.includes('markBackchannelResumed:yeah'))
+		})
+
+		it('revokes the resume when the same utterance grows into speech while audio flows', async () => {
+			const { actor, actionCalls } = await pauseWhileStreaming()
+
+			actor.send({ type: 'caller_turn_start', transcript: 'yeah' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+			assert.ok(actionCalls.includes('markBackchannelResumed:yeah'))
+
+			// Interims that are still an acknowledgement change nothing.
+			actor.send({ type: 'caller_update', transcript: 'yeah yeah' })
+			assert.ok(matchesState(actor.getSnapshot(), 'executing.streaming.flowing'))
+
+			actor.send({ type: 'caller_update', transcript: 'yeah but actually can we do thursday' })
+			const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
+			const output = final.output as TurnOutcome
+			assert.equal(output.kind, 'interrupted')
+			if (output.kind === 'interrupted') assert.equal(output.reason, 'caller_substantive_speech')
+			assert.ok(actionCalls.includes('recordResumeRevoked:yeah:yeah but actually can we do thursday'))
+		})
+
+		it('revokes on a transcriber turn-resume carrying the grown utterance', async () => {
+			const { actor } = await pauseWhileStreaming()
+
+			actor.send({ type: 'caller_turn_start', transcript: 'okay' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+
+			actor.send({ type: 'caller_turn_resumed', transcript: 'okay so what about friday' })
+			const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
+			assert.equal((final.output as TurnOutcome).kind, 'interrupted')
+		})
+
+		it('ignores interims once a new soft pause has started (the pause decides afresh)', async () => {
+			const { actor } = await pauseWhileStreaming()
+
+			actor.send({ type: 'caller_turn_start', transcript: 'right' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+
+			actor.send({ type: 'caller_turn_start', transcript: 'so' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.softPaused.probing'), waitOpts)
+			assert.equal(actor.getSnapshot().context.resumedOverTranscript, '')
+		})
+
+		it('revokes the resume while the tail of the audio is still playing', async () => {
+			const { actor } = await pauseWhileStreaming()
+
+			actor.send({ type: 'caller_turn_start', transcript: 'mm-hmm' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+			actor.send({ type: 'stream_done', result: defaultStreamResult() })
+			await waitFor(actor, (s) => matchesState(s, 'awaitingPlayback'), waitOpts)
+
+			actor.send({ type: 'caller_update', transcript: 'mm-hmm wait that is the wrong day' })
+			const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
+			const output = final.output as TurnOutcome
+			assert.equal(output.kind, 'interrupted')
+			if (output.kind === 'interrupted') assert.equal(output.reason, 'caller_substantive_speech')
 		})
 
 		it('interrupts when interim transcripts show real words', async () => {
@@ -503,7 +565,7 @@ describe('TurnActor machine', () => {
 			assert.ok(matchesState(actor.getSnapshot(), 'executing.softPaused'))
 
 			await waitFor(actor, (s) => matchesState(s, 'awaitingPlayback'), waitOpts)
-			assert.ok(actionCalls.includes('recordBackchannelResume:backchannel:right'))
+			assert.ok(actionCalls.includes('recordBackchannelResume:right'))
 			assert.ok(actionCalls.includes('onPlaybackComplete'))
 		})
 	})

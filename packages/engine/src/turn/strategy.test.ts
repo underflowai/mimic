@@ -9,7 +9,7 @@ function makeWorld(overrides?: Partial<WorldSnapshot>): WorldSnapshot {
 	return {
 		isClosing: false,
 		inSoftPause: false,
-		backchannelResumedPending: false,
+		resumedOverThisUtterance: false,
 		lastTurnWasInterrupted: false,
 		eagerSnapshot: null,
 		...overrides,
@@ -77,8 +77,8 @@ describe('selectStrategy — discard / defer / backchannel', () => {
 		if (result.kind === 'defer') assert.equal(result.reason, 'soft_paused')
 	})
 
-	it('backchannelResumedPending → discard(backchannel_handled)', () => {
-		const result = selectStrategy(input, makeWorld({ backchannelResumedPending: true }))
+	it('resumedOverThisUtterance → discard(backchannel_handled)', () => {
+		const result = selectStrategy(input, makeWorld({ resumedOverThisUtterance: true }))
 		assert.equal(result.kind, 'discard')
 		if (result.kind === 'discard') assert.equal(result.reason, 'backchannel_handled')
 	})

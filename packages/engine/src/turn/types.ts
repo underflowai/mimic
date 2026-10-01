@@ -31,6 +31,8 @@ export interface CommittedTurn {
 	userTranscript: string
 	agentResponse: string
 	endCallRequested: boolean
+	/** The director ended its reply with `[hold]`: the caller asked us to wait. */
+	holdRequested: boolean
 }
 
 export type TurnOutcome =

@@ -2,28 +2,26 @@
  * Caller speech classification for turn-taking.
  *
  * While the agent is talking, VAD alone cannot tell "mm-hmm" from "wait,
- * stop". The transcriber can, a few hundred milliseconds later. These pure
- * helpers turn a (possibly partial) caller transcript into a decision the
- * turn actor can act on:
+ * stop". The transcriber can, a few hundred milliseconds later. This is the
+ * one lexical decision in the engine, and it only ever decides whether the
+ * agent may *keep talking* for now:
  *
  *   - `none`        no words yet: VAD may be hearing noise or a breath
- *   - `backchannel` listening noises ("mm-hmm", "right", "okay"); the agent
- *                   should keep going and the eventual end-of-turn for these
- *                   words should not become a turn of its own
- *   - `answer`      the same short words, but the agent had just asked a
- *                   question, so they are a reply: keep going, and let the
- *                   end-of-turn be handled as a real turn
- *   - `speech`      anything else: the caller wants the floor
+ *   - `backchannel` listening noises or short acknowledgements ("mm-hmm",
+ *                   "right", "okay"); the agent keeps going
+ *   - `speech`      anything else, including any utterance ending in a
+ *                   question mark: the caller wants the floor
  *
- * Also hosts the hold-request detector used by the silence watchdog.
+ * The decision is provisional. The turn actor re-runs it on every interim
+ * transcript after resuming, so "yeah… but actually" yields as soon as the
+ * words past "yeah" arrive, and the call machine never drops a caller's
+ * end-of-turn on these words once the agent has stopped talking (the
+ * director sees it with an overlap hint instead). Anything not recognised
+ * is `speech`: the list can only ever make the agent yield later, never
+ * silence the caller.
  */
 
-export type CallerSpeechKind = 'none' | 'backchannel' | 'answer' | 'speech'
-
-export interface CallerSpeechContext {
-	/** The agent's current (or just finished) line, used to spot answers to a question. */
-	agentDraft?: string
-}
+export type CallerSpeechKind = 'none' | 'backchannel' | 'speech'
 
 const backchannelWords = new Set([
 	'mm',
@@ -93,33 +91,6 @@ const backchannelPhrases = new Set([
 	'oh interesting',
 ])
 
-/** Words that read as a reply when the agent has just asked a question. */
-const affirmativeWords = new Set([
-	'yeah',
-	'yep',
-	'yup',
-	'yes',
-	'ya',
-	'sure',
-	'okay',
-	'ok',
-	'kay',
-	'alright',
-	'right',
-	'exactly',
-	'totally',
-	'true',
-	'correct',
-	'cool',
-	'great',
-	'good',
-	'nice',
-	'perfect',
-	'fine',
-	'absolutely',
-	'definitely',
-])
-
 /** Standalone filler words that never form a backchannel by themselves. */
 const neverAloneWords = new Set(['i', 'see', 'got', 'it', 'makes', 'sense'])
 
@@ -134,44 +105,25 @@ export function normalizeSpeech(transcript: string): string {
 		.trim()
 }
 
-export function endsWithQuestion(text: string): boolean {
-	return /\?\s*$/.test(text.trim())
+/** "Right?" / "Okay?" / "Hello?": the caller is asking, not listening. */
+function asksForTheFloor(transcript: string): boolean {
+	return /\?\s*$/.test(transcript.trim())
 }
 
-export function classifyCallerSpeech(transcript: string, context: CallerSpeechContext = {}): CallerSpeechKind {
+export function classifyCallerSpeech(transcript: string): CallerSpeechKind {
 	const normalized = normalizeSpeech(transcript)
 	if (!normalized) return 'none'
+	if (asksForTheFloor(transcript)) return 'speech'
 
 	const words = normalized.split(' ')
 	if (words.length > maxBackchannelWords) return 'speech'
+	if (backchannelPhrases.has(normalized)) return 'backchannel'
 
-	const isPhrase = backchannelPhrases.has(normalized)
-	if (!isPhrase) {
-		for (const word of words) {
-			if (!backchannelWords.has(word)) return 'speech'
-		}
-		// Fragments like "i" or "got" on their own are more likely the start of
-		// a sentence than a listening noise.
-		if (words.some((word) => neverAloneWords.has(word))) return 'speech'
+	for (const word of words) {
+		if (!backchannelWords.has(word)) return 'speech'
 	}
-
-	const agentAskedQuestion = context.agentDraft ? endsWithQuestion(context.agentDraft) : false
-	if (agentAskedQuestion && words.some((word) => affirmativeWords.has(word))) return 'answer'
+	// Fragments like "i" or "got" on their own are more likely the start of
+	// a sentence than a listening noise.
+	if (words.some((word) => neverAloneWords.has(word))) return 'speech'
 	return 'backchannel'
-}
-
-export function isBackchannelOnly(transcript: string, context: CallerSpeechContext = {}): boolean {
-	return classifyCallerSpeech(transcript, context) === 'backchannel'
-}
-
-// ── Hold requests ────────────────────────────────────────────────────
-
-const holdRequest =
-	/\b(hold on|hang on|hold please|one (sec|second|moment|minute|min)|a (sec|second|moment|minute|min)|(give|gimme) me (a|one|two|a couple|a few) (sec|seconds?|moments?|minutes?|mins?)|just a (sec|second|moment|minute|min)|bear with me|be right back|brb|let me (just )?(check|grab|find|look|get|pull|open|ask|think)|stay on the line|don'?t hang up|can you (wait|hold)|wait (a|one) (sec|second|moment|minute)|while i (check|grab|find|look|get|pull))\b/i
-
-/** True when the caller asked the agent to wait for them. */
-export function isHoldRequest(transcript: string): boolean {
-	const text = transcript.trim()
-	if (!text) return false
-	return holdRequest.test(text)
 }

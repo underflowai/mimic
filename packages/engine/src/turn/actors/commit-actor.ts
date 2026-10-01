@@ -39,6 +39,7 @@ export interface CommitActorInput {
 	userTranscript: string
 	agentResponse: string
 	endCallRequested: boolean
+	holdRequested: boolean
 	generationStartedAt: number
 	generationToAudioCompleteMs: number
 	firstAudioAt: number | null
@@ -59,6 +60,7 @@ export const commitActorLogic = fromPromise<CommitActorOutput, CommitActorInput>
 		userTranscript,
 		agentResponse,
 		endCallRequested,
+		holdRequested,
 		generationStartedAt,
 		generationToAudioCompleteMs,
 		firstAudioAt,
@@ -121,6 +123,7 @@ export const commitActorLogic = fromPromise<CommitActorOutput, CommitActorInput>
 			userTranscript,
 			agentResponse: normalizedAgentResponse,
 			endCallRequested,
+			holdRequested,
 		},
 	}
 })

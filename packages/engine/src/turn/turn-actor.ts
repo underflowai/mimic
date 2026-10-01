@@ -64,6 +64,7 @@ export interface TurnActorContext {
 	agentResponse: string
 	draftResponse: string
 	endCallRequested: boolean
+	holdRequested: boolean
 	committed: CommittedTurn | null
 	interruptReason: InterruptReason | null
 	computedInterruptContext: InterruptContext | null
@@ -75,6 +76,12 @@ export interface TurnActorContext {
 	pauseTranscript: string
 	/** The transcriber reported a turn start/resume during the current soft pause. */
 	pauseFluxEvidence: boolean
+	/**
+	 * The acknowledgement we resumed over in the caller's current utterance
+	 * ('' when none). While set, every interim transcript is re-classified so
+	 * the resume can be revoked the moment the words grow past it.
+	 */
+	resumedOverTranscript: string
 	vadSpeechStartAt: number
 	firstAudioAt: number | null
 	draftMs: number
@@ -160,12 +167,14 @@ const turnActorSetup = setup({
 		) => {},
 		onSubstantiveSpeechTimeout: (_, _params: { vadSpeechStartAt: number; transcript: string }) => {},
 		recordShortResumedBarge: () => {},
-		/** The pause resolved as a backchannel: audio resumes and the caller's words are not a turn. */
-		recordBackchannelResume: (_, _params: { transcript: string; kind: 'backchannel' | 'answer' }) => {},
+		/** The pause resolved as a backchannel: audio resumes; the decision stays revocable. */
+		recordBackchannelResume: (_, _params: { transcript: string }) => {},
 		/** VAD stayed active but the transcriber never heard words: resume and treat it as noise. */
 		recordVadOnlyResume: () => {},
-		/** Tell the call machine to drop the eventual end-of-turn for a backchannel. */
-		markBackchannelResumed: () => {},
+		/** Tell the call machine the active turn resumed over the caller's current utterance. */
+		markBackchannelResumed: (_, _params: { transcript: string }) => {},
+		/** The resumed-over utterance grew into real speech: the agent yields after all. */
+		recordResumeRevoked: (_, _params: { resumedOver: string; transcript: string }) => {},
 		resetPauseState: () => {},
 		flushPausedBuffer: () => {},
 	},
@@ -179,7 +188,10 @@ const turnActorSetup = setup({
 		isCallEnded: ({ event }) => isCallEndedInterrupt(event as TurnActorEvent),
 		hasDraftFinished: ({ context }) => context.draftMs > 0,
 		pauseIsBackchannel: ({ context }) => classifyPause(context) === 'backchannel',
-		pauseIsAnswer: ({ context }) => classifyPause(context) === 'answer',
+		// After a backchannel resume, the caller kept going: "yeah… but actually".
+		resumedUtteranceGrewIntoSpeech: ({ context, event }) =>
+			context.resumedOverTranscript !== '' &&
+			classifyCallerSpeech(eventTranscript(event as TurnActorEvent)) === 'speech',
 		// Words from the transcriber, or a turn start we never got words for
 		// (hosts that don't forward transcripts): the caller wants the floor.
 		pauseIsSpeech: ({ context }) => {
@@ -190,13 +202,14 @@ const turnActorSetup = setup({
 })
 
 function classifyPause(context: TurnActorContext) {
-	return classifyCallerSpeech(context.pauseTranscript, { agentDraft: context.draftResponse })
+	return classifyCallerSpeech(context.pauseTranscript)
 }
 
 const assignOnAudioStarted = turnActorSetup.assign({
 	agentResponse: ({ event }) => (event.type === 'audio_started' ? event.agentResponse : ''),
 	draftResponse: ({ event }) => (event.type === 'audio_started' ? event.agentResponse : ''),
 	endCallRequested: ({ event }) => event.type === 'audio_started' && event.endCallRequested === true,
+	holdRequested: ({ event }) => event.type === 'audio_started' && event.holdRequested === true,
 })
 
 const assignOnFirstAudioSent = turnActorSetup.assign({
@@ -216,6 +229,8 @@ const assignOnStreamDone = turnActorSetup.assign({
 	},
 	endCallRequested: ({ context, event }) =>
 		event.type === 'stream_done' ? event.result.endCallRequested : context.endCallRequested,
+	holdRequested: ({ context, event }) =>
+		event.type === 'stream_done' ? event.result.holdRequested : context.holdRequested,
 })
 
 const assignVadSpeechStart = turnActorSetup.assign({ vadSpeechStartAt: now })
@@ -234,7 +249,13 @@ function recordSoftPauseMetrics(outcome: SoftPauseOutcome) {
 function enterSoftPause(source: SoftPauseSource) {
 	return turnActorSetup.enqueueActions(({ enqueue }) => {
 		enqueue('onSuspendAudio')
-		enqueue.assign({ pausedAt: now, softPauseSource: source, pauseTranscript: '', pauseFluxEvidence: false })
+		enqueue.assign({
+			pausedAt: now,
+			softPauseSource: source,
+			pauseTranscript: '',
+			pauseFluxEvidence: false,
+			resumedOverTranscript: '',
+		})
 	})
 }
 
@@ -265,21 +286,27 @@ const resumeFromSoftPause = turnActorSetup.enqueueActions(({ enqueue }) => {
 	enqueue(clearPauseState)
 })
 
-/** The transcriber heard only listening noises: keep talking and drop their eventual end-of-turn. */
+/**
+ * The transcriber heard only listening noises or a short acknowledgement:
+ * keep talking, but remember the words so the decision can be revoked if
+ * the caller keeps going.
+ */
 const resumeFromBackchannel = turnActorSetup.enqueueActions(({ context, enqueue }) => {
 	enqueue('flushPausedBuffer')
 	enqueue(recordSoftPauseMetrics('resumed'))
-	enqueue({ type: 'recordBackchannelResume', params: { transcript: context.pauseTranscript, kind: 'backchannel' } })
-	enqueue('markBackchannelResumed')
+	enqueue({ type: 'recordBackchannelResume', params: { transcript: context.pauseTranscript } })
+	enqueue({ type: 'markBackchannelResumed', params: { transcript: context.pauseTranscript } })
 	enqueue(clearPauseState)
+	enqueue.assign({ resumedOverTranscript: context.pauseTranscript })
 })
 
-/** Same words, but the agent had asked a question: keep talking and let the end-of-turn be a real turn. */
-const resumeFromAnswer = turnActorSetup.enqueueActions(({ context, enqueue }) => {
-	enqueue('flushPausedBuffer')
-	enqueue(recordSoftPauseMetrics('resumed'))
-	enqueue({ type: 'recordBackchannelResume', params: { transcript: context.pauseTranscript, kind: 'answer' } })
-	enqueue(clearPauseState)
+/** The resumed-over acknowledgement grew into speech while audio was flowing again. */
+const revokeResume = turnActorSetup.enqueueActions(({ context, event, enqueue }) => {
+	enqueue({
+		type: 'recordResumeRevoked',
+		params: { resumedOver: context.resumedOverTranscript, transcript: eventTranscript(event as TurnActorEvent) },
+	})
+	enqueue.assign({ resumedOverTranscript: '' })
 })
 
 /** VAD alone, no words after the grace window: treat as noise. */
@@ -450,6 +477,14 @@ function buildInterruptPlan(state: InterruptState, trigger: InterruptTrigger): I
 
 const interruptFromGenerating = interruptWith(buildInterruptPlan('generating', 'caller'))
 const interruptFromStreaming = interruptWith(buildInterruptPlan('streaming', 'caller'))
+const interruptFromRevokedResume = interruptWith({
+	...buildInterruptPlan('streaming', 'caller'),
+	reason: 'caller_substantive_speech',
+})
+const interruptFromRevokedResumeAwaiting = interruptWith({
+	...buildInterruptPlan('awaiting', 'caller'),
+	reason: 'caller_substantive_speech',
+})
 const interruptFromSoftPaused = interruptWith(buildInterruptPlan('softPaused', 'caller'))
 const interruptFromSubstantiveTimeout = interruptWith(buildInterruptPlan('softPaused', 'substantive_timeout'))
 const interruptFromAwaitingCallEnded = interruptWith(buildInterruptPlan('awaiting', 'call_ended'))
@@ -474,6 +509,7 @@ function buildTurnRuntimeCore() {
 		agentResponse: '',
 		draftResponse: '',
 		endCallRequested: false,
+		holdRequested: false,
 		committed: null,
 		interruptReason: null,
 		computedInterruptContext: null as InterruptContext | null,
@@ -483,6 +519,7 @@ function buildTurnRuntimeCore() {
 		softPauseSource: 'unknown' as SoftPauseSource,
 		pauseTranscript: '',
 		pauseFluxEvidence: false,
+		resumedOverTranscript: '',
 		vadSpeechStartAt: 0,
 	}
 }
@@ -522,6 +559,7 @@ function buildCommitIdentity(context: TurnActorContext) {
 		userTranscript: context.userTranscript,
 		agentResponse: context.agentResponse,
 		endCallRequested: context.endCallRequested,
+		holdRequested: context.holdRequested,
 		generationStartedAt: context.generationStartedAt,
 	}
 }
@@ -644,6 +682,18 @@ export const turnActorMachine = turnActorSetup.createMachine({
 							target: 'softPaused',
 							actions: [enterSoftPause('deepgram_turn_start'), notePauseEvidence],
 						},
+						// A backchannel resume is provisional: the moment the same
+						// utterance grows past the acknowledgement, yield.
+						caller_update: {
+							guard: 'resumedUtteranceGrewIntoSpeech',
+							target: '#turnActor.done',
+							actions: [revokeResume, interruptFromRevokedResume],
+						},
+						caller_turn_resumed: {
+							guard: 'resumedUtteranceGrewIntoSpeech',
+							target: '#turnActor.done',
+							actions: [revokeResume, interruptFromRevokedResume],
+						},
 						interrupt: { target: '#turnActor.done', actions: interruptFromStreaming },
 					},
 				},
@@ -652,8 +702,9 @@ export const turnActorMachine = turnActorSetup.createMachine({
 				// how it ends.
 				//
 				//   probing   wait `substantiveSpeechMs`, collecting transcriber text
-				//   deciding  transient: backchannel → resume (and drop its EOT),
-				//             answer → resume, words → interrupt, no words yet → vadOnly
+				//   deciding  transient: backchannel → resume (revocable: later
+				//             interims that grow past it yield), words → interrupt,
+				//             no words yet → vadOnly
 				//   vadOnly   VAD still active but no words: give the transcriber
 				//             `vadOnlyGraceMs` more; still nothing → noise, resume
 				softPaused: {
@@ -678,7 +729,6 @@ export const turnActorMachine = turnActorSetup.createMachine({
 									target: '#turnActor.executing.resuming',
 									actions: resumeFromBackchannel,
 								},
-								{ guard: 'pauseIsAnswer', target: '#turnActor.executing.resuming', actions: resumeFromAnswer },
 								{ guard: 'pauseIsSpeech', target: '#turnActor.done', actions: interruptFromSubstantiveTimeout },
 								{ target: 'vadOnly' },
 							],
@@ -748,7 +798,23 @@ export const turnActorMachine = turnActorSetup.createMachine({
 			on: {
 				playback_settled: { target: 'committing' },
 				playback_confirmed: { actions: sendTo('playbackWait', { type: 'playback_confirmed' }) },
-				caller_turn_start: { actions: sendTo('playbackWait', { type: 'caller_turn_start' }) },
+				// A new Flux turn: the utterance we resumed over is finished.
+				caller_turn_start: {
+					actions: [
+						turnActorSetup.assign({ resumedOverTranscript: '' }),
+						sendTo('playbackWait', { type: 'caller_turn_start' }),
+					],
+				},
+				caller_update: {
+					guard: 'resumedUtteranceGrewIntoSpeech',
+					target: 'done',
+					actions: [revokeResume, interruptFromRevokedResumeAwaiting],
+				},
+				caller_turn_resumed: {
+					guard: 'resumedUtteranceGrewIntoSpeech',
+					target: 'done',
+					actions: [revokeResume, interruptFromRevokedResumeAwaiting],
+				},
 				interrupt: [
 					{ guard: 'isCallEnded', target: 'done', actions: interruptFromAwaitingCallEnded },
 					{ target: 'done', actions: interruptFromAwaitingOther },

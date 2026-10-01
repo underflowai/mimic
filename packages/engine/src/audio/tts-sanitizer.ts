@@ -38,18 +38,27 @@ export function sanitizeForTranscript(text: string) {
 }
 
 /**
- * The one control tag the director may emit. It is never spoken: the
- * sanitizer strips it before TTS and before the transcript, and the turn
- * machine turns its presence into a hangup request (when the host allows).
+ * The control tags the director may emit. They are never spoken: the
+ * sanitizer strips them before TTS and before the transcript, and the turn
+ * machine turns their presence into a hangup request (when the host allows)
+ * or a hold (the silence watchdog waits patiently for the caller).
  */
 export const endCallTag = '[end-call]'
+export const holdTag = '[hold]'
 
 /** Matches `[end-call]` and the variants a model is likely to produce, plus the whitespace before it. */
 const endCallTagPattern = /\s*\[\s*end[\s_-]?call\s*\]/gi
+/** Matches `[hold]`, `[hold on]`, `[holding]`. */
+const holdTagPattern = /\s*\[\s*hold(?:ing|[\s_-]?on)?\s*\]/gi
 
 export function extractTtsControlTags(text: string) {
-	const stripped = text.replace(endCallTagPattern, '')
-	return { text: stripped, endCallRequested: stripped.length !== text.length }
+	const withoutEndCall = text.replace(endCallTagPattern, '')
+	const stripped = withoutEndCall.replace(holdTagPattern, '')
+	return {
+		text: stripped,
+		endCallRequested: withoutEndCall.length !== text.length,
+		holdRequested: stripped.length !== withoutEndCall.length,
+	}
 }
 
 /**

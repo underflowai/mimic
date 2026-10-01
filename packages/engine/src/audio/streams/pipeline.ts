@@ -42,6 +42,7 @@ export type PipelineSource =
 			ttsPromise: Promise<void> | null
 			agentResponse: string
 			endCallRequested?: boolean
+			holdRequested?: boolean
 			triggerSynthesisStart?: (() => void) | null
 	  }
 
@@ -65,6 +66,7 @@ export interface PipelineResult {
 	ttcMs: number | null
 	audioSent: boolean
 	endCallRequested: boolean
+	holdRequested: boolean
 }
 
 export interface PipelineHandle {
@@ -81,6 +83,7 @@ export interface PipelineHandle {
 	/** Awaited by the turn actor; resolves when all audio has been queued. */
 	completion: Promise<PipelineResult>
 	endCallRequested: () => boolean
+	holdRequested: () => boolean
 	/** Word timings for this turn's audio so far (live). */
 	wordTimeline: () => readonly WordTiming[]
 }
@@ -103,6 +106,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 	let firstTokenAt: number | null = null
 	let llmCompleteAt: number | null = null
 	let endCallRequested = false
+	let holdRequested = false
 
 	const stages: Array<NodeJS.ReadableStream | NodeJS.ReadWriteStream | NodeJS.WritableStream> = []
 	let source: Readable
@@ -126,6 +130,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 					llmCompleteAt = clock.now()
 					const extracted = extractTtsControlTags(value)
 					endCallRequested = endCallRequested || extracted.endCallRequested
+					holdRequested = holdRequested || extracted.holdRequested
 					agentResponseOnResolve(deps.sanitize(extracted.text))
 				},
 				() => {
@@ -151,6 +156,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 			presynth.triggerSynthesisStart?.()
 			const extracted = extractTtsControlTags(presynth.agentResponse)
 			endCallRequested = presynth.endCallRequested === true || extracted.endCallRequested
+			holdRequested = presynth.holdRequested === true || extracted.holdRequested
 			agentResponseOnResolve(deps.sanitize(extracted.text))
 			wordTimeline = () => presynth.sink.words
 			stages.push(source, frameAlign, pauseGate, tracker, deps.sink)
@@ -203,6 +209,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 			ttcMs: llmCompleteAt ? llmCompleteAt - generationStartedAt : null,
 			audioSent: snapshot.started,
 			endCallRequested,
+			holdRequested,
 		}
 	})()
 
@@ -212,6 +219,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 		agentResponseReady: agentResponsePromise,
 		completion,
 		endCallRequested: () => endCallRequested,
+		holdRequested: () => holdRequested,
 		wordTimeline: () => wordTimeline(),
 	}
 }

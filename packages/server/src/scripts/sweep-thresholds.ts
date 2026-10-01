@@ -7,7 +7,10 @@
  *
  *   - soft pauses: VAD-only hiccup durations (→ MIMIC_VAD_ONLY_GRACE_MS) and
  *     how long words take to arrive after VAD start (→ MIMIC_SUBSTANTIVE_SPEECH_MS),
- *     with the backchannel / answer / speech breakdown and what the engine did
+ *     with the backchannel / speech breakdown and what the engine did
+ *   - overlap signatures: how often the agent talked over an acknowledgement,
+ *     revoked that decision, dropped its end-of-turn, or may have lost an
+ *     answer (quiet on the caller's words, then a silence follow-up)
  *   - endpointing: VAD end → Flux final delay, and the early-commit guard
  *     sweep (how often a partial at +Nms matched the final)
  *   - caller response gaps after agent playback (→ silenceIdleMs)
@@ -26,8 +29,10 @@ import {
 	endpointingDelays,
 	extractBargeEpisodes,
 	extractCallerGaps,
+	extractOverlapSignatures,
 	extractUtteranceGroups,
 	histogramEotConfidence,
+	mergeOverlapSignatures,
 	parseEventLog,
 	summarizeEventSeries,
 	summarizeSoftPauses,
@@ -35,6 +40,7 @@ import {
 	sweepProbeWindows,
 	type BargeEpisode,
 	type CallEventRecord,
+	type OverlapSignatures,
 	type UtteranceGroup,
 } from '@mimic/engine'
 
@@ -85,6 +91,7 @@ if (logs.length === 0) {
 const episodes: BargeEpisode[] = []
 const groups: UtteranceGroup[] = []
 const gaps: number[] = []
+const overlapParts: OverlapSignatures[] = []
 let finals = 0
 let low = 0
 let middle = 0
@@ -95,6 +102,7 @@ for (const { events } of logs) {
 	episodes.push(...extractBargeEpisodes(events))
 	groups.push(...extractUtteranceGroups(events))
 	gaps.push(...extractCallerGaps(events))
+	overlapParts.push(extractOverlapSignatures(events))
 	const histogram = histogramEotConfidence(events, floors)
 	finals += histogram.finals
 	low += histogram.low
@@ -127,6 +135,22 @@ console.table(
 		'hiccups outlasting probe': `${row.vadOnlyStillActive}/${row.vadOnlyEpisodes}`,
 	})),
 )
+
+const overlap = mergeOverlapSignatures(overlapParts)
+console.log('\n== Overlap (agent kept talking over an acknowledgement) ==')
+console.table([
+	{ signature: 'resumed over caller words', count: overlap.resumes },
+	{ signature: 'resume revoked (utterance grew into speech)', count: overlap.revoked },
+	{ signature: 'talked over (resumed, then interrupted anyway)', count: overlap.talkedOver },
+	{ signature: 'end-of-turn dropped while still speaking', count: overlap.droppedAcknowledgments },
+	{ signature: 'overlap turns handed to the director', count: overlap.overlapTurns.total },
+	{ signature: '  … director answered with nothing', count: overlap.overlapTurns.answeredWithNothing },
+	{ signature: '  … director answered', count: overlap.overlapTurns.answered },
+	{ signature: 'lost-answer candidates (quiet, then silence follow-up)', count: overlap.lostAnswerCandidates },
+])
+if (overlap.samples.revoked.length > 0) console.log('revoked on:', overlap.samples.revoked)
+if (overlap.samples.dropped.length > 0) console.log('dropped:', overlap.samples.dropped)
+if (overlap.samples.lostAnswers.length > 0) console.log('possibly lost answers:', overlap.samples.lostAnswers)
 
 console.log('\n== Endpointing (VAD end → Flux final) ==')
 console.log('delay (ms):', summarizeEventSeries(endpointingDelays(groups)))

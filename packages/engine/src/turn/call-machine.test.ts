@@ -104,6 +104,7 @@ function createInterruptibleTurnActorMachine(options?: { initialSubstate?: 'gene
 					userTranscript: context.userTranscript,
 					agentResponse: 'reply',
 					endCallRequested: false,
+					holdRequested: false,
 				},
 				interruptContext: null,
 			} as TurnOutcome
@@ -113,8 +114,8 @@ function createInterruptibleTurnActorMachine(options?: { initialSubstate?: 'gene
 
 function createDispatchContext(overrides?: Partial<Record<string, unknown>>) {
 	return {
-		backchannelResumedPending: false,
-		backchannelGraceUntil: 0,
+		resumedOverCallerTurn: false,
+		acknowledgedWhileSpeaking: false,
 		holdRequested: false,
 		pendingSilenceFollowUp: false,
 		lastTurnWasInterrupted: false,
@@ -142,7 +143,6 @@ function createTurnCompleteEvent(overrides?: Partial<Record<string, unknown>>) {
 		transcript: 'hello world',
 		confidence: 0.9,
 		controlBlock: 'test block',
-		agentLastResponse: 'previous',
 		...overrides,
 	}
 }
@@ -158,34 +158,34 @@ describe('dispatchTurnComplete priority handling', () => {
 			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'closing', commitUserOnly: 'keep me' },
 		},
 		{
-			name: 'backchannel resumed emits discarded for a backchannel-only transcript',
-			mode: 'idle',
-			context: { backchannelResumedPending: true },
+			name: 'the end-of-turn of the utterance we resumed over is dropped while still speaking',
+			mode: 'inTurn',
+			context: { resumedOverCallerTurn: true },
 			event: createTurnCompleteEvent({ transcript: 'Mm-hmm, right.' }),
-			turnActorSnapshot: null,
+			turnActorSnapshot: { value: { executing: { streaming: 'flowing' } } },
 			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'backchannel_handled' },
 		},
 		{
-			name: 'backchannel grace window still drops a late backchannel end-of-turn',
+			name: 'a resumed-over utterance that grew into speech is never dropped',
+			mode: 'inTurn',
+			context: { resumedOverCallerTurn: true },
+			event: createTurnCompleteEvent({ transcript: 'yeah but can we do thursday' }),
+			turnActorSnapshot: { value: { executing: { streaming: 'flowing' } } },
+			expected: { kind: 'interrupt-active' },
+		},
+		{
+			name: 'once the agent has stopped, an acknowledgement end-of-turn is a real turn (with the overlap hint)',
 			mode: 'idle',
-			context: { backchannelGraceUntil: 1_000 },
+			context: { acknowledgedWhileSpeaking: true },
 			event: createTurnCompleteEvent({ transcript: 'okay' }),
-			turnActorSnapshot: null,
-			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'backchannel_handled' },
-		},
-		{
-			name: 'backchannel resumed but the caller answered a question starts a turn',
-			mode: 'idle',
-			context: { backchannelResumedPending: true },
-			event: createTurnCompleteEvent({ transcript: 'yeah', agentLastResponse: 'Does Tuesday work?' }),
 			turnActorSnapshot: null,
 			expected: { kind: 'start' },
 		},
 		{
-			name: 'backchannel resumed but the caller said real words starts a turn',
+			name: 'an acknowledgement end-of-turn with no resume behind it starts a turn',
 			mode: 'idle',
-			context: { backchannelResumedPending: true },
-			event: createTurnCompleteEvent(),
+			context: {},
+			event: createTurnCompleteEvent({ transcript: 'yeah' }),
 			turnActorSnapshot: null,
 			expected: { kind: 'start' },
 		},

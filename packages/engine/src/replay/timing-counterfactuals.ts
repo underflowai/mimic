@@ -158,7 +158,6 @@ export function summarizeSoftPauses(episodes: BargeEpisode[]): SoftPauseSummary 
 	const byKind: SoftPauseSummary['byKind'] = {
 		none: { count: 0, interrupted: 0 },
 		backchannel: { count: 0, interrupted: 0 },
-		answer: { count: 0, interrupted: 0 },
 		speech: { count: 0, interrupted: 0 },
 	}
 	for (const episode of episodes) {
@@ -320,6 +319,143 @@ export function sweepEarlyCommitGuards(groups: UtteranceGroup[], guardsMs: numbe
 			meanSavedMs: savings.length > 0 ? Math.round(savings.reduce((a, b) => a + b, 0) / savings.length) : 0,
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Overlap signatures: what the one remaining lexical decision cost
+// ---------------------------------------------------------------------------
+
+export interface OverlapSignatures {
+	/** The agent kept talking over the caller's words (`backchannel_resumed`). */
+	resumes: number
+	/** The same utterance grew into speech and the turn actor yielded after all. */
+	revoked: number
+	/** Resumed, then interrupted before the caller's next turn start for any other reason: resuming was wrong. */
+	talkedOver: number
+	/** End-of-turns dropped while the agent was still speaking. */
+	droppedAcknowledgments: number
+	/** End-of-turns that arrived after the agent finished and went to the director with the overlap hint. */
+	overlapTurns: { total: number; answeredWithNothing: number; answered: number }
+	/**
+	 * A dropped acknowledgement, or an overlap turn the director answered with
+	 * nothing, followed by a silence follow-up with no caller speech in
+	 * between: the caller may have been waiting on an answer we never gave.
+	 */
+	lostAnswerCandidates: number
+	samples: { resumedOver: string[]; revoked: string[]; dropped: string[]; lostAnswers: string[] }
+}
+
+const maxSamples = 25
+
+function pushSample(samples: string[], text: string) {
+	const trimmed = text.trim()
+	if (trimmed && samples.length < maxSamples) samples.push(trimmed)
+}
+
+export function extractOverlapSignatures(events: CallEventRecord[]): OverlapSignatures {
+	const out: OverlapSignatures = {
+		resumes: 0,
+		revoked: 0,
+		talkedOver: 0,
+		droppedAcknowledgments: 0,
+		overlapTurns: { total: 0, answeredWithNothing: 0, answered: 0 },
+		lostAnswerCandidates: 0,
+		samples: { resumedOver: [], revoked: [], dropped: [], lostAnswers: [] },
+	}
+	// The utterance the active turn resumed over, until the caller's next turn start.
+	let resume: { transcript: string; outcome: 'open' | 'committed' | 'interrupted'; revoked: boolean } | null = null
+	// Transcript of an overlap turn whose director outcome has not arrived yet.
+	let overlapTurn: string | null = null
+	// Words we stayed quiet on; cleared as soon as the caller speaks again.
+	let quietOn: string | null = null
+
+	for (const event of events) {
+		switch (event.type) {
+			case 'backchannel_resumed': {
+				if (!isCallerInput(event)) break
+				resume = { transcript: eventTranscript(event), outcome: 'open', revoked: false }
+				out.resumes++
+				pushSample(out.samples.resumedOver, resume.transcript)
+				break
+			}
+			case 'resume_revoked':
+				out.revoked++
+				pushSample(out.samples.revoked, eventTranscript(event))
+				if (resume) resume.revoked = true
+				break
+			case 'turn_outcome': {
+				const kind = event.data.kind
+				const reason = event.data.reason
+				if (kind === 'discarded' && reason === 'backchannel_handled') {
+					out.droppedAcknowledgments++
+					const words = resume?.transcript ?? ''
+					pushSample(out.samples.dropped, words)
+					quietOn = words
+					// Its end-of-turn is handled; the machine has nothing left to hint.
+					resume = null
+					break
+				}
+				if (overlapTurn !== null) {
+					out.overlapTurns.total++
+					if (kind === 'discarded' && reason === 'empty_response') {
+						out.overlapTurns.answeredWithNothing++
+						quietOn = overlapTurn
+					} else if (kind === 'committed' || kind === 'interrupted') {
+						out.overlapTurns.answered++
+					}
+					overlapTurn = null
+					break
+				}
+				if (resume && resume.outcome === 'open' && (kind === 'committed' || kind === 'interrupted')) {
+					resume.outcome = kind
+					if (kind === 'interrupted' && !resume.revoked) out.talkedOver++
+				}
+				break
+			}
+			case 'caller_turn_complete':
+				if (!isCallerInput(event)) break
+				// The agent finished over the acknowledgement; its end-of-turn is now a hinted turn.
+				if (resume?.outcome === 'committed') overlapTurn = eventTranscript(event)
+				break
+			case 'caller_turn_start':
+				if (!isCallerInput(event)) break
+				resume = null
+				overlapTurn = null
+				quietOn = null
+				break
+			case 'vad_speech_start':
+				if (isCallerInput(event)) quietOn = null
+				break
+			case 'silence_follow_up':
+				if (quietOn !== null) {
+					out.lostAnswerCandidates++
+					pushSample(out.samples.lostAnswers, quietOn)
+					quietOn = null
+				}
+				break
+			default:
+				break
+		}
+	}
+	return out
+}
+
+export function mergeOverlapSignatures(parts: OverlapSignatures[]): OverlapSignatures {
+	const merged = extractOverlapSignatures([])
+	for (const part of parts) {
+		merged.resumes += part.resumes
+		merged.revoked += part.revoked
+		merged.talkedOver += part.talkedOver
+		merged.droppedAcknowledgments += part.droppedAcknowledgments
+		merged.overlapTurns.total += part.overlapTurns.total
+		merged.overlapTurns.answeredWithNothing += part.overlapTurns.answeredWithNothing
+		merged.overlapTurns.answered += part.overlapTurns.answered
+		merged.lostAnswerCandidates += part.lostAnswerCandidates
+		for (const key of Object.keys(merged.samples) as Array<keyof OverlapSignatures['samples']>) {
+			for (const sample of part.samples[key]) pushSample(merged.samples[key], sample)
+		}
+	}
+	return merged
 }
 
 // ---------------------------------------------------------------------------

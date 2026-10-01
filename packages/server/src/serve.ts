@@ -6,6 +6,7 @@ import { app } from './app.js'
 import { shutdownCallBus } from './call-bus.js'
 import { runCall } from './call-runner.js'
 import { getDb } from './db/index.js'
+import { runMigrations } from './db/migrate.js'
 import { apiAgents, apiCalls } from './db/schema.js'
 import { logger } from './logger.js'
 import { startCallWorker } from './jobs/queue.js'
@@ -26,6 +27,13 @@ app.get(
 )
 
 const port = Number(process.env.PORT) || 3000
+
+try {
+	await runMigrations()
+} catch (err) {
+	logger.error({ err }, 'migration failed')
+	process.exit(1)
+}
 
 const server = serve({ fetch: app.fetch, port }, (info) => {
 	console.log(`[server] Listening on http://localhost:${info.port}`)

@@ -21,10 +21,11 @@
 		"worker": "tsx src/worker.ts",
 		"dev": "tsx watch src/serve.ts",
 		"dev:worker": "tsx watch src/worker.ts",
-		"build": "tsc -b tsconfig.lib.json",
+		"build": "tsc -b tsconfig.lib.json && node --input-type=module -e \"import fs from 'node:fs'; fs.cpSync('src/db/migrations', 'build/db/migrations', { recursive: true })\"",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"test": "tsx --test 'src/**/*.test.ts'",
 		"db:generate": "drizzle-kit generate",
-		"db:migrate": "drizzle-kit migrate",
+		"db:migrate": "tsx src/db/migrate.ts",
 		"db:push": "drizzle-kit push"
 	},
 	"dependencies": {

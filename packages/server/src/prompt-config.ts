@@ -3,7 +3,8 @@ import type { GoalToolDefinition } from './goal-compiler.js'
 
 // Bump when compiler instructions or the compiler's runtime input contract changes.
 // v3: recipient removed from the compiler input (runtime-injected instead).
-export const compilerRevision = 'voice-prompts-v3'
+// v4: compact caller-facing compiler; runtime owns situational cadence.
+export const compilerRevision = 'voice-prompts-v4'
 
 export interface ApiToolInput {
 	name: string

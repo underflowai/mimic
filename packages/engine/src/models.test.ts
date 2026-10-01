@@ -28,6 +28,7 @@ describe('supportsTemperature', () => {
 
 	it('matches how the registry entries are called', () => {
 		const { openai, anthropic } = models.director
+		assert.deepEqual(openai, { model: 'gpt-6.1-sol', reasoningEffort: 'low' })
 		assert.equal(supportsTemperature(openai.model, openai.reasoningEffort), false)
 		assert.equal(supportsTemperature(anthropic.model), true)
 		assert.equal(supportsTemperature(models.background.model, models.background.reasoningEffort), false)

@@ -91,7 +91,10 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.equal(ctx.silenceClosing, false)
 		assert.equal(ctx.silenceFollowUpCount, 1)
 		assert.match(block, /caller has been quiet/i)
-		assert.match(block, /One sentence/i)
+		assert.match(block, /Are you still there/)
+		assert.match(block, /Do not repeat or rephrase the unanswered workflow question/)
+		assert.match(block, /one-sentence check-in/i)
+		assert.match(block, /two short sentences/i)
 	})
 
 	it('silenceClosing appends goodbye guidance through the strategy path', async () => {
@@ -124,7 +127,7 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.doesNotMatch(block, /quiet/i)
 	})
 
-	it('uses the compiled text-quality block when provided, otherwise the default spoken-cadence steer', async () => {
+	it('always appends runtime cadence while using compiled or generic transcript guidance', async () => {
 		const deps = {
 			getUserFirstName: () => 'Ola',
 			getRecipient: () => undefined,
@@ -135,8 +138,10 @@ describe('createTurnControlBlockBuilder', () => {
 		const compiledBlock = compiled.build('hi', { interruptContext: null })
 		assert.match(compiledBlock, /COMPILED BLOCK/)
 		assert.match(compiledBlock, /Follow the caller's latest intent/)
-		assert.doesNotMatch(compiledBlock, /mid-conversation on a live phone call/)
+		assert.match(compiledBlock, /mid-conversation on a live phone call/)
+		assert.match(compiledBlock, /one turn in three, open with a filler/)
 		assert.doesNotMatch(compiledBlock, /Voice transcription/)
+		assert.ok(compiledBlock.indexOf('COMPILED BLOCK') < compiledBlock.indexOf('mid-conversation on a live phone call'))
 
 		const persona = await createTurnControlBlockBuilder(deps)
 		const personaBlock = persona.build('hi', { interruptContext: null })

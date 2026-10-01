@@ -50,7 +50,7 @@ export interface TurnControlBlockBuilderDeps {
 	/** True while the timezone is an area-code guess the caller hasn't confirmed. */
 	getUserTimezoneInferred?: () => boolean
 	buildTurnControlBlock: (ctx: TurnControlBlockContext) => string
-	/** Compiler-generated text quality block. Replaces generic transcript guidance when set. */
+	/** Compiler-generated immediate-turn guidance. Replaces only the generic transcript-quality fragment. */
 	textQualityBlock?: string
 	/** Tell the director it may hang up with the `[end-call]` tag. */
 	endCallEnabled?: boolean
@@ -74,10 +74,12 @@ function appendSharedSignals(
 	if (deps.textQualityBlock) {
 		parts.push(deps.textQualityBlock)
 	} else {
-		// Persona-mode agents have no compiled turnControlBlock; give them the same cadence steer.
-		parts.push(prompts.spokenCadence)
 		appendTranscriptQualityGuidance(parts, prompts)
 	}
+	// Cadence is a runtime invariant. Compiled agents previously skipped this
+	// fragment entirely, so the restored filler/rhythm guidance never reached
+	// normal goal-based calls.
+	parts.push(prompts.spokenCadence)
 	appendToolLifecycleGuidance(
 		parts,
 		{

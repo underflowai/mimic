@@ -121,6 +121,14 @@ describe('compileGoal', () => {
 		assert.equal(result.systemPrompt.includes('[AGENT_NAME]'), false)
 		assert.equal(result.agentName, 'Al')
 		const request = create.mock.calls[0]!.arguments[0] as { messages: Array<{ role: string; content: string }> }
+		const compilerInstructions = request.messages.find((message) => message.role === 'system')!.content
+		assert.match(compilerInstructions, /Translate implementation-facing concepts into ordinary caller language/)
+		assert.match(compilerInstructions, /Runtime cadence guidance controls fillers and pause frequency/)
+		assert.doesNotMatch(compilerInstructions, /developer's goal/i)
+		assert.ok(
+			compilerInstructions.trim().split(/\s+/).length < 1_200,
+			'compiler instructions should stay compact enough to leave room for model judgment',
+		)
 		const userInput = request.messages.find((message) => message.role === 'user')!.content
 		assert.match(userInput, /webSearch \(read\)/)
 		assert.match(userInput, /only break and spell SSML tags pass through/)

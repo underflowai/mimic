@@ -1,10 +1,20 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { defaultToolKind, hashPromptConfig, normalizeCallTools, type PromptConfig } from './prompt-config.js'
+import {
+	compilerRevision,
+	defaultToolKind,
+	hashPromptConfig,
+	normalizeCallTools,
+	type PromptConfig,
+} from './prompt-config.js'
 
 const config: PromptConfig = { goal: 'Confirm a time', voice: 'female', tools: [], results: {} }
 
 describe('prompt configuration', () => {
+	it('uses the caller-facing cadence compiler revision', () => {
+		assert.equal(compilerRevision, 'voice-prompts-v4')
+	})
+
 	it('preserves declared kinds and parameter types; an undeclared kind is a read, as before kind existed', () => {
 		const parameters = { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'] }
 		assert.deepEqual(

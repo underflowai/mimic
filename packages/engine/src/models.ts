@@ -23,14 +23,13 @@ export interface ModelSpec {
  * `reasoning_effort` other than its default, so specs that use it carry no
  * effort. OpenAI may repoint the alias without notice.
  *
- * Chosen 2026-09-30 for the in-call paths for one voice across the product.
- * Eval numbers at the time, chat-latest vs the per-task winner:
- *   director TTFT p50 823ms vs 533ms (gpt-6-luna low)
- *   backchannel classifier p50 964ms vs 496ms (gpt-5.4-mini)
- *   promotion classifier p50 1048ms vs 523ms (gpt-5.4-mini), both 100% accurate
- *   tool watcher p50 2059ms vs 2363ms (gpt-6-luna low) — chat-latest faster here
- *   web search p50 4.5s vs 4.4s (gpt-5.4-mini), judge 4.08 vs 3.88, 1.1 searches/req, no loops
- * At $5/$30 per 1M tokens it is 20–50× the price of those per-task picks.
+ * It remains on the background, search, and watcher paths after the 2026-09-30
+ * per-task eval. The voice director moved to `gpt-6.1-sol` low after a compact-
+ * prompt eval on 2026-09-30: 26 scenarios × 2 runs per model, blinded judgment
+ * by `gpt-6.1-sol` high. Sol low scored 9.31/10 vs 8.78 for chat-latest
+ * (paired bootstrap P[better] 99.4%). Medium scored 9.54 but its director TTFT
+ * p95 reached 6.5s; low was the operational choice at p50 1,399ms / p95 2,123ms
+ * versus chat-latest's 753ms / 1,487ms.
  */
 export const models: {
 	director: { openai: ModelSpec; anthropic: ModelSpec }
@@ -42,7 +41,7 @@ export const models: {
 } = {
 	/** The voice director — the model that talks to the caller. */
 	director: {
-		openai: { model: 'chat-latest' },
+		openai: { model: 'gpt-6.1-sol', reasoningEffort: 'low' },
 		anthropic: { model: 'claude-haiku-4-5' },
 	},
 	/** Small background work: backchannel and promotion classifiers, entity extraction, summaries. */

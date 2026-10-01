@@ -181,7 +181,7 @@ export async function watchForToolAction(client: OpenAI, input: ToolWatcherInput
 			.map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`)
 			.join('\n')
 		userParts.push(
-			`\n## Tool already in progress\nTool: ${input.existingToolName}\nArgs collected so far:\n${argsStr || '  (none yet)'}\nDecide if the latest utterance completes the missing parameters.`,
+			`\n## Tool already in progress\nTool: ${input.existingToolName}\nArgs collected so far:\n${argsStr || '  (none yet)'}`,
 		)
 	}
 	if (input.priorToolResults?.length) {

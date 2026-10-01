@@ -33,6 +33,7 @@ import type { FluxConfigureOptions } from '../audio/deepgram-transcriber.js'
 import { createPipeline } from '../audio/streams/pipeline.js'
 import type { AudioSink, AudioTransport } from '../audio/streams/types.js'
 import type { TtsSpeaker } from '../audio/tts-speaker.js'
+import { loadControlBlockPrompts } from '../intelligence/control-block-utils.js'
 import { eagerMachine, type EagerPreparedResult } from '../intelligence/eager-machine.js'
 import { defaultMimicTools } from '../intelligence/tools/default-tools.js'
 import { invocationMachine, type ExecuteToolInput } from '../intelligence/tools/invocation-machine.js'
@@ -403,8 +404,9 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 							directorNote: decision.directorNote,
 						})
 					})
-					.catch((err) => {
+					.catch(async (err) => {
 						log.error({ err, transcript: input.transcript }, 'tool intent classification failed')
+						const { toolClassificationFailed } = await loadControlBlockPrompts()
 						sendBack({
 							type: 'CLASSIFY_RESULT',
 							classifyId: input.classifyId,
@@ -416,7 +418,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 							toolName: null,
 							toolArgs: null,
 							missingArgs: [],
-							directorNote: 'Tool classification failed; continue without tool and ask for clarification if needed.',
+							directorNote: toolClassificationFailed,
 						})
 					})
 				return () => abortController.abort()

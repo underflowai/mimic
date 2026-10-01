@@ -8,7 +8,7 @@
 
 import OpenAI from 'openai'
 
-import { models } from '@mimic/engine'
+import { loadPrompt, models } from '@mimic/engine'
 
 export interface TranscriptEntry {
 	role: 'user' | 'assistant'
@@ -149,11 +149,11 @@ function deterministicSuccess(
 	}
 }
 
-const SYSTEM_PROMPT = [
-	'You are a call result extractor. Given a goal, result schema, and transcript,',
-	'extract the requested fields and determine if the goal was achieved.',
-	'For boolean fields, use true/false. For missing information, use null if nullable.',
-].join('\n')
+let cachedSystemPrompt: Promise<string> | null = null
+function getSystemPrompt() {
+	cachedSystemPrompt ??= loadPrompt('instructions/result-extractor')
+	return cachedSystemPrompt
+}
 
 export async function extractCallResult(
 	client: OpenAI,
@@ -179,7 +179,7 @@ export async function extractCallResult(
 		model,
 		reasoning_effort: reasoningEffort,
 		messages: [
-			{ role: 'system', content: SYSTEM_PROMPT },
+			{ role: 'system', content: await getSystemPrompt() },
 			{ role: 'user', content: userPrompt },
 		],
 		response_format: {

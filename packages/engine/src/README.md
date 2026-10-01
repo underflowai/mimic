@@ -278,10 +278,13 @@ flowchart TD
 
 The control block is a per-turn `<context>` injection that gives the LLM situational awareness. Strategies (API, intake, forms) build the data-only `<context>` block via `buildTurnControlBlock(ctx)`, then the shared signal layer (`turn-control-block-builder.ts`) appends:
 
-- **Transcript quality guidance** — always-on instruction to handle potential transcription errors
+- **Text quality** — the compiled `textQualityBlock` when the agent has one, otherwise the default spoken-cadence steer plus transcript-quality guidance
 - **Active tool stall guidance** — when tools are executing, tells the model to buy time without confirming
+- **End-call tag** — when `endCallEnabled`, how to hang up with `[end-call]`
 - **Interrupt context** — what the caller heard before interrupting, what was left unsaid
-- **Silence instruction** — when triggered by the silence watchdog, a numbered check-in prompt that escalates to a closing goodbye
+- **Silence instruction** — when triggered by the silence watchdog, a check-in prompt that escalates to a closing goodbye
+
+The wording of every fragment lives in `prompts/control-block/*.md` (Handlebars for the parametrised ones); `control-block-utils.ts` only picks fragments and fills in runtime values. `createTurnControlBlockBuilder` loads them once per process and builds synchronously per turn.
 
 ## Backchannel Engine
 
@@ -386,7 +389,7 @@ mimic/
     tool-transport.ts             — web search + SDK socket tool execution routing
     web-searcher.ts               — OpenAI Responses API web search
     background-intelligence.ts    — post-commit async tasks (entities, summary, keyterms)
-    control-block-utils.ts        — shared signal helpers (interrupt, transcript quality, tool stall)
+    control-block-utils.ts        — shared signal helpers; wording in prompts/control-block/
     types.ts                      — InterruptContext, EagerAudioSink
 
   backchannel/                    — active listening
@@ -406,4 +409,10 @@ mimic/
     clock.ts                      — injectable monotonic clock
     voice-persona.ts              — Aurora/Arlo persona configs + Cartesia voice IDs
     async-utils.ts                — withTimeout, isAbortLikeError, safeInvoke
+
+  prompts.ts                      — loadPrompt / loadPromptTemplate (Handlebars) for prompts/
+  prompts/                        — every model-facing instruction lives here, not in .ts
+    instructions/                 — system prompts (classifiers, watcher, searcher, compiler, extractor)
+    control-block/                — per-turn fragments (cadence, silence, tools, end-call, interrupt)
+    voice-api-template.md         — system prompt template the goal compiler fills in
 ```

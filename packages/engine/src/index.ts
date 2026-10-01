@@ -7,7 +7,7 @@ export type {
 } from './orchestrator.js'
 export { config } from './config.js'
 export { models, supportsTemperature, type ModelSpec, type ReasoningEffort } from './models.js'
-export { loadPrompt, renderPromptTemplate } from './prompts.js'
+export { loadPrompt, loadPromptTemplate, renderPromptTemplate, type PromptTemplate } from './prompts.js'
 export type { AudioSink, AudioTransport } from './audio/streams/types.js'
 
 export { asrEncoding, asrSampleRate, ttsFrameMs, ttsSampleRate } from './shared/audio-format.js'

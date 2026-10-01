@@ -75,10 +75,7 @@ export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
 		const systemPrompt = await getSearchPrompt()
 		const conversation = formatTurnsForPrompt(conversationTurns, { agentLabel: agentName })
 		const dateLine = callerDateTime ? `## Current date/time\n${callerDateTime}\n\n` : ''
-		const userMessage =
-			`${dateLine}## Research topic\n${topic}\n\n` +
-			`## Conversation so far\n${conversation}\n\n` +
-			`Search for the topic above and provide the answer for ${agentName}.`
+		const userMessage = `${dateLine}## Research topic\n${topic}\n\n## Conversation so far\n${conversation}`
 
 		async function runSearch(maxOutputTokens: number) {
 			return client.responses.create(

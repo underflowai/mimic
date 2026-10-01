@@ -3,11 +3,11 @@ import { describe, it } from 'node:test'
 
 import { createTurnControlBlockBuilder, type TurnControlBlockContext } from './turn-control-block-builder.js'
 
-function createBuilderHarness() {
+async function createBuilderHarness() {
 	let capturedCtx: TurnControlBlockContext | null = null
 	let strategyCallCount = 0
 
-	const builder = createTurnControlBlockBuilder({
+	const builder = await createTurnControlBlockBuilder({
 		getUserFirstName: () => 'Ola',
 		getRecipient: () => ({ firstName: 'Ola' }),
 		getUserTimezone: () => 'America/New_York',
@@ -31,8 +31,8 @@ function createBuilderHarness() {
 }
 
 describe('createTurnControlBlockBuilder', () => {
-	it('defaults to empty tool context when no options provided', () => {
-		const harness = createBuilderHarness()
+	it('defaults to empty tool context when no options provided', async () => {
+		const harness = await createBuilderHarness()
 		harness.builder.build('hello', { interruptContext: null })
 
 		const ctx = harness.getContext()
@@ -40,8 +40,8 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.equal(ctx.executingTools, undefined)
 	})
 
-	it('passes through explicit tool context from opts', () => {
-		const harness = createBuilderHarness()
+	it('passes through explicit tool context from opts', async () => {
+		const harness = await createBuilderHarness()
 		harness.builder.build(
 			'hello',
 			{ interruptContext: null },
@@ -56,8 +56,8 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.deepEqual(ctx.executingTools, ['pending query'])
 	})
 
-	it('appends explicit tool result alongside base results', () => {
-		const harness = createBuilderHarness()
+	it('appends explicit tool result alongside base results', async () => {
+		const harness = await createBuilderHarness()
 		harness.builder.build(
 			'follow-up',
 			{ interruptContext: null },
@@ -77,8 +77,8 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.equal(ctx.silenceFollowUpCount, null)
 	})
 
-	it('silenceFollowUp flows through strategy and appends probe guidance with retry count', () => {
-		const harness = createBuilderHarness()
+	it('silenceFollowUp flows through strategy and appends probe guidance with retry count', async () => {
+		const harness = await createBuilderHarness()
 		const block = harness.builder.build(
 			'',
 			{ interruptContext: null },
@@ -94,8 +94,8 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.match(block, /One sentence/i)
 	})
 
-	it('silenceClosing appends goodbye guidance through the strategy path', () => {
-		const harness = createBuilderHarness()
+	it('silenceClosing appends goodbye guidance through the strategy path', async () => {
+		const harness = await createBuilderHarness()
 		const block = harness.builder.build(
 			'',
 			{ interruptContext: null },
@@ -112,8 +112,8 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.match(block, /no question/i)
 	})
 
-	it('does not append silence guidance unless silenceFollowUp is explicitly set', () => {
-		const harness = createBuilderHarness()
+	it('does not append silence guidance unless silenceFollowUp is explicitly set', async () => {
+		const harness = await createBuilderHarness()
 		const block = harness.builder.build(
 			'',
 			{ interruptContext: null },
@@ -121,6 +121,40 @@ describe('createTurnControlBlockBuilder', () => {
 		)
 
 		assert.equal(harness.getStrategyCallCount(), 1)
-		assert.doesNotMatch(block, /Silence check-in/i)
+		assert.doesNotMatch(block, /quiet/i)
+	})
+
+	it('uses the compiled text-quality block when provided, otherwise the default spoken-cadence steer', async () => {
+		const deps = {
+			getUserFirstName: () => 'Ola',
+			getRecipient: () => undefined,
+			getUserTimezone: () => undefined,
+			buildTurnControlBlock: () => '',
+		}
+		const compiled = await createTurnControlBlockBuilder({ ...deps, textQualityBlock: 'COMPILED BLOCK' })
+		const compiledBlock = compiled.build('hi', { interruptContext: null })
+		assert.match(compiledBlock, /COMPILED BLOCK/)
+		assert.doesNotMatch(compiledBlock, /mid-conversation on a live phone call/)
+		assert.doesNotMatch(compiledBlock, /Voice transcription/)
+
+		const persona = await createTurnControlBlockBuilder(deps)
+		const personaBlock = persona.build('hi', { interruptContext: null })
+		assert.match(personaBlock, /mid-conversation on a live phone call/)
+		assert.match(personaBlock, /one turn in three/)
+		assert.match(personaBlock, /Voice transcription/)
+	})
+
+	it('appends the end-call tag guidance only when enabled', async () => {
+		const deps = {
+			getUserFirstName: () => 'Ola',
+			getRecipient: () => undefined,
+			getUserTimezone: () => undefined,
+			buildTurnControlBlock: () => '',
+		}
+		const enabled = await createTurnControlBlockBuilder({ ...deps, endCallEnabled: true })
+		assert.match(enabled.build('bye', { interruptContext: null }), /end your reply with the tag \[end-call\]/)
+
+		const disabled = await createTurnControlBlockBuilder(deps)
+		assert.doesNotMatch(disabled.build('bye', { interruptContext: null }), /\[end-call\]/)
 	})
 })

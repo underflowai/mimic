@@ -3,6 +3,8 @@ import {
 	appendInterruptContext,
 	appendToolLifecycleGuidance,
 	appendTranscriptQualityGuidance,
+	loadControlBlockPrompts,
+	type ControlBlockPrompts,
 } from './intelligence/control-block-utils.js'
 import type { InterruptContext } from './intelligence/types.js'
 
@@ -54,45 +56,46 @@ export interface TurnControlBlockOutcome {
 	interruptContext: InterruptContext | null
 }
 
-const defaultSpokenCadenceGuidance = [
-	'You are mid-conversation on a live phone call. React to what they said, then do the next useful thing.',
-	'Keep it to one or two sentences. Contractions, fragments, spoken rhythm.',
-	'On about one turn in three, open with a filler and a pause — "umm <break time="50ms"/>" or "uhh <break time="25ms"/>".',
-	'If they are venting, skeptical, or mid-story: ask or acknowledge, do not pitch.',
-	'If they ask for a pause, reply with one short acknowledgment only.',
-].join('\n')
-
 /**
  * Shared mimic-level signals appended after every strategy-specific
  * control block (transcript quality, active tool stall, end-call tag,
- * interrupt context).
+ * interrupt context). Wording lives in `prompts/control-block/`.
  */
-function appendSharedSignals(parts: string[], ctx: TurnControlBlockContext, deps: TurnControlBlockBuilderDeps) {
+function appendSharedSignals(
+	parts: string[],
+	ctx: TurnControlBlockContext,
+	deps: TurnControlBlockBuilderDeps,
+	prompts: ControlBlockPrompts,
+) {
 	if (deps.textQualityBlock) {
 		parts.push(deps.textQualityBlock)
 	} else {
 		// Persona-mode agents have no compiled turnControlBlock; give them the same cadence steer.
-		parts.push(defaultSpokenCadenceGuidance)
-		appendTranscriptQualityGuidance(parts)
+		parts.push(prompts.spokenCadence)
+		appendTranscriptQualityGuidance(parts, prompts)
 	}
-	appendToolLifecycleGuidance(parts, {
-		toolDefinitions: ctx.toolDefinitions,
-		executingTools: ctx.executingTools,
-		pendingTools: ctx.pendingTools,
-	})
-	if (deps.endCallEnabled) appendEndCallGuidance(parts)
-	appendInterruptContext(parts, ctx.interruptContext)
+	appendToolLifecycleGuidance(
+		parts,
+		{
+			toolDefinitions: ctx.toolDefinitions,
+			executingTools: ctx.executingTools,
+			pendingTools: ctx.pendingTools,
+		},
+		prompts,
+	)
+	if (deps.endCallEnabled) appendEndCallGuidance(parts, prompts)
+	appendInterruptContext(parts, ctx.interruptContext, prompts)
 }
 
-function buildSilenceInstruction(opts?: TurnControlBlockBuildOptions) {
+function buildSilenceInstruction(prompts: ControlBlockPrompts, opts?: TurnControlBlockBuildOptions) {
 	if (!opts?.silenceFollowUp) return null
-	if (opts.silenceClosing) {
-		return 'The caller has stayed quiet after a couple of gentle check-ins. Say a brief goodbye. One sentence, no question.'
-	}
-	return 'The caller has been quiet for a few seconds. If they are waiting on you, continue with the next useful thing. Otherwise gently check in or give them a little space. One sentence.'
+	return opts.silenceClosing ? prompts.silenceClosing : prompts.silenceFollowUp
 }
 
-export function createTurnControlBlockBuilder(deps: TurnControlBlockBuilderDeps) {
+/** Loads the shared control-block fragments once, then builds blocks synchronously per turn. */
+export async function createTurnControlBlockBuilder(deps: TurnControlBlockBuilderDeps) {
+	const prompts = await loadControlBlockPrompts()
+
 	function build(transcript: string, outcome: TurnControlBlockOutcome, opts?: TurnControlBlockBuildOptions) {
 		const baseToolResults = opts?.toolResults ?? []
 		const baseExecutingTools = opts?.executingTools ?? []
@@ -118,9 +121,9 @@ export function createTurnControlBlockBuilder(deps: TurnControlBlockBuilderDeps)
 		const strategyBlock = deps.buildTurnControlBlock(ctx)
 
 		const signalParts: string[] = []
-		appendSharedSignals(signalParts, ctx, deps)
+		appendSharedSignals(signalParts, ctx, deps, prompts)
 
-		const silenceInstruction = buildSilenceInstruction(opts)
+		const silenceInstruction = buildSilenceInstruction(prompts, opts)
 		if (silenceInstruction) signalParts.push(silenceInstruction)
 
 		let block = strategyBlock
@@ -133,3 +136,5 @@ export function createTurnControlBlockBuilder(deps: TurnControlBlockBuilderDeps)
 
 	return { build }
 }
+
+export type TurnControlBlockBuilder = Awaited<ReturnType<typeof createTurnControlBlockBuilder>>

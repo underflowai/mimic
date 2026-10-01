@@ -2,7 +2,12 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { createTurnControlBlockBuilder } from '../turn-control-block-builder.js'
-import { appendInterruptContext, formatUserDateTime, type InterruptContext } from './control-block-utils.js'
+import {
+	appendInterruptContext,
+	formatUserDateTime,
+	loadControlBlockPrompts,
+	type InterruptContext,
+} from './control-block-utils.js'
 
 describe('formatUserDateTime', () => {
 	it('includes weekday and year for default timezone', () => {
@@ -13,12 +18,44 @@ describe('formatUserDateTime', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Control-block prompt fragments
+// ---------------------------------------------------------------------------
+
+describe('loadControlBlockPrompts', () => {
+	it('loads every fragment trimmed and renders the templates', async () => {
+		const prompts = await loadControlBlockPrompts()
+
+		for (const value of [
+			prompts.spokenCadence,
+			prompts.silenceFollowUp,
+			prompts.silenceClosing,
+			prompts.transcriptQuality,
+			prompts.toolRunning,
+			prompts.endCall,
+			prompts.toolClassificationFailed,
+		]) {
+			assert.ok(value.length > 0)
+			assert.equal(value, value.trim())
+		}
+
+		assert.match(prompts.endCall, /\[end-call\]/)
+		const tools = prompts.toolsAvailable({ toolList: 'checkCalendar (check slots)' })
+		assert.match(tools, /^Tools available: checkCalendar \(check slots\)\./)
+		assert.equal(tools, tools.trim())
+	})
+
+	it('is loaded once per process', async () => {
+		assert.equal(await loadControlBlockPrompts(), await loadControlBlockPrompts())
+	})
+})
+
+// ---------------------------------------------------------------------------
 // Turn control block builder — shared signal injection
 // ---------------------------------------------------------------------------
 
 describe('turn control block builder appends shared signals', () => {
-	it('passes strategy block through and appends interrupt context only', () => {
-		const builder = createTurnControlBlockBuilder({
+	it('passes strategy block through and appends interrupt context only', async () => {
+		const builder = await createTurnControlBlockBuilder({
 			getUserFirstName: () => 'Alex',
 			getRecipient: () => ({ firstName: 'Alex' }),
 			getUserTimezone: () => 'America/New_York',
@@ -35,8 +72,8 @@ describe('turn control block builder appends shared signals', () => {
 		assert.ok(!block.includes('check the conversation above'), 'boilerplate should not be appended')
 	})
 
-	it('appends tool lifecycle guidance when tools are executing', () => {
-		const builder = createTurnControlBlockBuilder({
+	it('appends tool lifecycle guidance when tools are executing', async () => {
+		const builder = await createTurnControlBlockBuilder({
 			getUserFirstName: () => 'Alex',
 			getRecipient: () => ({ firstName: 'Alex' }),
 			getUserTimezone: () => undefined,
@@ -49,8 +86,8 @@ describe('turn control block builder appends shared signals', () => {
 		assert.match(block, /Do not announce the outcome/)
 	})
 
-	it('appends idle tool guidance when tools are defined but none active', () => {
-		const builder = createTurnControlBlockBuilder({
+	it('appends idle tool guidance when tools are defined but none active', async () => {
+		const builder = await createTurnControlBlockBuilder({
 			getUserFirstName: () => 'Alex',
 			getRecipient: () => ({ firstName: 'Alex' }),
 			getUserTimezone: () => undefined,
@@ -68,14 +105,15 @@ describe('turn control block builder appends shared signals', () => {
 			},
 		)
 
-		assert.match(block, /Tools available:/)
-		assert.match(block, /checkCalendar/)
-		assert.match(block, /bookAppointment/)
+		assert.match(
+			block,
+			/Tools available: checkCalendar \(check available slots\), bookAppointment \(book an appointment\)\./,
+		)
 		assert.match(block, /do NOT confirm any outcome before the result arrives/)
 	})
 
-	it('emits nothing when no tools are defined', () => {
-		const builder = createTurnControlBlockBuilder({
+	it('emits nothing when no tools are defined', async () => {
+		const builder = await createTurnControlBlockBuilder({
 			getUserFirstName: () => 'Alex',
 			getRecipient: () => ({ firstName: 'Alex' }),
 			getUserTimezone: () => undefined,
@@ -88,8 +126,8 @@ describe('turn control block builder appends shared signals', () => {
 		assert.ok(!block.includes('running'))
 	})
 
-	it('does not append sentiment or boilerplate to strategy block', () => {
-		const builder = createTurnControlBlockBuilder({
+	it('does not append sentiment or boilerplate to strategy block', async () => {
+		const builder = await createTurnControlBlockBuilder({
 			getUserFirstName: () => 'Jane',
 			getRecipient: () => ({ firstName: 'Jane' }),
 			getUserTimezone: () => undefined,
@@ -163,25 +201,44 @@ describe('appendInterruptContext', () => {
 	]
 
 	for (const { description, ctx, expectHeard, expectUnsaid } of interruptContextCases) {
-		it(description, () => {
+		it(description, async () => {
+			const prompts = await loadControlBlockPrompts()
 			const parts: string[] = []
-			appendInterruptContext(parts, ctx)
+			appendInterruptContext(parts, ctx, prompts)
 			const block = parts.join('\n')
 
 			if (expectHeard) {
-				assert.match(block, /They heard:/)
-				assert.match(block, /Caller cut in/)
+				assert.match(block, /^Caller cut in\. They heard: ".+…"$/m)
 			} else {
 				assert.equal(parts.length, 0)
 			}
 
 			if (expectUnsaid) {
-				assert.match(block, /Unsaid:/)
+				assert.match(block, /^Unsaid: ".+"$/m)
 				assert.match(block, /weave/i)
+				assert.doesNotMatch(block, /heard most of it/)
 			} else if (expectHeard) {
 				assert.ok(!block.includes('Unsaid:'))
 				assert.match(block, /don't repeat yourself/)
 			}
 		})
 	}
+
+	it('renders the unsaid remainder of the draft verbatim', async () => {
+		const prompts = await loadControlBlockPrompts()
+		const parts: string[] = []
+		appendInterruptContext(
+			parts,
+			{ fullDraft: 'First point. Second point.', sentMs: 0, playedMs: 0, heardPortion: 'First point.' },
+			prompts,
+		)
+		assert.equal(
+			parts.join('\n'),
+			[
+				'Caller cut in. They heard: "First point.…"',
+				'Unsaid: "Second point."',
+				"Address their input. Weave in the unsaid point briefly if still relevant — don't repeat what they heard.",
+			].join('\n'),
+		)
+	})
 })

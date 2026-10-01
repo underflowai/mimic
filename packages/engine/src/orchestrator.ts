@@ -178,7 +178,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 	// Control block assembly
 	// ------------------------------------------------------------------
 
-	const turnControlBlockBuilder = createTurnControlBlockBuilder({
+	const turnControlBlockBuilder = await createTurnControlBlockBuilder({
 		getUserFirstName: () => callConfig.userFirstName,
 		getRecipient: () =>
 			callConfig.recipient ?? {

@@ -73,6 +73,10 @@ tracking a WRITE tool.
 If a tool was already called with the same arguments and the result
 is in context, do not call it again.
 
+When the message includes **## Tool already in progress**, decide
+whether the latest utterance completes that tool's missing
+parameters; the args listed there are already collected.
+
 ## Extracting values
 
 - Extract from the FULL conversation, not just the last utterance.

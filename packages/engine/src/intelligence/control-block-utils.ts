@@ -1,15 +1,83 @@
 /**
  * Control Block Utilities
  *
- * Shared utilities used by voice strategy consumers (intake, form collection)
- * when constructing per-turn control block strings. Mimic itself does not
- * build control blocks — consumers provide them via callbacks.
+ * Shared signals appended to every per-turn control block (transcript quality,
+ * tool lifecycle, end-call tag, interrupt context). The wording lives in
+ * `prompts/control-block/*.md`; this module only decides which fragment to
+ * emit and fills in the runtime values. Mimic itself does not build the
+ * strategy block — consumers provide it via callbacks.
  */
+
+import { loadPrompt, loadPromptTemplate, type PromptTemplate } from '#engine/prompts.js'
 
 import { endCallTag } from '../audio/tts-sanitizer.js'
 import type { InterruptContext } from './types.js'
 
 export type { InterruptContext } from './types.js'
+
+export interface ControlBlockPrompts {
+	/** Default cadence steer for persona-mode agents, which have no compiled text-quality block. */
+	spokenCadence: string
+	silenceFollowUp: string
+	silenceClosing: string
+	transcriptQuality: string
+	toolRunning: string
+	/** `{{toolList}}` — the comma-separated `name (description)` list. */
+	toolsAvailable: PromptTemplate
+	endCall: string
+	/** `{{heardPortion}}`, `{{unsaidPortion}}` (empty when the caller heard most of the draft). */
+	interrupt: PromptTemplate
+	/** Director note used when tool intent classification throws. */
+	toolClassificationFailed: string
+}
+
+function text(name: string) {
+	return loadPrompt(`control-block/${name}`).then((raw) => raw.trim())
+}
+
+function template(name: string): Promise<PromptTemplate> {
+	return loadPromptTemplate(`control-block/${name}`).then((render) => (data) => render(data).trim())
+}
+
+let cachedPrompts: Promise<ControlBlockPrompts> | null = null
+
+/** Loads every control-block fragment once per process. */
+export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
+	cachedPrompts ??= Promise.all([
+		text('spoken-cadence'),
+		text('silence-follow-up'),
+		text('silence-closing'),
+		text('transcript-quality'),
+		text('tool-running'),
+		template('tools-available'),
+		template('end-call'),
+		template('interrupt'),
+		text('tool-classification-failed'),
+	]).then(
+		([
+			spokenCadence,
+			silenceFollowUp,
+			silenceClosing,
+			transcriptQuality,
+			toolRunning,
+			toolsAvailable,
+			endCall,
+			interrupt,
+			toolClassificationFailed,
+		]) => ({
+			spokenCadence,
+			silenceFollowUp,
+			silenceClosing,
+			transcriptQuality,
+			toolRunning,
+			toolsAvailable,
+			endCall: endCall({ endCallTag }),
+			interrupt,
+			toolClassificationFailed,
+		}),
+	)
+	return cachedPrompts
+}
 
 export function formatUserDateTime(timezone?: string) {
 	const tz = timezone ?? 'America/Los_Angeles'
@@ -51,10 +119,8 @@ function deriveUnsaidPortion(fullDraft: string, heardPortion: string) {
 	return fullWords.slice(sharedPrefixWords).join(' ').trim()
 }
 
-export function appendTranscriptQualityGuidance(parts: string[]) {
-	parts.push(
-		'Voice transcription can garble names, companies, technical terms, and numbers. Before asking the caller to repeat, check if the conversation context makes the intended meaning obvious. If so, use the likely correct term and move forward — you can confirm casually. Only ask to repeat when the meaning is truly unclear. Never accept a word at face value if it makes no sense in context.',
-	)
+export function appendTranscriptQualityGuidance(parts: string[], prompts: ControlBlockPrompts) {
+	parts.push(prompts.transcriptQuality)
 }
 
 // ── Tool lifecycle guidance ──────────────────────────────────────────
@@ -65,7 +131,7 @@ export interface ToolLifecycleContext {
 	pendingTools?: string[]
 }
 
-export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleContext) {
+export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleContext, prompts: ControlBlockPrompts) {
 	const executing = ctx.executingTools ?? []
 	const pending = ctx.pendingTools ?? []
 
@@ -73,9 +139,7 @@ export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleC
 		for (const note of executing) {
 			parts.push(`Tool note: ${note}`)
 		}
-		parts.push(
-			'The tool is running. Keep the caller oriented with one short natural sentence if needed. Do not announce the outcome until the result arrives.',
-		)
+		parts.push(prompts.toolRunning)
 	}
 
 	if (pending.length > 0) {
@@ -88,31 +152,19 @@ export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleC
 	if (defs.length === 0) return
 
 	const toolList = defs.map((t) => `${t.name} (${t.description})`).join(', ')
-	parts.push(
-		`Tools available: ${toolList}. When a caller asks for something a tool can handle, speak one short filler phrase ("Let me take a look.", "I'm checking that now.", "One moment.") and keep the conversation moving naturally. The tool runs in the background — its result will arrive shortly. Do not say "sure" or "good question"; do NOT confirm any outcome before the result arrives. For scheduling or calendar requests, never say a date/time works, is available, booked, scheduled, or confirmed unless a tool result explicitly says so.`,
-	)
+	parts.push(prompts.toolsAvailable({ toolList }))
+}
+
+// ── End-call guidance ────────────────────────────────────────────────
+
+export function appendEndCallGuidance(parts: string[], prompts: ControlBlockPrompts) {
+	parts.push(prompts.endCall)
 }
 
 // ── Interrupt context ───────────────────────────────────────────────
 
-// ── End-call guidance ────────────────────────────────────────────────
-
-export function appendEndCallGuidance(parts: string[]) {
-	parts.push(
-		`To hang up, end your reply with the tag ${endCallTag}. Use it only after you have said goodbye and nothing remains to be done; the tag is never spoken.`,
-	)
-}
-
-export function appendInterruptContext(parts: string[], ctx: InterruptContext | null) {
+export function appendInterruptContext(parts: string[], ctx: InterruptContext | null, prompts: ControlBlockPrompts) {
 	if (!ctx?.heardPortion) return
 	const unsaidPortion = deriveUnsaidPortion(ctx.fullDraft, ctx.heardPortion)
-	parts.push(`Caller cut in. They heard: "${ctx.heardPortion}…"`)
-	if (unsaidPortion) {
-		parts.push(`Unsaid: "${unsaidPortion}"`)
-		parts.push(
-			"Address their input. Weave in the unsaid point briefly if still relevant — don't repeat what they heard.",
-		)
-	} else {
-		parts.push("They heard most of it. Respond naturally — don't repeat yourself.")
-	}
+	parts.push(prompts.interrupt({ heardPortion: ctx.heardPortion, unsaidPortion }))
 }

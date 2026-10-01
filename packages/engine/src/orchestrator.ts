@@ -25,6 +25,7 @@ import { classifyEagerPromotion } from './intelligence/eager-promotion-classifie
 import { createWebSearcher } from './intelligence/tools/web-searcher.js'
 import type { InterruptContext } from './intelligence/types.js'
 import { createOrchestratorRuntime } from './orchestrator-runtime.js'
+import { createCallEventRecorder } from './replay/event-log.js'
 import { monotonicClock } from './shared/clock.js'
 import { createCallMetrics, publishCallSummary } from './shared/metrics.js'
 import { auroraPersona, type VoicePersona } from './shared/voice-persona.js'
@@ -157,6 +158,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 	const callAbort = new AbortController()
 	const clock = monotonicClock
 	const startedAt = clock.now()
+	const eventRecorder = createCallEventRecorder({ clock })
 
 	const backchannelClassifier = createBackchannelClassifier(openai, callAbort.signal)
 	let backchannelEngine: ReturnType<typeof createBackchannelEngine> | null = null
@@ -253,6 +255,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		tools: callConfig.tools,
 		executeTool: callConfig.executeTool,
 		toolKnownValues: callConfig.toolKnownValues,
+		eventRecorder,
 		endCallEnabled,
 		// Either the silence watchdog exhausted its check-in budget or the
 		// director ended its reply with `[end-call]`. Emit the hangup event so
@@ -356,6 +359,10 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		snapshotMetrics: () => metrics.snapshot(),
 		summarizeMetrics: () => metrics.summarize(),
 		publishMetrics: (snapshot, durationSeconds) => publishCallSummary(snapshot, durationSeconds),
+		snapshotEvents: (summary, durationSeconds) => {
+			eventRecorder.record('call_summary', { durationSeconds, ...summary })
+			return eventRecorder.snapshot()
+		},
 	})
 
 	// ------------------------------------------------------------------

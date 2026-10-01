@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, it, mock } from 'node:test'
 
 import { createMockRuntimeDeps } from '#test/support/mock-runtime-deps.js'
+import { createCallEventRecorder } from '../replay/event-log.js'
 import { createCallMachineRuntime, type CallMachineRuntimeDeps } from './call-machine-runtime.js'
 import type { TurnOutcome } from './types.js'
 
@@ -364,6 +365,46 @@ describe('call-machine runtime: empty response safety net', () => {
 		assert.notEqual(result.kind, 'committed')
 		const commitTurn = deps.director.commitTurn as unknown as ReturnType<typeof mock.fn>
 		assert.equal(commitTurn.mock.callCount(), 0, 'should not commit an empty assistant response')
+
+		engine.stop()
+	})
+})
+
+describe('call-machine runtime: event log', () => {
+	it('records caller events against the call machine and the emitted turn outcome', async () => {
+		const { deps } = createMockRuntimeDeps()
+		const eventRecorder = createCallEventRecorder()
+		const engine = createCallMachineRuntime({ ...deps, eventRecorder })
+
+		engine.sendToCallMachine({ type: 'vad_speech_start' })
+		engine.sendToCallMachine({ type: 'caller_update', transcript: 'can you', confidence: 0.4 })
+		engine.sendToCallMachine({ type: 'vad_speech_end' })
+		const { turnId, outcomePromise } = startCallerTurnComplete(engine, 'can you hear me', 0.9)
+		const result = await outcomePromise
+		assert.equal(result.kind, 'committed')
+
+		const events = eventRecorder.snapshot()
+		const callEvents = events.filter((e) => e.actor === 'call').map((e) => e.type)
+		for (const expected of ['vad_speech_start', 'caller_update', 'vad_speech_end', 'caller_turn_complete']) {
+			assert.ok(callEvents.includes(expected), `expected ${expected} in ${callEvents.join(',')}`)
+		}
+		const complete = events.find((e) => e.type === 'caller_turn_complete' && e.actor === 'call')!
+		assert.deepEqual(complete.data, { transcript: 'can you hear me', confidence: 0.9 })
+
+		const outcome = events.find((e) => e.type === 'turn_outcome')!
+		assert.equal(outcome.actor, undefined)
+		assert.equal(outcome.data.kind, 'committed')
+		assert.equal(outcome.data.turnId, turnId)
+		assert.equal(outcome.data.userTranscript, 'can you hear me')
+		assert.equal(typeof outcome.data.agentResponse, 'string')
+
+		assert.ok(
+			events.some((e) => e.type === 'first_audio_sent'),
+			'pipeline progress is tapped too',
+		)
+		for (let i = 1; i < events.length; i++) {
+			assert.ok(events[i]!.seq > events[i - 1]!.seq && events[i]!.atMs >= events[i - 1]!.atMs, 'monotonic')
+		}
 
 		engine.stop()
 	})

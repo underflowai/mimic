@@ -61,10 +61,43 @@ import {
 } from './call-machine-selectors.js'
 import { callMachine, getTurnActorSnapshot } from './call-machine.js'
 import { runTurnActorLogic, turnActorMachine, type CommitActorDeps, type RunTurnActorDeps } from './turn-actor.js'
-import { emptyPlaybackSnapshot, type HangupSource, type InterruptReason, type PlaybackSnapshot } from './types.js'
+import {
+	emptyPlaybackSnapshot,
+	type HangupSource,
+	type InterruptReason,
+	type PlaybackSnapshot,
+	type TurnOutcome,
+} from './types.js'
 
 const log = createLogger('mimic:turn')
 export type { CommittedTurn, TurnOutcome } from './types.js'
+
+/** Turn outcomes are emitted, not received, so the inspect tap never sees them; flatten one for the event log. */
+function describeOutcomeForLog(outcome: TurnOutcome): Record<string, unknown> {
+	switch (outcome.kind) {
+		case 'committed':
+			return {
+				kind: outcome.kind,
+				turnId: outcome.turnId,
+				userTranscript: outcome.turn.userTranscript,
+				agentResponse: outcome.turn.agentResponse,
+				endCallRequested: outcome.turn.endCallRequested,
+			}
+		case 'interrupted':
+			return {
+				kind: outcome.kind,
+				turnId: outcome.turnId,
+				reason: outcome.reason,
+				transcript: outcome.transcript,
+				heardPortion: outcome.interruptContext.heardPortion,
+				fullDraft: outcome.interruptContext.fullDraft,
+				sentMs: outcome.interruptContext.sentMs,
+				playedMs: outcome.interruptContext.playedMs,
+			}
+		default:
+			return { kind: outcome.kind, turnId: outcome.turnId, reason: outcome.reason }
+	}
+}
 
 export interface CallMachineRuntimeDeps {
 	callSignal: AbortSignal
@@ -114,6 +147,8 @@ export interface CallMachineRuntimeDeps {
 	executeTool?: import('../intelligence/tools/transport.js').ToolExecutor
 	/** Integrator-supplied text that corroborates write-tool argument values (see `write-gate.ts`). */
 	toolKnownValues?: string[]
+	/** Per-call event log; taps every machine event and the emitted turn outcomes. */
+	eventRecorder?: import('../replay/event-log.js').CallEventRecorder
 	/**
 	 * Whether the director may end the call with the `[end-call]` tag.
 	 * When false the tag is still stripped from speech, but ignored.
@@ -786,9 +821,11 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 
 	const actor = createActor(providedCallMachine, {
 		input: { runTurnDeps, commitDeps, getPlaybackSnapshot, clock },
+		inspect: deps.eventRecorder?.inspect,
 	}).start()
 
 	actor.on('turn_outcome', ({ outcome }) => {
+		deps.eventRecorder?.record('turn_outcome', describeOutcomeForLog(outcome))
 		releaseActiveTurn(outcome.turnId)
 		if (outcome.kind === 'committed') {
 			lastAgentResponse = outcome.turn.agentResponse

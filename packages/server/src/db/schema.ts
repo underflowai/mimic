@@ -59,6 +59,8 @@ export const apiCalls = pgTable(
 		duration: integer('duration'),
 		errorMessage: text('error_message'),
 		recordingPath: text('recording_path'),
+		/** S3 key of the per-call engine event log (`call-events/<id>.jsonl`), when one was persisted. */
+		eventLogPath: text('event_log_path'),
 		idempotencyKey: text('idempotency_key'),
 		webhookDeliveredAt: timestamp('webhook_delivered_at', { withTimezone: true }),
 		createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -22,6 +22,27 @@ export { endCallTag, sanitizeForTts } from './audio/tts-sanitizer.js'
 export { defaultMimicTools } from './intelligence/tools/default-tools.js'
 
 export type { CallLatencySummary, CallMetrics, SeriesSummary } from './shared/metrics.js'
+export { parseEventLog, serializeEventLog } from './replay/event-log.js'
+export type { CallEventRecord } from './replay/event-log.js'
+export {
+	endpointingDelays,
+	extractBargeEpisodes,
+	extractCallerGaps,
+	extractUtteranceGroups,
+	histogramEotConfidence,
+	summarizeSeries as summarizeEventSeries,
+	summarizeSoftPauses,
+	sweepEarlyCommitGuards,
+	sweepProbeWindows,
+} from './replay/timing-counterfactuals.js'
+export type {
+	BargeEpisode,
+	ConfidenceHistogram,
+	EarlyCommitSweepRow,
+	ProbeWindowSweepRow,
+	SoftPauseSummary,
+	UtteranceGroup,
+} from './replay/timing-counterfactuals.js'
 export type { CallTurn } from './shared/prompt-turns.js'
 export type { WordTiming } from './shared/audio-pacing.js'
 export type { CommittedTurn, HangupSource, PlaybackSnapshot, TurnOutcome } from './turn/types.js'

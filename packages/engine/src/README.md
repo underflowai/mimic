@@ -321,6 +321,12 @@ Keyterms (capped at 100) are pushed to `transcriber.configure({ keyterms })` so 
 
 All tasks share one bounded queue; summarization is additionally coalesced (`coalesceRuns`) so repeated commits collapse into a single follow-up summary. Prompts live in `prompts/instructions/` and address the agent by its persona name.
 
+## Event Log
+
+Every call records a per-call event log (`replay/event-log.ts`). The recorder is attached as XState's `inspect` hook, so every event the call machine and its children receive (VAD start/end, caller partials and finals with confidence, pipeline progress such as `first_audio_sent` and `playback_confirmed`, interrupts, timers, tool lifecycle) is appended with a sequence number and a millisecond offset on the engine clock, tagged with the receiving actor (`call`, `turnActor`, `eager-pipeline`, …). Emitted `turn_outcome`s and a closing `call_summary` (the metrics summary) are added by the runtime and orchestrator. Payloads are sanitized to JSON primitives (strings truncated, buffers and handles dropped) and capped at 50k events.
+
+`orchestrator.close()` returns the log as `events`; the server stores it as JSONL beside the recording (`call-events/<callId>.jsonl`, `api_calls.event_log_path`). `replay/timing-counterfactuals.ts` turns a corpus of logs into threshold evidence: VAD-only hiccup durations and VAD-start → first-words delays for `substantiveSpeechMs` / `vadOnlyGraceMs`, the VAD-end → Flux-final gap and an early-commit guard sweep (would the partial at +N ms have matched the final?), caller response gaps for the silence watchdog, and an end-of-turn confidence histogram. `packages/server/src/scripts/sweep-thresholds.ts` runs them against S3 or a local directory.
+
 ## Audio Pipeline
 
 The outbound pipeline is built fresh for every turn:
@@ -418,6 +424,10 @@ mimic/
     clips.ts                      — pre-loaded PCM backchannel clips (per voice id)
     tokens.ts                     — token vocabulary + shared min word count
     types.ts                      — BackchannelCallerTurnEvent, BackchannelTurnOutcome
+
+  replay/                         — per-call event log + offline analysis
+    event-log.ts                  — XState inspect tap → sanitized JSONL event records
+    timing-counterfactuals.ts     — soft-pause, early-commit, caller-gap, EOT-confidence sweeps over logs
 
   shared/                         — utilities
     task.ts                       — singleFlight, latestWinsQueue, coalesceRuns

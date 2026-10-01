@@ -12,12 +12,14 @@
  *   5. shutdownRuntime()         — close transcriber, TTS, VAD, listeners
  *   6. drainBackgroundIntelligence() — flush queued post-commit tasks
  *   7. publishMetrics(snapshot)  — emit summary telemetry
+ *   8. snapshotEvents(summary)   — close out the per-call event log
  *
  * If `shutdownRuntime` throws, drain still runs and the error is surfaced
- * once metrics have been captured. Callers can assume teardown always
- * reaches step 6 regardless of upstream failures.
+ * once metrics and events have been captured. Callers can assume teardown
+ * always reaches step 8 regardless of upstream failures.
  */
 
+import type { CallEventRecord } from './replay/event-log.js'
 import { monotonicClock, type Clock } from './shared/clock.js'
 
 interface ShutdownLogger {
@@ -38,6 +40,8 @@ export interface CallShutdownResult<TTurn, TMetricsSnapshot> {
 	turnCount: number
 	durationSeconds: number
 	metrics: TMetricsSnapshot
+	/** The per-call event log, when a recorder was attached (see `replay/event-log.ts`). */
+	events: CallEventRecord[]
 }
 
 export interface CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot extends MetricsSnapshotLike, TSummary> {
@@ -56,6 +60,8 @@ export interface CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot extends Met
 	snapshotMetrics: () => TMetricsSnapshot
 	summarizeMetrics: () => TSummary
 	publishMetrics?: (snapshot: TMetricsSnapshot, durationSeconds: number) => void
+	/** Called after metrics are published so the log can end with the call summary. */
+	snapshotEvents?: (summary: TSummary, durationSeconds: number) => CallEventRecord[]
 }
 
 export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends MetricsSnapshotLike, TSummary>(
@@ -115,14 +121,16 @@ export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends Me
 			)
 		}
 
+		const summary = deps.summarizeMetrics()
 		if (snapshot.turnTimings.length > 0) {
-			deps.log.info(deps.summarizeMetrics(), 'call latency summary')
+			deps.log.info(summary, 'call latency summary')
 		}
 
 		deps.log.info({ turnCount: turns.length }, 'call ended')
 
 		const durationSeconds = Math.round((clock.now() - deps.startedAt) / 1000)
 		deps.publishMetrics?.(snapshot, durationSeconds)
+		const events = deps.snapshotEvents?.(summary, durationSeconds) ?? []
 
 		if (runtimeError) throw runtimeError
 
@@ -131,6 +139,7 @@ export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends Me
 			turnCount: deps.getBriefingTurnCount(),
 			durationSeconds,
 			metrics: snapshot,
+			events,
 		}
 	}
 

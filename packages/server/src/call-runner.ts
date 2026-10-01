@@ -12,12 +12,13 @@ import { eq } from 'drizzle-orm'
 import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
 import OpenAI from 'openai'
 
-import { config, createCallOrchestrator, type AudioTransport } from '@mimic/engine'
+import { config, createCallOrchestrator, type AudioTransport, type CallEventRecord } from '@mimic/engine'
 import { createVoiceAgent } from '@mimic/transport-livekit'
 
 import { executeToolViaBus, publishCallEvent } from './call-bus.js'
 import { getDb } from './db/index.js'
 import { apiCalls, type ApiAgentRow, type ApiCallRow } from './db/schema.js'
+import { createEventLogStorage } from './event-log-storage.js'
 import { buildOrchestratorConfigFromAgent, type AgentConfig } from './goal-compiler.js'
 import { childLogger } from './logger.js'
 import { extractCallResult, type ToolCallRecord, type TranscriptEntry } from './result-extractor.js'
@@ -44,6 +45,21 @@ async function updateCall(callId: string, updates: Partial<ApiCallRow>) {
 		.update(apiCalls)
 		.set({ ...updates, updatedAt: new Date() })
 		.where(eq(apiCalls.id, callId))
+}
+
+/** Upload the engine event log beside the recording. Returns the S3 key, or null when storage is off or the upload failed. */
+async function persistEventLog(callId: string, events: CallEventRecord[]): Promise<string | null> {
+	if (events.length === 0) return null
+	const storage = createEventLogStorage()
+	if (!storage) return null
+	try {
+		const key = await storage.persist(callId, events)
+		childLogger({ callId, key, events: events.length }).info('persisted event log')
+		return key
+	} catch (err) {
+		childLogger({ callId, err }).error('failed to persist event log')
+		return null
+	}
 }
 
 async function getCallStatus(callId: string): Promise<ApiCallRow['status'] | null> {
@@ -162,11 +178,22 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 				return orchestrator
 			},
 			connectServices: () => orchestratorRef!.connectServices(),
-			async onSessionEnd(result: { turns: Array<{ role: string; content: string }>; durationSeconds: number } | null) {
+			async onSessionEnd(
+				result: {
+					turns: Array<{ role: string; content: string }>
+					durationSeconds: number
+					events?: CallEventRecord[]
+				} | null,
+			) {
 				if (!result) return
+				// The event log is diagnostic data about the call itself, so it is
+				// kept even for cancelled calls, and a storage failure never blocks
+				// the completion write.
+				const eventLogPath = await persistEventLog(callId, result.events ?? [])
 				const statusBeforeFinalize = await getCallStatus(callId)
 				if (statusBeforeFinalize === 'cancelled') {
 					childLogger({ callId }).info('skipping completion write because call was cancelled')
+					if (eventLogPath) await updateCall(callId, { eventLogPath })
 					return
 				}
 
@@ -198,6 +225,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					goalAchievedReason: extraction.goalAchievedReason,
 					duration: result.durationSeconds,
 					recordingPath: egressId ? `call-recordings/${callId}.ogg` : null,
+					eventLogPath,
 				})
 
 				publishCallEvent(callId, {

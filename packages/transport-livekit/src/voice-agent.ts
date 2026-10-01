@@ -16,7 +16,14 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { asrSampleRate, ttsSampleRate, type CallMetrics, type CallOrchestrator, type CallTurn } from '@mimic/engine'
+import {
+	asrSampleRate,
+	ttsSampleRate,
+	type CallEventRecord,
+	type CallMetrics,
+	type CallOrchestrator,
+	type CallTurn,
+} from '@mimic/engine'
 import { createLiveKitTransport, type AudioTransport } from '@mimic/engine/livekit-transport'
 import { createAmbienceTrack } from './ambience-track.js'
 
@@ -41,6 +48,8 @@ export interface OrchestratorCloseResult {
 	turnCount: number
 	durationSeconds: number
 	metrics: CallMetrics
+	/** Per-call engine event log (JSONL-able); empty when nothing was recorded. */
+	events: CallEventRecord[]
 }
 
 export interface VoiceAgentConfig {

@@ -1,16 +1,20 @@
 import OpenAI from 'openai'
 
 import { config, type MimicDirectorProvider } from '#engine/config.js'
+import type { ReasoningEffort } from '#engine/models.js'
 
 export interface ResolvedDirector {
 	provider: MimicDirectorProvider
 	client: OpenAI
 	model: string
+	/** Only set for OpenAI reasoning models; omitted for Anthropic and for caller-supplied models. */
+	reasoningEffort?: ReasoningEffort
 }
 
 export interface DirectorProviderOptions {
 	provider?: MimicDirectorProvider
 	model?: string
+	reasoningEffort?: ReasoningEffort
 }
 
 /**
@@ -28,6 +32,9 @@ export async function resolveVoiceDirectorProvider(options?: DirectorProviderOpt
 				provider,
 				client: new OpenAI({ apiKey: config.mimic.openai.apiKey }),
 				model: options?.model ?? config.mimic.director.defaultOpenaiModel,
+				// A caller overriding the model owns the effort too; the default effort is tuned for the default model.
+				reasoningEffort:
+					options?.reasoningEffort ?? (options?.model ? undefined : config.mimic.director.defaultOpenaiReasoningEffort),
 			}
 		case 'anthropic':
 			return {

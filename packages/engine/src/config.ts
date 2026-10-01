@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from './models.js'
+
 export type MimicDirectorProvider = 'openai' | 'anthropic'
 
 const mimicCartesiaTtsModel = 'sonic-3.6'
@@ -23,8 +25,10 @@ export const config = {
 			get defaultProvider(): MimicDirectorProvider {
 				return parseDirectorProvider(getEnv('MIMIC_DIRECTOR_PROVIDER'))
 			},
-			// gpt-5-chat-latest was retired 2026-07-23. `chat-latest` tracks the current ChatGPT Instant model.
-			defaultOpenaiModel: 'chat-latest',
+			// Chosen by eval (2026-09-30, 12 scenarios × 3 runs vs chat-latest): TTFT p50 533ms vs 823ms,
+			// p95 1191ms vs 2013ms, same brief adherence, pinned snapshot, ~1/50th the price.
+			defaultOpenaiModel: 'gpt-6-luna',
+			defaultOpenaiReasoningEffort: 'low' as ReasoningEffort,
 			defaultAnthropicModel: 'claude-haiku-4-5',
 		},
 		openai: {
@@ -67,7 +71,11 @@ export const config = {
 				return mimicFluxAudioChunkTargetMs
 			},
 		},
-		backgroundModel: 'gpt-5.4-mini',
+		// Backchannel + eager-promotion classifiers, keyterms, summaries. Fastest model measured for
+		// 50-token JSON (p50 ~500ms); every `low` config was slower and less accurate. Pinned so
+		// classifier behaviour can't drift under us; `none` tightens p95 (1553ms → 973ms).
+		backgroundModel: 'gpt-5.4-mini-2026-03-17',
+		backgroundReasoningEffort: 'none' as ReasoningEffort,
 		searchModel: 'gpt-5.4-mini',
 		substantiveSpeechMs: 350,
 		yieldWindowMs: 80,

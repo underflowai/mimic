@@ -13,7 +13,7 @@ import type { ZodType } from 'zod'
 export interface MimicOptions {
 	/** Your Mimic API key. Starts with `mk_`. */
 	apiKey: string
-	/** Override the API base URL. Defaults to `https://api.mimic.dev`. */
+	/** Override the API base URL. Defaults to the hosted Mimic API (`https://api-production-6146.up.railway.app`). */
 	baseUrl?: string
 	/** Custom `fetch` implementation. Defaults to the global `fetch`. */
 	fetch?: typeof fetch

@@ -3,6 +3,7 @@ import type { ZodType } from 'zod'
 
 import { config } from '#engine/config.js'
 import { createLogger } from '#engine/logger.js'
+import { supportsTemperature } from '#engine/models.js'
 
 const log = createLogger('llm-parse')
 
@@ -49,10 +50,14 @@ export async function callBackgroundModel<T extends ZodType>(
 ) {
 	if (opts?.signal?.aborted) return null
 	try {
+		const model = opts?.model ?? config.mimic.backgroundModel
+		const reasoningEffort = config.mimic.backgroundReasoningEffort
 		const result = await client.chat.completions.create(
 			{
-				model: opts?.model ?? config.mimic.backgroundModel,
-				temperature: opts?.temperature ?? 0,
+				model,
+				// openai@5.23 types lack 'none'; the API accepts it (verified 2026-09-30).
+				reasoning_effort: reasoningEffort as OpenAI.ReasoningEffort,
+				...(supportsTemperature(model, reasoningEffort) && { temperature: opts?.temperature ?? 0 }),
 				max_completion_tokens: opts?.maxTokens ?? 100,
 				response_format: { type: 'json_object' },
 				messages: [

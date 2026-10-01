@@ -10,6 +10,7 @@ export interface InterruptContext {
 export interface DirectorConfig {
 	client: OpenAI
 	model: string
+	reasoningEffort?: import('../models.js').ReasoningEffort
 	systemPrompt: string
 	maxRecentMessages?: number
 	maxCompletionTokens?: number

@@ -1,6 +1,7 @@
 import type OpenAI from 'openai'
 
 import { createLogger } from '#engine/logger.js'
+import { supportsTemperature } from '#engine/models.js'
 
 import { sanitizeForTranscript } from '../audio/tts-sanitizer.js'
 import { isAbortLikeError } from '../shared/async-utils.js'
@@ -36,10 +37,13 @@ export function createDirector(cfg: DirectorConfig) {
 		model,
 		stream: true,
 		stream_options: { include_usage: true },
-		max_completion_tokens: cfg.maxCompletionTokens ?? 512,
+		// Turns are one or two sentences; this is a ceiling on a runaway reply, not a target.
+		max_completion_tokens: cfg.maxCompletionTokens ?? 192,
 		messages: [],
 	}
-	if (!model.includes('chat-latest') && !model.startsWith('gpt-5.5')) {
+	// openai@5.23 types lack 'none'; the API accepts it (verified 2026-09-30).
+	if (cfg.reasoningEffort) completionParams.reasoning_effort = cfg.reasoningEffort as OpenAI.ReasoningEffort
+	if (supportsTemperature(model, cfg.reasoningEffort)) {
 		completionParams.temperature = 0.3
 	}
 

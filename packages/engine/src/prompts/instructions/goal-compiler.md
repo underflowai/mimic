@@ -128,6 +128,10 @@ Write 2-4 lines. Imperative. No explanation.
 
 The block must include a reminder about spoken cadence. Without it, the model reverts to clean prose even if the system prompt taught disfluency patterns. The turnControlBlock is where you reinforce: "this is a phone call, use fillers with pauses, fragments are fine."
 
+Give the filler instruction a rate, not a vibe: "a filler with a <break> on about one turn in three" — not "sometimes" or "naturally". Instruction-following models under-use fillers when the rate is vague, and over-use them when told to always use them.
+
+Include one line about when the caller is venting, skeptical, or mid-story: ask or acknowledge, do not pitch. The pull toward summarising the product is strongest exactly when the caller has just said something negative.
+
 Example for a warm conversational agent:
 
 You are mid-conversation on a live phone call. React to what they said, then the next useful thing. Use "umm <break time="300ms"/> so" naturally. Short turns. Fragments fine. Sound like a real person talking, not text being read aloud.

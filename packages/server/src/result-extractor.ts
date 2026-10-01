@@ -173,7 +173,9 @@ export async function extractCallResult(
 	const typedResults = normalizeToTypedSchema(input.results)
 
 	const response = await client.chat.completions.create({
-		model: 'gpt-4o',
+		// Post-call, not latency-sensitive: current-generation model at low effort for extraction quality.
+		model: 'gpt-6.1-sol',
+		reasoning_effort: 'low',
 		messages: [
 			{ role: 'system', content: SYSTEM_PROMPT },
 			{ role: 'user', content: userPrompt },

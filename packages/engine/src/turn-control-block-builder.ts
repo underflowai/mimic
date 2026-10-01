@@ -55,10 +55,20 @@ export interface TurnControlBlockOutcome {
  * Shared mimic-level signals appended after every strategy-specific
  * control block (transcript quality, active tool stall, interrupt context).
  */
+const defaultSpokenCadenceGuidance = [
+	'You are mid-conversation on a live phone call. React to what they said, then do the next useful thing.',
+	'Keep it to one or two sentences. Contractions, fragments, spoken rhythm.',
+	'On about one turn in three, open with a filler and a pause — "umm <break time="50ms"/>" or "uhh <break time="25ms"/>".',
+	'If they are venting, skeptical, or mid-story: ask or acknowledge, do not pitch.',
+	'If they ask for a pause, reply with one short acknowledgment only.',
+].join('\n')
+
 function appendSharedSignals(parts: string[], ctx: TurnControlBlockContext, textQualityBlock?: string) {
 	if (textQualityBlock) {
 		parts.push(textQualityBlock)
 	} else {
+		// Persona-mode agents have no compiled turnControlBlock; give them the same cadence steer.
+		parts.push(defaultSpokenCadenceGuidance)
 		appendTranscriptQualityGuidance(parts)
 	}
 	appendToolLifecycleGuidance(parts, {

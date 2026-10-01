@@ -27,13 +27,15 @@ function getZodBaseType(field: ZodType): string {
 	return name ?? 'string'
 }
 
-const SDK_VERSION = '0.1.0'
+const SDK_VERSION = '0.2.0'
+/** Hosted Mimic API. `mimic.dev` is not provisioned; this is the live Railway domain. */
+const DEFAULT_BASE_URL = 'https://api-production-6146.up.railway.app'
 const MAX_RETRIES = 2
 const INITIAL_RETRY_DELAY_MS = 500
 const REQUEST_TIMEOUT_MS = 30_000
 
 function normalizeBaseUrl(baseUrl?: string) {
-	return (baseUrl ?? 'https://api.mimic.dev').replace(/\/+$/, '')
+	return (baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
 }
 
 function isRetryable(status: number): boolean {

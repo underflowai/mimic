@@ -220,8 +220,9 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 	const openai = new OpenAI()
 
 	const result = await openai.chat.completions.create({
-		model: 'gpt-5.4',
-		temperature: 0,
+		// Runs once per new agent config; quality over speed. Reasoning models reject `temperature`.
+		model: 'gpt-6.1-sol',
+		reasoning_effort: 'low',
 		max_completion_tokens: 8000,
 		response_format: { type: 'json_object' },
 		messages: [

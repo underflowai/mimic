@@ -55,6 +55,7 @@ export interface CallOrchestratorConfig {
 	directorProvider?: MimicDirectorProvider
 	/** LLM model name. Defaults to provider-specific default from config. */
 	directorModel?: string
+	directorReasoningEffort?: import('./models.js').ReasoningEffort
 	systemPrompt: string
 	userFirstName: string
 	userLastName?: string
@@ -98,13 +99,15 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		client: directorClient,
 		model: directorModel,
 		provider: directorProvider,
+		reasoningEffort: directorReasoningEffort,
 	} = await resolveVoiceDirectorProvider({
 		provider: callConfig.directorProvider,
 		model: callConfig.directorModel,
+		reasoningEffort: callConfig.directorReasoningEffort,
 	})
 	const openai = new OpenAI({ apiKey: config.mimic.openai.apiKey })
 
-	log.info({ provider: directorProvider, model: directorModel }, 'director provider selected')
+	log.info({ provider: directorProvider, model: directorModel, reasoningEffort: directorReasoningEffort }, 'director provider selected')
 
 	const transcriber = createDeepgramTranscriber({ encoding: 'linear16', sampleRate: 16000 })
 	const tts = createTtsSpeaker({ voiceId: persona.ttsVoiceId })
@@ -113,6 +116,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 	const director = createDirector({
 		client: directorClient,
 		model: directorModel,
+		reasoningEffort: directorReasoningEffort,
 		systemPrompt: callConfig.systemPrompt,
 		maxCompletionTokens: callConfig.maxCompletionTokens,
 	})

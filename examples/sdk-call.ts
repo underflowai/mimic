@@ -10,7 +10,7 @@
 
 import { z } from 'zod'
 
-import { Mimic, tool } from '@mimic/sdk'
+import { Mimic, tool } from '@underflowai/mimic'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 

@@ -12,7 +12,7 @@ import type { MimicTool, ToolInput, ToolSchema } from './types.js'
  * @example
  * ```typescript
  * import { z } from 'zod'
- * import { tool } from '@mimic/sdk'
+ * import { tool } from '@underflowai/mimic'
  *
  * const checkCalendar = tool({
  *   description: 'Check available calendar slots',

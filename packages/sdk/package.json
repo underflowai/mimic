@@ -1,5 +1,5 @@
 {
-	"name": "@mimic/sdk",
+	"name": "@underflowai/mimic",
 	"version": "0.2.0",
 	"type": "module",
 	"description": "Make AI phone calls with a few lines of code. Tools run locally — no webhooks needed.",

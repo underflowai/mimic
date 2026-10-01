@@ -3,7 +3,7 @@
 Make AI phone calls with a few lines of code.
 
 ```typescript
-import { Mimic } from '@mimic/sdk'
+import { Mimic } from '@underflowai/mimic'
 
 const mimic = new Mimic('mk_...')
 
@@ -34,11 +34,11 @@ The SDK sends a goal to the API server. The server compiles it into a voice agen
 ## Quick start
 
 ```bash
-npm install @mimic/sdk zod
+npm install @underflowai/mimic zod
 ```
 
 ```typescript
-import { Mimic } from '@mimic/sdk'
+import { Mimic } from '@underflowai/mimic'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
@@ -71,7 +71,7 @@ Give the agent functions it can call during the conversation:
 
 ```typescript
 import { z } from 'zod'
-import { Mimic, tool } from '@mimic/sdk'
+import { Mimic, tool } from '@underflowai/mimic'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 

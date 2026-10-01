@@ -27,7 +27,7 @@ function getZodBaseType(field: ZodType): string {
 	return name ?? 'string'
 }
 
-const SDK_VERSION = '0.2.0'
+import { SDK_VERSION } from './version.js'
 /** Hosted Mimic API. `mimic.dev` is not provisioned; this is the live Railway domain. */
 const DEFAULT_BASE_URL = 'https://api-production-6146.up.railway.app'
 const MAX_RETRIES = 2
@@ -61,7 +61,7 @@ export class MimicClient {
 		this.apiKey = options.apiKey
 		this.baseUrl = normalizeBaseUrl(options.baseUrl)
 		this.fetchImpl = options.fetch ?? fetch
-		this.userAgent = `@mimic/sdk/${SDK_VERSION} node/${typeof process !== 'undefined' ? process.version : 'unknown'}`
+		this.userAgent = `@underflowai/mimic/${SDK_VERSION} node/${typeof process !== 'undefined' ? process.version : 'unknown'}`
 	}
 
 	streamUrl(callId: string): string {

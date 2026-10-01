@@ -5,7 +5,7 @@
 Install the SDK and Zod:
 
 ```bash
-npm install @mimic/sdk zod
+npm install @underflowai/mimic zod
 ```
 
 Set your API key:
@@ -19,7 +19,7 @@ export MIMIC_API_KEY=mk_live_...
 The simplest call — just a phone number and a goal:
 
 ```typescript
-import { Mimic } from '@mimic/sdk'
+import { Mimic } from '@underflowai/mimic'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 
@@ -84,7 +84,7 @@ them with Zod — the types flow into your handler automatically:
 
 ```typescript
 import { z } from 'zod'
-import { Mimic, tool } from '@mimic/sdk'
+import { Mimic, tool } from '@underflowai/mimic'
 
 const mimic = new Mimic(process.env.MIMIC_API_KEY!)
 

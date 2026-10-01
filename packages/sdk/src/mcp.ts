@@ -23,6 +23,7 @@ type MCPClient = import('@modelcontextprotocol/sdk/client/index.js').Client
 import { z } from 'zod'
 
 import type { MimicTool, ToolInput } from './types.js'
+import { SDK_VERSION } from './version.js'
 
 /** @internal Convert MCP JSON Schema to a fake ZodType that passes our introspection. */
 function mcpSchemaToDescription(schema: Record<string, unknown>): Record<string, string> {
@@ -102,7 +103,7 @@ export async function connectMcp(
 		requestInit: options?.headers ? { headers: options.headers } : undefined,
 	})
 
-	const client = new Client({ name: 'mimic-sdk', version: '0.1.0' })
+	const client = new Client({ name: '@underflowai/mimic', version: SDK_VERSION })
 	await client.connect(transport)
 
 	const { tools: mcpTools } = await client.listTools()

@@ -10,7 +10,7 @@ import type { CallOptions, MimicOptions, ToolInput } from './types.js'
  * @example
  * ```typescript
  * import { z } from 'zod'
- * import { Mimic, tool } from '@mimic/sdk'
+ * import { Mimic, tool } from '@underflowai/mimic'
  *
  * const mimic = new Mimic({ apiKey: 'mk_...' })
  *

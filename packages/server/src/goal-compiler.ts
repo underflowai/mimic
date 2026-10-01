@@ -222,8 +222,9 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 	const result = await openai.chat.completions.create({
 		// Runs once per new agent config; quality over speed. Reasoning models reject `temperature`.
 		model: 'gpt-6.1-sol',
-		reasoning_effort: 'low',
-		max_completion_tokens: 8000,
+		reasoning_effort: 'high',
+		// Reasoning tokens count against this cap; a ceiling against a runaway compile, not a target.
+		max_completion_tokens: 32_000,
 		response_format: { type: 'json_object' },
 		messages: [
 			{ role: 'system', content: compilerPrompt },
@@ -231,7 +232,11 @@ export async function compileGoal(input: GoalCompilerInput): Promise<CompiledGoa
 		],
 	})
 
-	const raw = result.choices[0]?.message?.content?.trim() ?? ''
+	const choice = result.choices[0]
+	if (choice?.finish_reason === 'length') {
+		throw new Error('goal compiler hit max_completion_tokens before finishing the JSON')
+	}
+	const raw = choice?.message?.content?.trim() ?? ''
 	const parsed = compiledGoalSchema.parse(JSON.parse(raw))
 
 	const agentName = parsed.agentName || defaultAgentName(input.voice)

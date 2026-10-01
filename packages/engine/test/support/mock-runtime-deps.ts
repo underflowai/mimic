@@ -11,7 +11,8 @@
 
 import { mock } from 'node:test'
 
-import { ttsFrameBytes } from '#engine/shared/audio-pacing.js'
+import type { TtsSynthesisListener } from '#engine/audio/tts-speaker.js'
+import { ttsFrameBytes } from '#engine/shared/audio-format.js'
 import type { CallMachineRuntimeDeps } from '#engine/turn/call-machine-runtime.js'
 
 import { createFakeAudioTransport, type FakeAudioTransport } from './fake-audio-transport.js'
@@ -31,13 +32,10 @@ function makeFakeTts(emitAudio: boolean) {
 		connect: mock.fn(async () => {}),
 		close: mock.fn(() => {}),
 		interrupt: mock.fn(),
-		speakAndWait: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => {
-			if (emitAudio) onChunk(Buffer.alloc(ttsFrameBytes, 1))
-		}),
-		preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => ({
+		preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => ({
 			pushTextDelta: () => {},
 			triggerSynthesisStart: () => {
-				if (emitAudio) onChunk(Buffer.alloc(ttsFrameBytes, 1))
+				if (emitAudio) listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1))
 			},
 			audioComplete: Promise.resolve(),
 		})),
@@ -86,9 +84,7 @@ export function createMockRuntimeDeps(options: MockRuntimeBuildOptions = {}): Mo
 		} as unknown as CallMachineRuntimeDeps['metrics'],
 		getAudioTransport: () => transport,
 		backgroundIntelligence: {
-			classifySilenceReason: mock.fn(),
-			runPostCommitTasks: mock.fn(async () => ({ transcriptReliable: true })),
-			getLatestPostCommitResults: mock.fn(() => ({ transcriptReliable: true })),
+			runPostCommitTasks: mock.fn(() => {}),
 			addKeyterms: mock.fn(),
 			drain: mock.fn(async () => {}),
 		} as unknown as CallMachineRuntimeDeps['backgroundIntelligence'],
@@ -100,7 +96,8 @@ export function createMockRuntimeDeps(options: MockRuntimeBuildOptions = {}): Mo
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		endCallEnabled: false,
+		onHangupRequested: mock.fn(),
 		...options.overrides,
 	}
 

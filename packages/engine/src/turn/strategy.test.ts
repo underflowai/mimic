@@ -27,7 +27,7 @@ function makeEagerReady(overrides?: Partial<EagerSnapshot['context']>): EagerSna
 				controlBlock: 'test block',
 			},
 			eagerGeneratedAt: 100,
-			sink: { chunks: [], done: true, forward: null },
+			sink: { chunks: [], words: [], done: true, forward: null },
 			ttsPromise: null,
 			triggerSynthesisStart: () => {},
 			eagerStartedAt: 50,

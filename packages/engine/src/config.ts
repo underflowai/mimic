@@ -1,22 +1,21 @@
-import type { ReasoningEffort } from './models.js'
+/**
+ * Runtime configuration.
+ *
+ * Secrets and deployment-specific values come from the environment. Tuning
+ * knobs that an operator may reasonably want to change without a deploy
+ * (Flux model and thresholds, turn-taking windows) are env-overridable with
+ * validated defaults. Everything else is a plain, documented constant.
+ *
+ * Model names live in `models.ts`.
+ */
 
 export type MimicDirectorProvider = 'openai' | 'anthropic'
-
-const mimicCartesiaTtsModel = 'sonic-3.6'
-const mimicCartesiaApiVersion = '2026-03-01'
-
-const mimicFluxEotThreshold = 0.5
-const mimicFluxEagerEotThreshold = 0.3
-const mimicFluxEotTimeoutMs = 2000
-const mimicFluxAudioChunkTargetMs = 80
 
 function parseDirectorProvider(raw: string | undefined): MimicDirectorProvider {
 	if (!raw) return 'openai'
 	const normalized = raw.trim().toLowerCase()
 	if (normalized === 'openai' || normalized === 'anthropic') return normalized
-	throw new Error(
-		`MIMIC_DIRECTOR_PROVIDER must be "openai" or "anthropic" (received "${raw}")`,
-	)
+	throw new Error(`MIMIC_DIRECTOR_PROVIDER must be "openai" or "anthropic" (received "${raw}")`)
 }
 
 export const config = {
@@ -25,11 +24,6 @@ export const config = {
 			get defaultProvider(): MimicDirectorProvider {
 				return parseDirectorProvider(getEnv('MIMIC_DIRECTOR_PROVIDER'))
 			},
-			// Chosen by eval (2026-09-30, 12 scenarios × 3 runs vs chat-latest): TTFT p50 533ms vs 823ms,
-			// p95 1191ms vs 2013ms, same brief adherence, pinned snapshot, ~1/50th the price.
-			defaultOpenaiModel: 'gpt-6-luna',
-			defaultOpenaiReasoningEffort: 'low' as ReasoningEffort,
-			defaultAnthropicModel: 'claude-haiku-4-5',
 		},
 		openai: {
 			get apiKey() {
@@ -45,43 +39,65 @@ export const config = {
 			get apiKey() {
 				return fetchEnv('CARTESIA_API_KEY')
 			},
-			get ttsModel() {
-				return mimicCartesiaTtsModel
-			},
-			get apiVersion() {
-				return mimicCartesiaApiVersion
-			},
+			ttsModel: 'sonic-3.6',
+			apiVersion: '2026-03-01',
 		},
 		deepgram: {
 			get apiKey() {
 				return fetchEnv('DEEPGRAM_API_KEY')
 			},
 		},
+		/** Deepgram Flux (`/v2/listen`) connection parameters. */
 		flux: {
+			get model() {
+				return getEnv('MIMIC_FLUX_MODEL', 'flux-general-en')
+			},
+			/** End-of-turn confidence that commits a turn. */
 			get eotThreshold() {
-				return mimicFluxEotThreshold
+				return getNumberEnv('MIMIC_FLUX_EOT_THRESHOLD', 0.5, { min: 0, max: 1 })
 			},
+			/** Lower confidence at which Flux emits EagerEndOfTurn so we can speculate. */
 			get eagerEotThreshold() {
-				return mimicFluxEagerEotThreshold
+				return getNumberEnv('MIMIC_FLUX_EAGER_EOT_THRESHOLD', 0.3, { min: 0, max: 1 })
 			},
+			/** Silence after which Flux forces EndOfTurn regardless of confidence. */
 			get eotTimeoutMs() {
-				return mimicFluxEotTimeoutMs
+				return getNumberEnv('MIMIC_FLUX_EOT_TIMEOUT_MS', 2000, { min: 500, max: 10_000, integer: true })
 			},
-			get audioChunkTargetMs() {
-				return mimicFluxAudioChunkTargetMs
+			/** Caller audio is batched into chunks of about this length before sending. */
+			audioChunkTargetMs: 80,
+			reconnect: {
+				maxAttempts: 5,
+				initialBackoffMs: 500,
+				maxBackoffMs: 10_000,
 			},
 		},
-		// Backchannel + eager-promotion classifiers, keyterms, summaries. Fastest model measured for
-		// 50-token JSON (p50 ~500ms); every `low` config was slower and less accurate. Pinned so
-		// classifier behaviour can't drift under us; `none` tightens p95 (1553ms → 973ms).
-		backgroundModel: 'gpt-5.4-mini-2026-03-17',
-		backgroundReasoningEffort: 'none' as ReasoningEffort,
-		searchModel: 'gpt-5.4-mini',
-		substantiveSpeechMs: 350,
-		yieldWindowMs: 80,
-		ambience: {
-			enabled: true,
-			gain: 0.05,
+		/** Turn-taking windows. */
+		turnTaking: {
+			/** Caller speech shorter than this while the agent talks is treated as a backchannel, not a barge. */
+			get substantiveSpeechMs() {
+				return getNumberEnv('MIMIC_SUBSTANTIVE_SPEECH_MS', 350, { min: 0, max: 5000, integer: true })
+			},
+			/** Grace window after a soft pause before the agent resumes. */
+			get yieldWindowMs() {
+				return getNumberEnv('MIMIC_YIELD_WINDOW_MS', 80, { min: 0, max: 2000, integer: true })
+			},
+			/** Caller silence before the agent prompts with a follow-up. */
+			silenceIdleMs: 6_000,
+			/** Follow-up prompts before the agent closes the call. */
+			maxSilenceFollowUps: 3,
+		},
+		/** Deadlines for external systems. */
+		timeouts: {
+			websocketOpenMs: 10_000,
+			transcriberConfigureAckMs: 2_000,
+			transcriberCloseHandshakeMs: 2_000,
+			/** No audio from Cartesia for this long after text is sent → give up on the synthesis. */
+			ttsSynthesisWatchdogMs: 12_000,
+			/** Transport never confirmed playout of the final frame → commit the turn anyway. */
+			playbackConfirmMs: 5_000,
+			toolWatcherMs: 8_000,
+			toolExecutionMs: 30_000,
 		},
 	},
 	livekit: {
@@ -115,6 +131,34 @@ function fetchEnv(key: string) {
 	const value = process.env[key]
 	if (!value) {
 		throw new Error(`${key} environment variable is required`)
+	}
+	return value
+}
+
+interface NumberEnvBounds {
+	min?: number
+	max?: number
+	integer?: boolean
+}
+
+export function getNumberEnv(key: string, defaultValue: number, bounds: NumberEnvBounds = {}): number {
+	const raw = process.env[key]
+	if (raw === undefined || raw.trim() === '') return defaultValue
+	const value = Number(raw)
+	const valid =
+		Number.isFinite(value) &&
+		(bounds.integer !== true || Number.isInteger(value)) &&
+		(bounds.min === undefined || value >= bounds.min) &&
+		(bounds.max === undefined || value <= bounds.max)
+	if (!valid) {
+		const constraint = [
+			bounds.integer ? 'an integer' : 'a number',
+			bounds.min !== undefined ? `>= ${bounds.min}` : null,
+			bounds.max !== undefined ? `<= ${bounds.max}` : null,
+		]
+			.filter(Boolean)
+			.join(' ')
+		throw new Error(`${key} must be ${constraint} (received "${raw}")`)
 	}
 	return value
 }

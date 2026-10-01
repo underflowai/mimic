@@ -4,7 +4,7 @@ import { describe, it } from 'node:test'
 import { awaitWebSocketOpen } from './ws-utils.js'
 
 class MockWebSocket extends EventTarget {
-	readyState = WebSocket.CONNECTING
+	readyState: number = WebSocket.CONNECTING
 	close() {}
 
 	open() {

@@ -1,17 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { createTurnControlBlockBuilder, type TurnControlBlockContext } from '../turn-control-block-builder.js'
+import { createTurnControlBlockBuilder } from '../turn-control-block-builder.js'
 import { appendInterruptContext, formatUserDateTime, type InterruptContext } from './control-block-utils.js'
-
-function makeTurnContext(overrides: Partial<TurnControlBlockContext>) {
-	return {
-		transcript: '',
-		userFirstName: 'Alex',
-		interruptContext: null,
-		...overrides,
-	} satisfies TurnControlBlockContext
-}
 
 describe('formatUserDateTime', () => {
 	it('includes weekday and year for default timezone', () => {
@@ -35,7 +26,7 @@ describe('turn control block builder appends shared signals', () => {
 		})
 
 		const block = builder.build('What about flood?', {
-			interruptContext: { fullDraft: 'I was saying...', sentMs: 500, heardPortion: 'I was' },
+			interruptContext: { fullDraft: 'I was saying...', sentMs: 500, playedMs: 500, heardPortion: 'I was' },
 		})
 
 		assert.match(block, /Alex said: "What about flood\?"/)
@@ -129,6 +120,7 @@ describe('appendInterruptContext', () => {
 			ctx: {
 				fullDraft: 'The policy covers liability. It also includes umbrella coverage.',
 				sentMs: 1200,
+				playedMs: 1100,
 				heardPortion: 'The policy covers liability.',
 			},
 			expectHeard: true,
@@ -139,6 +131,7 @@ describe('appendInterruptContext', () => {
 			ctx: {
 				fullDraft: 'The deductible is $500.',
 				sentMs: 2000,
+				playedMs: 2000,
 				heardPortion: 'The deductible is $500.',
 			},
 			expectHeard: true,
@@ -149,6 +142,7 @@ describe('appendInterruptContext', () => {
 			ctx: {
 				fullDraft: 'I can walk you through the submission process now.',
 				sentMs: 900,
+				playedMs: 850,
 				heardPortion: 'I can walk you through the submission process',
 			},
 			expectHeard: true,
@@ -156,7 +150,7 @@ describe('appendInterruptContext', () => {
 		},
 		{
 			description: 'no-ops on empty heardPortion',
-			ctx: { fullDraft: 'anything', sentMs: 0, heardPortion: '' },
+			ctx: { fullDraft: 'anything', sentMs: 0, playedMs: 0, heardPortion: '' },
 			expectHeard: false,
 			expectUnsaid: false,
 		},

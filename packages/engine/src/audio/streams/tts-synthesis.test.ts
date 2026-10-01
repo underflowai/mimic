@@ -41,11 +41,11 @@ function createFakeSpeaker(): FakeSpeakerControls {
 	}
 
 	const speaker: Partial<TtsSpeaker> = {
-		async preSendTextForSynthesis(text, onAudioChunk) {
+		async preSendTextForSynthesis(text, listener) {
 			const session: FakeSession = {
 				firstDelta: text,
 				extraDeltas: [],
-				openedAt: Date.now(),
+				openedAt: performance.now(),
 				triggeredAt: null,
 				audioCompletedAt: null,
 				resolveAudioComplete: () => {},
@@ -54,8 +54,9 @@ function createFakeSpeaker(): FakeSpeakerControls {
 			session.audioComplete = new Promise<void>((resolve) => {
 				session.resolveAudioComplete = () => {
 					if (session.audioCompletedAt !== null) return
-					session.audioCompletedAt = Date.now()
-					onAudioChunk(Buffer.alloc(4, 1))
+					session.audioCompletedAt = performance.now()
+					listener.onAudioChunk(Buffer.alloc(4, 1))
+					listener.onWordTimings?.([{ word: 'ok', startMs: 0, endMs: 100 }])
 					resolve()
 				}
 			})
@@ -66,7 +67,7 @@ function createFakeSpeaker(): FakeSpeakerControls {
 					session.extraDeltas.push(delta)
 				},
 				triggerSynthesisStart() {
-					session.triggeredAt = Date.now()
+					session.triggeredAt = performance.now()
 				},
 				audioComplete: session.audioComplete,
 			}
@@ -217,6 +218,12 @@ describe('createTtsSynthesisTransform', () => {
 
 		assert.equal(controls.sessions.length, 1, 'should only open one session')
 		assert.notEqual(session1.triggeredAt, null, 'should trigger on flush')
+	})
+
+	it('exposes the word timeline reported by the speaker', async () => {
+		const { done, handle } = await runSynthesis(['Hello there.'])
+		await done
+		assert.deepEqual(handle.wordTimeline(), [{ word: 'ok', startMs: 0, endMs: 100 }])
 	})
 
 	it('flushes trailing text by opening a session if none exists', async () => {

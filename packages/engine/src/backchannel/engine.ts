@@ -12,9 +12,12 @@
  *   - deps.onFire(token)
  */
 
-import { createLogger } from '#engine/logger.js'
 import { createActor, fromPromise, setup, type DoneActorEvent, type ErrorActorEvent } from 'xstate'
 
+import { createLogger } from '#engine/logger.js'
+
+import { monotonicClock, type Clock } from '../shared/clock.js'
+import { minBackchannelWords, type BackchannelToken } from './tokens.js'
 import type { BackchannelCallerTurnEvent, BackchannelTurnOutcome } from './types.js'
 
 const log = createLogger('mimic:bc-engine')
@@ -23,12 +26,12 @@ const log = createLogger('mimic:bc-engine')
 // Types
 // ---------------------------------------------------------------------------
 
-export type BackchannelToken = 'mm-hmm' | 'right' | 'yeah' | 'got-it' | 'okay' | 'uh-huh' | 'sure' | 'i-see'
+export type { BackchannelToken } from './tokens.js'
 
 export interface BackchannelEngineDeps {
 	onFire: (token: BackchannelToken) => void
 	classifyBackchannel: (transcript: string) => Promise<BackchannelToken | null>
-	nowMs?: () => number
+	clock?: Clock
 }
 
 export interface BackchannelEngineConfig {
@@ -62,10 +65,11 @@ type BackchannelInternalEvent = DoneActorEvent<BackchannelToken | null, string> 
 export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: BackchannelEngineConfig) {
 	const minSpeechGateMs = config?.minSpeechGateMs ?? 3000
 	const refractoryMs = config?.refractoryMs ?? 4000
-	const minWordCount = config?.minWordCount ?? 4
+	const minWordCount = config?.minWordCount ?? minBackchannelWords
 	const eotConfidenceThreshold = config?.eotConfidenceThreshold ?? 0.35
 	const postInterruptSuppressionMs = config?.postInterruptSuppressionMs ?? 200
-	const nowMs = deps.nowMs ?? Date.now
+	const clock = deps.clock ?? monotonicClock
+	const nowMs = () => clock.now()
 	let classifierFailures = 0
 
 	function passesGates(context: BackchannelContext, transcript: string, eotConfidence: number) {
@@ -114,15 +118,10 @@ export function createBackchannelEngine(deps: BackchannelEngineDeps, config?: Ba
 				event.type === 'caller_turn_event' &&
 				(event.event.type === 'update' || event.event.type === 'eager_turn') &&
 				passesGates(context, event.event.transcript, event.event.confidence),
-			hasPendingClassifyingTranscript: ({ context }) =>
-				context.pendingClassifyingTranscript.trim().length > 0,
+			hasPendingClassifyingTranscript: ({ context }) => context.pendingClassifyingTranscript.trim().length > 0,
 			shouldClassifyPendingTranscript: ({ context }) =>
 				context.pendingClassifyingTranscript.trim().length > 0 &&
-				passesGates(
-					context,
-					context.pendingClassifyingTranscript,
-					context.lastEotConfidence,
-				),
+				passesGates(context, context.pendingClassifyingTranscript, context.lastEotConfidence),
 			shouldFireClassifierToken: ({ context, event }) => {
 				if (!('output' in event)) return false
 				const token = event.output as BackchannelToken | null

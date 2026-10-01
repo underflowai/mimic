@@ -1,4 +1,5 @@
 import {
+	appendEndCallGuidance,
 	appendInterruptContext,
 	appendToolLifecycleGuidance,
 	appendTranscriptQualityGuidance,
@@ -45,16 +46,14 @@ export interface TurnControlBlockBuilderDeps {
 	buildTurnControlBlock: (ctx: TurnControlBlockContext) => string
 	/** Compiler-generated text quality block. Replaces generic transcript guidance when set. */
 	textQualityBlock?: string
+	/** Tell the director it may hang up with the `[end-call]` tag. */
+	endCallEnabled?: boolean
 }
 
 export interface TurnControlBlockOutcome {
 	interruptContext: InterruptContext | null
 }
 
-/**
- * Shared mimic-level signals appended after every strategy-specific
- * control block (transcript quality, active tool stall, interrupt context).
- */
 const defaultSpokenCadenceGuidance = [
 	'You are mid-conversation on a live phone call. React to what they said, then do the next useful thing.',
 	'Keep it to one or two sentences. Contractions, fragments, spoken rhythm.',
@@ -63,9 +62,14 @@ const defaultSpokenCadenceGuidance = [
 	'If they ask for a pause, reply with one short acknowledgment only.',
 ].join('\n')
 
-function appendSharedSignals(parts: string[], ctx: TurnControlBlockContext, textQualityBlock?: string) {
-	if (textQualityBlock) {
-		parts.push(textQualityBlock)
+/**
+ * Shared mimic-level signals appended after every strategy-specific
+ * control block (transcript quality, active tool stall, end-call tag,
+ * interrupt context).
+ */
+function appendSharedSignals(parts: string[], ctx: TurnControlBlockContext, deps: TurnControlBlockBuilderDeps) {
+	if (deps.textQualityBlock) {
+		parts.push(deps.textQualityBlock)
 	} else {
 		// Persona-mode agents have no compiled turnControlBlock; give them the same cadence steer.
 		parts.push(defaultSpokenCadenceGuidance)
@@ -76,6 +80,7 @@ function appendSharedSignals(parts: string[], ctx: TurnControlBlockContext, text
 		executingTools: ctx.executingTools,
 		pendingTools: ctx.pendingTools,
 	})
+	if (deps.endCallEnabled) appendEndCallGuidance(parts)
 	appendInterruptContext(parts, ctx.interruptContext)
 }
 
@@ -113,7 +118,7 @@ export function createTurnControlBlockBuilder(deps: TurnControlBlockBuilderDeps)
 		const strategyBlock = deps.buildTurnControlBlock(ctx)
 
 		const signalParts: string[] = []
-		appendSharedSignals(signalParts, ctx, deps.textQualityBlock)
+		appendSharedSignals(signalParts, ctx, deps)
 
 		const silenceInstruction = buildSilenceInstruction(opts)
 		if (silenceInstruction) signalParts.push(silenceInstruction)

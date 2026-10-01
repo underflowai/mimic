@@ -161,10 +161,15 @@ function findInvocationByTaskId(children: Record<string, unknown>, taskId: numbe
 	return getInvocationRefs(children).find((ref) => getInvocationContext(ref).taskId === taskId)
 }
 
+/** Task ids are allocated from a counter, so ascending id is creation order. */
+function byCreationOrder(a: ToolInvocationActor, b: ToolInvocationActor) {
+	return getInvocationContext(a).taskId - getInvocationContext(b).taskId
+}
+
 function findOldestAwaitingArgsInvocation(children: Record<string, unknown>) {
 	return getInvocationRefs(children)
 		.filter((ref) => getInvocationState(ref) === 'awaiting_args')
-		.sort((a, b) => getInvocationContext(a).createdAt - getInvocationContext(b).createdAt)[0]
+		.sort(byCreationOrder)[0]
 }
 
 function findEquivalentInvocation(children: Record<string, unknown>, event: ClassifyResultEvent) {
@@ -209,7 +214,7 @@ function supersedeOverflowExecuting(children: Record<string, unknown>, currentTa
 			const ctx = getInvocationContext(ref)
 			return ctx.taskId !== currentTaskId && getInvocationState(ref) === 'executing'
 		})
-		.sort((a, b) => getInvocationContext(a).createdAt - getInvocationContext(b).createdAt)
+		.sort(byCreationOrder)
 	if (executing.length < maxConcurrentExecutingInvocations) return
 	for (const ref of executing.slice(0, executing.length - (maxConcurrentExecutingInvocations - 1))) {
 		const ctx = getInvocationContext(ref)

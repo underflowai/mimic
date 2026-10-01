@@ -22,7 +22,7 @@ import { AudioFrame, type AudioSource } from '@livekit/rtc-node'
 
 import { createLogger } from '#engine/logger.js'
 
-import { ttsSampleRate } from '../../shared/audio-pacing.js'
+import { ttsSampleRate } from '../../shared/audio-format.js'
 import type { AudioSink, AudioTransport } from './types.js'
 
 const log = createLogger('mimic:livekit-sink')
@@ -43,10 +43,7 @@ function toAlignedPcm16(chunk: Buffer, context: { label?: string; prefix?: strin
 	if (chunk.byteLength % 2 === 0) return chunk
 
 	const trimmedLength = chunk.byteLength - 1
-	log.warn(
-		{ ...context, byteLength: chunk.byteLength, trimmedLength },
-		'dropping trailing odd byte from PCM16 chunk',
-	)
+	log.warn({ ...context, byteLength: chunk.byteLength, trimmedLength }, 'dropping trailing odd byte from PCM16 chunk')
 	if (trimmedLength <= 0) return null
 	return chunk.subarray(0, trimmedLength)
 }
@@ -198,6 +195,11 @@ class LiveKitWritable extends Writable implements AudioSink {
 	clearQueue(): void {
 		if (this.#source.closed) return
 		this.#source.clearQueue()
+	}
+
+	queuedPlayoutMs(): number {
+		if (this.#source.closed) return 0
+		return this.#source.queuedDuration
 	}
 
 	async writeFrameDirect(chunk: Buffer): Promise<void> {

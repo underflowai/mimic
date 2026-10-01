@@ -2,28 +2,28 @@
  * Background Intelligence
  *
  * Owns all post-commit background LLM work: entity extraction
- * → keyterm updates and conversation summarization.
+ * → keyterm updates, and conversation summarization.
  *
  * Concurrency model:
- *  - `postCommitQueue` (concurrency 1) — serializes runPostCommitTasks invocations.
- *  - `queue` (concurrency 6) — all background model classifiers, entity extraction
- *    run in parallel.
+ *  - one `PQueue` (concurrency 6) runs every background model call;
+ *  - summarization is additionally coalesced so at most one summary is in
+ *    flight and repeated requests collapse into a single follow-up run.
  *
- * Each classifier is a tiny focused prompt (~20-100 token output) for fast
+ * Each task is a tiny focused prompt (~20-300 token output) for fast
  * turnaround. They run in parallel rather than bundled in one large prompt.
  */
 
 import type OpenAI from 'openai'
 import PQueue from 'p-queue'
-import { assign, createActor, fromPromise, setup } from 'xstate'
 import { z } from 'zod'
 
-import { createLogger } from '#engine/logger.js'
-
 import { callBackgroundModel } from '#engine/llm-parse.js'
+import { createLogger } from '#engine/logger.js'
+import { loadPrompt } from '#engine/prompts.js'
+
 import type { FluxConfigureOptions } from '../audio/types.js'
-import type { CallTurn } from '../shared/prompt-turns.js'
-import { singleFlight } from '../shared/task.js'
+import { formatTurnsForPrompt, type CallTurn } from '../shared/prompt-turns.js'
+import { coalesceRuns } from '../shared/task.js'
 
 const log = createLogger('mimic:intel')
 
@@ -43,6 +43,8 @@ interface PostCommitInput {
 export interface BackgroundIntelligenceDeps {
 	client: OpenAI
 	callSignal: AbortSignal
+	/** The voice agent's name, used to label its lines in prompts. */
+	agentName: string
 	transcriber: { configure: (opts: FluxConfigureOptions) => void }
 	director: {
 		listTurns: () => CallTurn[]
@@ -53,29 +55,35 @@ export interface BackgroundIntelligenceDeps {
 }
 
 const backgroundQueueConcurrency = 6
+/** Deepgram Flux accepts at most this many keyterms per Configure message. */
 const maxKeytermCount = 100
 
+let cachedPrompts: Promise<{ entityExtraction: string; conversationSummary: string }> | null = null
+function getPrompts() {
+	cachedPrompts ??= Promise.all([
+		loadPrompt('instructions/entity-extraction'),
+		loadPrompt('instructions/conversation-summary'),
+	]).then(([entityExtraction, conversationSummary]) => ({ entityExtraction, conversationSummary }))
+	return cachedPrompts
+}
+
 export function createBackgroundIntelligence(deps: BackgroundIntelligenceDeps) {
-	const client = deps.client
+	const { client, agentName } = deps
 	const accumulatedKeyterms = new Set<string>()
 	const queue = new PQueue({ concurrency: backgroundQueueConcurrency })
-	const postCommitQueue = new PQueue({ concurrency: 1 })
 
 	function callIsActive() {
 		return !deps.callSignal.aborted
 	}
 
-	const runSummarySingleFlight = singleFlight(async () => {
-		await queue.add(() => summarizeConversation())
-	})
-
 	async function extractEntitiesAndUpdateKeyterms(userTranscript: string, agentResponse: string) {
 		if (!callIsActive()) return
 		try {
+			const prompts = await getPrompts()
 			const parsed = await callBackgroundModel(
 				client,
-				'Extract all proper nouns from this exchange: company names, people names, cities, states, product names. Return JSON: {"entities": ["name1", "name2"]}',
-				`Aurora: "${agentResponse}"\nCaller: "${userTranscript}"`,
+				prompts.entityExtraction,
+				`${agentName}: "${agentResponse}"\nCaller: "${userTranscript}"`,
 				entitySchema,
 				'keyterms',
 				{ signal: deps.callSignal },
@@ -100,12 +108,11 @@ export function createBackgroundIntelligence(deps: BackgroundIntelligenceDeps) {
 		if (!olderTurns || olderTurns.length === 0) return
 
 		try {
-			const formatted = olderTurns.map((t) => `${t.role === 'user' ? 'Caller' : 'Aurora'}: "${t.content}"`).join('\n')
-
+			const prompts = await getPrompts()
 			const parsed = await callBackgroundModel(
 				client,
-				'Summarize this voice call conversation concisely. Capture the key facts: who the caller is, what they do, what they said, what the agent learned, and any commitments made. Write 3-5 sentences in third person past tense. Do not include speech tags or filler words. Return JSON: {"summary": "..."}',
-				formatted,
+				prompts.conversationSummary,
+				formatTurnsForPrompt(olderTurns, { agentLabel: agentName }),
 				summarySchema,
 				'conversation-summary',
 				{ maxTokens: 300, signal: deps.callSignal },
@@ -121,75 +128,16 @@ export function createBackgroundIntelligence(deps: BackgroundIntelligenceDeps) {
 		}
 	}
 
-	const summarySchedulerSetup = setup({
-		types: {
-			context: {} as { queued: boolean },
-			events: {} as { type: 'request_summary' },
-		},
-		actors: {
-			runSummary: fromPromise(async () => {
-				await runSummarySingleFlight()
-			}),
-		},
-	})
+	const scheduleSummary = coalesceRuns(
+		() => queue.add(() => summarizeConversation()),
+		(err) => log.error({ err }, 'conversation summary scheduling failed'),
+	)
 
-	const summarySchedulerMachine = summarySchedulerSetup.createMachine({
-		id: 'summary-scheduler',
-		initial: 'idle',
-		context: { queued: false },
-		states: {
-			idle: {
-				on: {
-					request_summary: { target: 'running', actions: assign({ queued: false }) },
-				},
-			},
-			running: {
-				invoke: {
-					src: 'runSummary',
-					onDone: [
-						{
-							guard: ({ context }) => context.queued && callIsActive(),
-							target: 'running',
-							actions: assign({ queued: false }),
-						},
-						{ target: 'idle', actions: assign({ queued: false }) },
-					],
-					onError: [
-						{
-							guard: ({ context }) => context.queued && callIsActive(),
-							target: 'running',
-							actions: assign({ queued: false }),
-						},
-						{ target: 'idle', actions: assign({ queued: false }) },
-					],
-				},
-				on: {
-					request_summary: {
-						actions: assign({ queued: true }),
-					},
-				},
-			},
-		},
-	})
-
-	const summaryScheduler = createActor(summarySchedulerMachine).start()
-
-	function scheduleSummary() {
-		summaryScheduler.send({ type: 'request_summary' })
-	}
-
-	function schedulePostCommitFollowUps(userTranscript: string, agentResponse: string) {
-		queue.add(() => extractEntitiesAndUpdateKeyterms(userTranscript, agentResponse))
-		scheduleSummary()
-	}
-
-	async function runPostCommitTasksInner(input: PostCommitInput) {
-		if (!callIsActive()) return
-		schedulePostCommitFollowUps(input.userTranscript, input.agentResponse)
-	}
-
+	/** Kick off the background work for a committed turn. Fire-and-forget; failures are logged. */
 	function runPostCommitTasks(input: PostCommitInput) {
-		return postCommitQueue.add(() => runPostCommitTasksInner(input))
+		if (!callIsActive()) return
+		void queue.add(() => extractEntitiesAndUpdateKeyterms(input.userTranscript, input.agentResponse))
+		scheduleSummary()
 	}
 
 	function addKeyterms(terms: string[]) {
@@ -197,7 +145,7 @@ export function createBackgroundIntelligence(deps: BackgroundIntelligenceDeps) {
 	}
 
 	async function drain() {
-		await Promise.all([postCommitQueue.onIdle(), queue.onIdle()])
+		await queue.onIdle()
 	}
 
 	return {

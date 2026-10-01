@@ -2,12 +2,15 @@
  * TurnStrategy — the pure selection function for turn-complete dispatch.
  *
  * `selectStrategy(input, world)` is a pure function that maps the full
- * state of the call into exactly one dispatch path.
- *   - The machine's turn_complete guards (isClosing, softPaused, backchannelResumed)
+ * state of the call into exactly one dispatch path. It folds together what
+ * used to be scattered across the call machine:
+ *   - the turn_complete guards (isClosing, softPaused, backchannelResumed),
+ *   - the interrupted-last-turn carryover,
+ *   - the eager-pipeline snapshot (idle / generating / ready / validating).
  *
- * Every branch in those four locations maps to exactly one strategy kind.
- * The `never` exhaustiveness pattern at the end catches missed combinations
- * at compile time.
+ * Every branch maps to exactly one strategy kind (the machine builds
+ * `first_turn` itself from the opening block). The `never` exhaustiveness
+ * pattern at the end catches missed eager states at compile time.
  */
 
 import type { EagerAudioSink } from '../intelligence/types.js'

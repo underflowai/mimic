@@ -37,8 +37,19 @@ export function sanitizeForTranscript(text: string) {
 		.trim()
 }
 
+/**
+ * The one control tag the director may emit. It is never spoken: the
+ * sanitizer strips it before TTS and before the transcript, and the turn
+ * machine turns its presence into a hangup request (when the host allows).
+ */
+export const endCallTag = '[end-call]'
+
+/** Matches `[end-call]` and the variants a model is likely to produce, plus the whitespace before it. */
+const endCallTagPattern = /\s*\[\s*end[\s_-]?call\s*\]/gi
+
 export function extractTtsControlTags(text: string) {
-	return { text, endCallRequested: false }
+	const stripped = text.replace(endCallTagPattern, '')
+	return { text: stripped, endCallRequested: stripped.length !== text.length }
 }
 
 /**

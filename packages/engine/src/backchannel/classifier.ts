@@ -6,9 +6,8 @@
  *
  * ## Gating
  *
- * Minimum word count is `minClassifyWords`, aligned with
- * `engine`'s default `minWordCount`. Shorter transcripts
- * short-circuit before the LLM call to save latency / cost.
+ * Transcripts shorter than `minBackchannelWords` (shared with the engine's
+ * gate) short-circuit before the LLM call to save latency / cost.
  *
  * ## Logging
  *
@@ -21,28 +20,21 @@ import { createHash } from 'node:crypto'
 import type OpenAI from 'openai'
 import { z } from 'zod'
 
-import { loadPrompt } from '#engine/prompts.js'
 import { callBackgroundModel } from '#engine/llm-parse.js'
 import { createLogger } from '#engine/logger.js'
+import { loadPrompt } from '#engine/prompts.js'
+
+import { backchannelTokens, minBackchannelWords } from './tokens.js'
 
 const log = createLogger('mimic:bc-classify')
-
-const backchannelTokens = ['mm-hmm', 'uh-huh', 'yeah', 'right', 'sure', 'got-it', 'i-see', 'okay'] as const
 
 const schema = z.object({
 	token: z.enum(backchannelTokens).nullable(),
 })
 
-/**
- * Must stay in sync with `engine`'s default `minWordCount`.
- * Pulled into a shared constant so drift is a compile-time error if either
- * side changes the minimum.
- */
-const minClassifyWords = 4
-
-let cachedPrompt: string | null = null
-async function getSystemPrompt() {
-	if (!cachedPrompt) cachedPrompt = await loadPrompt('instructions/backchannel-classifier')
+let cachedPrompt: Promise<string> | null = null
+function getSystemPrompt() {
+	cachedPrompt ??= loadPrompt('instructions/backchannel-classifier')
 	return cachedPrompt
 }
 
@@ -53,7 +45,7 @@ function hashSnippet(snippet: string) {
 export function createBackchannelClassifier(client: OpenAI, callSignal: AbortSignal) {
 	async function classify(transcript: string) {
 		const words = transcript.trim().split(/\s+/).filter(Boolean)
-		if (words.length < minClassifyWords) return null
+		if (words.length < minBackchannelWords) return null
 
 		const snippet = words.slice(-50).join(' ')
 		const systemPrompt = await getSystemPrompt()

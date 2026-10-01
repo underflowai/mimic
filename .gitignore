@@ -2,6 +2,11 @@ node_modules/
 build/
 dist/
 *.tsbuildinfo
+# Test helpers are TypeScript run through tsx; never commit compiled output beside them.
+packages/*/test/**/*.js
+packages/*/test/**/*.js.map
+packages/*/test/**/*.d.ts
+packages/*/test/**/*.d.ts.map
 .env
 .env.*
 !.env.example

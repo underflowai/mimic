@@ -19,19 +19,22 @@ import { fileURLToPath } from 'node:url'
 import * as ort from 'onnxruntime-web'
 
 import { createLogger } from '#engine/logger.js'
+
+import { asrSampleRate } from '../shared/audio-format.js'
 import { convertPcm16BufferToFloat32Samples } from './audio-resample.js'
 
 const log = createLogger('mimic:vad')
 
 const MODEL_PATH = fileURLToPath(new URL('./silero_vad_v5.onnx', import.meta.url))
 
-const SAMPLE_RATE = 16000
+/** Silero v5 is trained for 16 kHz input, which is also what the ASR path carries. */
+const SAMPLE_RATE = asrSampleRate
 const FRAME_SAMPLES = 512
 const POSITIVE_THRESHOLD = 0.5
 const NEGATIVE_THRESHOLD = 0.35
 const REDEMPTION_FRAMES = 8
 const STATE_SHAPE: readonly [number, number, number] = [2, 1, 128]
-const STATE_SIZE = 2 * 1 * 128
+const STATE_SIZE = STATE_SHAPE.reduce((size, dim) => size * dim, 1)
 
 // Silero weights are stateless across calls; only the LSTM state tensor
 // is per-instance. Share the compiled session across all VAD instances
@@ -115,8 +118,7 @@ export async function createVoiceActivityDetector(config?: VadConfig) {
 
 	function processAudio(pcm16: Buffer) {
 		if (!active) return
-		const alignedPcm16 =
-			pcm16.byteLength % 2 === 0 ? pcm16 : pcm16.subarray(0, Math.max(0, pcm16.byteLength - 1))
+		const alignedPcm16 = pcm16.byteLength % 2 === 0 ? pcm16 : pcm16.subarray(0, Math.max(0, pcm16.byteLength - 1))
 		if (alignedPcm16.byteLength === 0) return
 		const samples = convertPcm16BufferToFloat32Samples(alignedPcm16)
 		queue = queue

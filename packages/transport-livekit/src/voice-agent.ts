@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { type CallMetrics, type CallOrchestrator, type CallTurn } from '@mimic/engine'
+import { asrSampleRate, ttsSampleRate, type CallMetrics, type CallOrchestrator, type CallTurn } from '@mimic/engine'
 import { createLiveKitTransport, type AudioTransport } from '@mimic/engine/livekit-transport'
 import { createAmbienceTrack } from './ambience-track.js'
 
@@ -24,9 +24,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const AMBIENCE_FILE = join(__dirname, 'audio/office-ambience.mp3')
 const HAS_AMBIENCE_FILE = existsSync(AMBIENCE_FILE)
 
-const TTS_SAMPLE_RATE = 48000
-const ASR_SAMPLE_RATE = 16000
 const DEFAULT_SESSION_TIMEOUT_MS = 60 * 60 * 1000
+/**
+ * How much agent audio LiveKit buffers ahead of playout. Large enough to
+ * absorb TTS jitter, small enough that a barge-in's unplayed tail stays
+ * short (the engine measures that tail via `queuedDuration` when it works out
+ * how much of a reply the caller actually heard).
+ */
+const AGENT_AUDIO_QUEUE_MS = 300
+const DEFAULT_AMBIENCE = { enabled: true, gain: 0.05 } as const
+/** Clips are mastered at full scale; mix them under the live voice. */
+const BACKCHANNEL_GAIN = 0.7
 
 export interface OrchestratorCloseResult {
 	turns: CallTurn[]
@@ -103,7 +111,7 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 	let ambienceStop: (() => void) | null = null
 
 	if (hasAgent) {
-		audioSource = new AudioSource(TTS_SAMPLE_RATE, 1, 300)
+		audioSource = new AudioSource(ttsSampleRate, 1, AGENT_AUDIO_QUEUE_MS)
 		agentTrack = LocalAudioTrack.createAudioTrack('mimic-voice', audioSource)
 		transport = createLiveKitTransport({ audioSource, logPrefix })
 		if (createOrchestrator) {
@@ -116,17 +124,15 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 
 	const onAudioReceived = agentConfig.onAudioReceived ?? orchestrator?.handleCallerAudio
 
-	const backchannelGain = 0.7
-
 	function playBackchannelClip(token: string) {
 		const clip = agentConfig.backchannelClips?.get(token)
 		if (!clip || !transport || !transport.isOpen()) return
 		if (orchestrator?.isAgentSpeaking()) return
 
-		const source = new Int16Array(clip.buffer, clip.byteOffset, clip.byteLength / 2)
+		const source = new Int16Array(clip.buffer, clip.byteOffset, clip.byteLength / Int16Array.BYTES_PER_ELEMENT)
 		const samples = new Int16Array(source.length)
 		for (let i = 0; i < source.length; i++) {
-			samples[i] = Math.round(source[i] * backchannelGain)
+			samples[i] = Math.round(source[i] * BACKCHANNEL_GAIN)
 		}
 		const pcm = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength)
 		transport.playBackchannelFrame(pcm)
@@ -142,7 +148,7 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 
 			const { BackgroundVoiceCancellation } = await import('@livekit/noise-cancellation-node')
 			const stream = new AudioStream(track, {
-				sampleRate: ASR_SAMPLE_RATE,
+				sampleRate: asrSampleRate,
 				numChannels: 1,
 				noiseCancellation: BackgroundVoiceCancellation(),
 			})
@@ -225,8 +231,8 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 		triggerComplete()
 	})
 
-	orchestrator?.onHangupRequested(() => {
-		console.log(`${prefix} hangup requested by orchestrator`)
+	orchestrator?.onHangupRequested((source) => {
+		console.log(`${prefix} hangup requested by orchestrator (${source})`)
 		triggerComplete()
 	})
 
@@ -239,10 +245,10 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			await room.localParticipant!.publishTrack(agentTrack, new TrackPublishOptions())
 		}
 
-		const ambienceConfig = agentConfig.ambience ?? { enabled: true, gain: 0.05 }
+		const ambienceConfig = { ...DEFAULT_AMBIENCE, ...agentConfig.ambience }
 		if (ambienceConfig.enabled && HAS_AMBIENCE_FILE) {
 			try {
-				const ambience = createAmbienceTrack({ filePath: AMBIENCE_FILE, gain: ambienceConfig.gain ?? 0.05 })
+				const ambience = createAmbienceTrack({ filePath: AMBIENCE_FILE, gain: ambienceConfig.gain })
 				await room.localParticipant!.publishTrack(ambience.track, new TrackPublishOptions())
 				const abortController = new AbortController()
 				ambience.loop(abortController.signal)

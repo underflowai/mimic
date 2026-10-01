@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 
 import { config, type MimicDirectorProvider } from '#engine/config.js'
-import type { ReasoningEffort } from '#engine/models.js'
+import { models, type ReasoningEffort } from '#engine/models.js'
 
 export interface ResolvedDirector {
 	provider: MimicDirectorProvider
@@ -21,7 +21,7 @@ export interface DirectorProviderOptions {
  * Resolve the LLM client and model for the voice director.
  *
  * Provider and model can be passed explicitly (preferred) or fall back
- * to defaults in config.
+ * to the provider default in config and the model registry.
  */
 export async function resolveVoiceDirectorProvider(options?: DirectorProviderOptions): Promise<ResolvedDirector> {
 	const provider = options?.provider ?? config.mimic.director.defaultProvider
@@ -31,10 +31,10 @@ export async function resolveVoiceDirectorProvider(options?: DirectorProviderOpt
 			return {
 				provider,
 				client: new OpenAI({ apiKey: config.mimic.openai.apiKey }),
-				model: options?.model ?? config.mimic.director.defaultOpenaiModel,
+				model: options?.model ?? models.director.openai.model,
 				// A caller overriding the model owns the effort too; the default effort is tuned for the default model.
 				reasoningEffort:
-					options?.reasoningEffort ?? (options?.model ? undefined : config.mimic.director.defaultOpenaiReasoningEffort),
+					options?.reasoningEffort ?? (options?.model ? undefined : models.director.openai.reasoningEffort),
 			}
 		case 'anthropic':
 			return {
@@ -43,7 +43,7 @@ export async function resolveVoiceDirectorProvider(options?: DirectorProviderOpt
 					apiKey: config.mimic.anthropic.apiKey,
 					baseURL: 'https://api.anthropic.com/v1/',
 				}),
-				model: options?.model ?? config.mimic.director.defaultAnthropicModel,
+				model: options?.model ?? models.director.anthropic.model,
 			}
 		default: {
 			const _exhaustive: never = provider

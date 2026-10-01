@@ -85,6 +85,66 @@ describe('call-machine runtime caller_turn_complete flow', () => {
 	})
 })
 
+describe('call-machine runtime: [end-call] tag', () => {
+	function depsWithGoodbyeDraft(endCallEnabled: boolean) {
+		const onHangupRequested = mock.fn<CallMachineRuntimeDeps['onHangupRequested']>()
+		const base = createMockRuntimeDeps()
+		const deps: CallMachineRuntimeDeps = {
+			...base.deps,
+			endCallEnabled,
+			onHangupRequested,
+			director: {
+				...base.deps.director,
+				streamDraftTokenized: mock.fn((transcript: string) => ({
+					userTranscript: transcript,
+					events: (async function* () {
+						yield { type: 'token' as const, value: 'Goodbye for now! ' }
+						yield { type: 'token' as const, value: '[end-call]' }
+						return 'Goodbye for now! [end-call]'
+					})(),
+				})),
+			} as CallMachineRuntimeDeps['director'],
+		}
+		return { deps, onHangupRequested }
+	}
+
+	it('requests a hangup after the goodbye turn commits when enabled', async () => {
+		const { deps, onHangupRequested } = depsWithGoodbyeDraft(true)
+		const engine = createCallMachineRuntime(deps)
+
+		const { outcomePromise } = startCallerTurnComplete(engine, 'bye then', 0.9)
+		const result = await outcomePromise
+
+		assert.equal(result.kind, 'committed')
+		if (result.kind === 'committed') {
+			assert.equal(result.turn.endCallRequested, true)
+			assert.equal(result.turn.agentResponse.includes('[end-call]'), false, 'tag is stripped from the transcript')
+		}
+		assert.deepEqual(
+			onHangupRequested.mock.calls.map((c) => c.arguments[0]),
+			['end_call_tag'],
+		)
+
+		engine.stop()
+	})
+
+	it('strips the tag but ignores it when disabled', async () => {
+		const { deps, onHangupRequested } = depsWithGoodbyeDraft(false)
+		const engine = createCallMachineRuntime(deps)
+
+		const { outcomePromise } = startCallerTurnComplete(engine, 'bye then', 0.9)
+		const result = await outcomePromise
+
+		assert.equal(result.kind, 'committed')
+		if (result.kind === 'committed') {
+			assert.equal(result.turn.agentResponse.includes('[end-call]'), false)
+		}
+		assert.equal(onHangupRequested.mock.calls.length, 0)
+
+		engine.stop()
+	})
+})
+
 describe('call-machine runtime: empty response safety net', () => {
 	it('emits a non-committed outcome when the pipeline sends no audio', async () => {
 		// `emitAudio: false` makes the fake TTS speaker push zero PCM

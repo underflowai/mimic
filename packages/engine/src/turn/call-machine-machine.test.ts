@@ -12,7 +12,7 @@ import { createActor, createMachine } from 'xstate'
 import { createFakeAudioTransport } from '#test/support/fake-audio-transport.js'
 import { waitForCondition } from '#test/support/wait-for-condition.js'
 import { callMachine, type CallMachineInput } from './call-machine.js'
-import type { TurnOutcome } from './types.js'
+import { emptyPlaybackSnapshot, type TurnOutcome } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,7 +52,7 @@ function createNoopInput(): CallMachineInput {
 			incrementTurn: () => {},
 			metrics: { recordTurnTiming: () => {} },
 		},
-		getAudioSenderSnapshot: () => ({ sentMs: 0, confirmedWordsPlayed: 0 }),
+		getPlaybackSnapshot: () => emptyPlaybackSnapshot,
 	}
 }
 
@@ -247,6 +247,7 @@ describe('CallMachine: interruptContext comes from TurnActor output', () => {
 		const specificInterruptContext = {
 			fullDraft: 'the full agent draft about insurance',
 			sentMs: 4200,
+			playedMs: 4000,
 			heardPortion: 'the full agent',
 		}
 
@@ -328,7 +329,7 @@ describe('CallMachine: caller_turn_complete while in interrupted state', () => {
 				kind: 'interrupted',
 				turnId: (context as { turnId: number }).turnId,
 				transcript: (context as { userTranscript: string }).userTranscript,
-				interruptContext: { fullDraft: 'draft', sentMs: 100, heardPortion: 'dr' },
+				interruptContext: { fullDraft: 'draft', sentMs: 100, playedMs: 100, heardPortion: 'dr' },
 				reason: 'caller_substantive_speech',
 			}),
 		})
@@ -380,7 +381,7 @@ describe('CallMachine: validation race promotion swap', () => {
 				},
 				eagerStartedAt: 123,
 				eagerGeneratedAt: 124,
-				sink: { chunks: [], done: false, forward: null },
+				sink: { chunks: [], words: [], done: false, forward: null },
 				triggerSynthesisStart: null,
 				ttsPromise: Promise.resolve(),
 				turnResumedSince: false,

@@ -9,18 +9,19 @@ import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, it, mock } from 'node:test'
 
 import { createFakeAudioTransport } from '#test/support/fake-audio-transport.js'
-import { ttsFrameBytes } from '../shared/audio-pacing.js'
+import type { TtsSynthesisListener } from '../audio/tts-speaker.js'
+import { ttsFrameBytes } from '../shared/audio-format.js'
 import { createCallMachineRuntime, type CallMachineRuntimeDeps } from './call-machine-runtime.js'
-import type { TurnOutcome } from './types.js'
+import type { HangupSource, TurnOutcome } from './types.js'
 
 function makeSilenceTts() {
 	return {
 		interrupt: mock.fn(),
 		connect: mock.fn(async () => {}),
 		close: mock.fn(),
-		preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => ({
+		preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => ({
 			pushTextDelta: () => {},
-			triggerSynthesisStart: () => onChunk(Buffer.alloc(ttsFrameBytes, 1)),
+			triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
 			audioComplete: Promise.resolve(),
 		})),
 	} as unknown as CallMachineRuntimeDeps['tts']
@@ -84,7 +85,8 @@ function createDeps(overrides?: LooseOverrides): CallMachineRuntimeDeps {
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		endCallEnabled: false,
+		onHangupRequested: mock.fn(),
 		...(rest as Partial<CallMachineRuntimeDeps>),
 	} satisfies CallMachineRuntimeDeps
 }
@@ -308,11 +310,11 @@ describe('silence watchdog', () => {
 
 	it('escalates retries to closing guidance then hangs up immediately after the closing turn commits', async () => {
 		const holder: { current?: ReturnType<typeof createCallMachineRuntime> } = {}
-		const onSilenceHangup = mock.fn<() => void>()
+		const onHangupRequested = mock.fn<(source: HangupSource) => void>()
 		const buildControlBlock = buildControlBlockMock()
 		const engine = createCallMachineRuntime(
 			createDeps({
-				onSilenceHangup,
+				onHangupRequested,
 				buildControlBlock,
 				onPlaybackComplete: autoPlayback(holder),
 			}),
@@ -335,7 +337,8 @@ describe('silence watchdog', () => {
 		}
 
 		assert.equal(engine.actor.getSnapshot().context.silenceFollowUpCount, 3)
-		assert.equal(onSilenceHangup.mock.calls.length, 1)
+		assert.equal(onHangupRequested.mock.calls.length, 1)
+		assert.equal(onHangupRequested.mock.calls[0]?.arguments[0], 'silence')
 		engine.stop()
 	})
 

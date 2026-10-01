@@ -5,7 +5,9 @@ import { flushImmediate, sleepMs } from '#test/support/async.js'
 import { shouldRunLiveMimicTests } from '#test/support/live-test-gate.js'
 import { AutoOpenMockSocket } from '#test/support/mock-websocket.js'
 import { waitForCondition } from '#test/support/wait-for-condition.js'
-import { createDeepgramTranscriber } from './deepgram-transcriber.js'
+import { config } from '#engine/config.js'
+import { asrSampleRate } from '../shared/audio-format.js'
+import { createDeepgramTranscriber, reconnectBackoffMs } from './deepgram-transcriber.js'
 
 process.env.DEEPGRAM_API_KEY ??= 'test-deepgram-key'
 
@@ -27,6 +29,37 @@ describe('createDeepgramTranscriber', () => {
 	it('accepts custom encoding and sample rate', () => {
 		const transcriber = createDeepgramTranscriber({ encoding: 'mulaw', sampleRate: 8000 })
 		assert.equal(typeof transcriber.connect, 'function')
+	})
+
+	it('connects to the configured Flux model with the shared ASR format by default', async () => {
+		const urls: string[] = []
+		const transcriber = createDeepgramTranscriber({
+			createWebSocket: (url) => {
+				urls.push(url)
+				return new HandshakingDeepgramSocket() as unknown as WebSocket
+			},
+		})
+		await transcriber.connect()
+		await transcriber.close()
+
+		const url = new URL(urls[0])
+		assert.equal(url.pathname, '/v2/listen')
+		assert.equal(url.searchParams.get('model'), config.mimic.flux.model)
+		assert.equal(url.searchParams.get('encoding'), 'linear16')
+		assert.equal(url.searchParams.get('sample_rate'), String(asrSampleRate))
+		assert.equal(url.searchParams.get('eot_threshold'), String(config.mimic.flux.eotThreshold))
+		assert.equal(url.searchParams.get('eager_eot_threshold'), String(config.mimic.flux.eagerEotThreshold))
+		assert.equal(url.searchParams.get('eot_timeout_ms'), String(config.mimic.flux.eotTimeoutMs))
+	})
+})
+
+describe('reconnectBackoffMs', () => {
+	it('doubles from the initial backoff and caps at the maximum', () => {
+		const { initialBackoffMs, maxBackoffMs } = config.mimic.flux.reconnect
+		assert.equal(reconnectBackoffMs(0), initialBackoffMs)
+		assert.equal(reconnectBackoffMs(1), initialBackoffMs * 2)
+		assert.equal(reconnectBackoffMs(2), initialBackoffMs * 4)
+		assert.equal(reconnectBackoffMs(20), maxBackoffMs)
 	})
 })
 
@@ -79,6 +112,15 @@ class MockDeepgramSocket extends AutoOpenMockSocket {
 
 	emitJson(payload: unknown) {
 		this.emitJsonMessage(payload)
+	}
+}
+
+/** Like Deepgram, answers `CloseStream` by closing the socket so `close()` does not wait for the handshake timeout. */
+class HandshakingDeepgramSocket extends MockDeepgramSocket {
+	override send(data: string | Buffer) {
+		if (this.isClosed) return
+		const payload = JSON.parse(String(data)) as { type?: string }
+		if (payload.type === 'CloseStream') queueMicrotask(() => this.close(1000, 'stream closed'))
 	}
 }
 

@@ -6,6 +6,7 @@
  * build control blocks — consumers provide them via callbacks.
  */
 
+import { endCallTag } from '../audio/tts-sanitizer.js'
 import type { InterruptContext } from './types.js'
 
 export type { InterruptContext } from './types.js'
@@ -93,6 +94,14 @@ export function appendToolLifecycleGuidance(parts: string[], ctx: ToolLifecycleC
 }
 
 // ── Interrupt context ───────────────────────────────────────────────
+
+// ── End-call guidance ────────────────────────────────────────────────
+
+export function appendEndCallGuidance(parts: string[]) {
+	parts.push(
+		`To hang up, end your reply with the tag ${endCallTag}. Use it only after you have said goodbye and nothing remains to be done; the tag is never spoken.`,
+	)
+}
 
 export function appendInterruptContext(parts: string[], ctx: InterruptContext | null) {
 	if (!ctx?.heardPortion) return

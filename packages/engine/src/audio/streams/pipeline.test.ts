@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { Writable } from 'node:stream'
 import { describe, it, mock } from 'node:test'
 
+import type { TtsSynthesisListener } from '../tts-speaker.js'
 import { createPipeline } from './pipeline.js'
 import type { AudioSink } from './types.js'
 
@@ -14,15 +15,22 @@ function createSink(): AudioSink {
 	sink.waitForPlayout = async () => {}
 	sink.clearQueue = () => {}
 	sink.writeFrameDirect = async () => {}
+	sink.queuedPlayoutMs = () => 0
 	return sink
 }
 
 describe('createPipeline', () => {
 	it('records LLM completion timing separately from first audio', async () => {
 		const tts = {
-			preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (chunk: Buffer) => void) => ({
+			preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => ({
 				pushTextDelta: () => {},
-				triggerSynthesisStart: () => onChunk(Buffer.alloc(640)),
+				triggerSynthesisStart: () => {
+					listener.onAudioChunk(Buffer.alloc(640))
+					listener.onWordTimings?.([
+						{ word: 'Hello', startMs: 0, endMs: 200 },
+						{ word: 'there.', startMs: 220, endMs: 500 },
+					])
+				},
 				audioComplete: Promise.resolve(),
 			})),
 		}
@@ -44,5 +52,10 @@ describe('createPipeline', () => {
 		assert.equal(result.audioSent, true)
 		assert.notEqual(result.firstAudioAt, null)
 		assert.notEqual(result.ttcMs, null)
+		assert.deepEqual(
+			pipeline.wordTimeline().map((w) => w.word),
+			['Hello', 'there.'],
+			'word timings from the speaker are exposed on the pipeline handle',
+		)
 	})
 })

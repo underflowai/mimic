@@ -29,6 +29,14 @@ export interface AudioSink extends Writable {
 	clearQueue(): void
 
 	/**
+	 * Milliseconds of audio the transport has accepted but not yet
+	 * played. Subtracted from the tracker's sent total to find how much
+	 * the caller has actually heard. Transports with no playout queue
+	 * return 0.
+	 */
+	queuedPlayoutMs(): number
+
+	/**
 	 * Bypass the pipeline and write a single PCM buffer directly to the
 	 * transport. Used for interrupt fade tails and backchannel clips
 	 * that are not part of a turn pipeline.
@@ -38,12 +46,12 @@ export interface AudioSink extends Writable {
 
 /**
  * Snapshot of per-turn playback progress. Exposed by `PlaybackTracker`
- * so the interrupt path can estimate the "heard portion" of the draft.
+ * so the interrupt path can work out the "heard portion" of the draft.
  */
 export interface PlaybackProgress {
+	/** Audio handed to the transport so far. */
 	sentMs: number
 	sentBytes: number
-	confirmedWordsPlayed: number
 	started: boolean
 }
 

@@ -3,34 +3,52 @@
  *
  * Pure synthesis executor — delegates WebSocket lifecycle to a
  * TtsSocketSession. This module sends text to Cartesia using
- * contexts with continuations and parses the streamed PCM response.
+ * contexts with continuations and parses the streamed response.
  *
  * Each turn gets its own `context_id`. Text deltas are sent with
  * `continue: true`; the final signal is an empty transcript with
  * `continue: false`. Cartesia streams `chunk` events back with
- * base64-encoded PCM, ending with a `done` event.
+ * base64-encoded PCM, interleaved with `timestamps` events carrying
+ * word-level timing, ending with a `done` event.
+ *
+ * PCM is emitted exactly as Cartesia delivers it; the pipeline's
+ * frame-align stage owns re-chunking and the end-of-stream fade.
  *
  * We use custom buffering (`max_buffer_delay_ms: 0`) because
  * upstream sentence-chunking already batches at phrase boundaries.
  */
 
-import { config } from '#engine/config.js'
-import { createLogger } from '#engine/logger.js'
 import { randomUUID } from 'node:crypto'
 
+import { config } from '#engine/config.js'
+import { createLogger } from '#engine/logger.js'
+
+import { ttsSampleRate } from '../shared/audio-format.js'
+import type { WordTiming } from '../shared/audio-pacing.js'
 import { safeInvoke } from '../shared/async-utils.js'
-import { applyLinearFade, ttsFrameBytes } from '../shared/audio-pacing.js'
-import { cartesiaResponseSchema, parseWebSocketJsonWithSchema, type WebSocketRawData } from './transport-schemas.js'
+import {
+	cartesiaResponseSchema,
+	parseWebSocketJsonWithSchema,
+	type CartesiaTimestamps,
+	type WebSocketRawData,
+} from './transport-schemas.js'
 import { createTtsSocketSession, type CreateWebSocket, type TtsSocketSession } from './tts-session.js'
 import { createDefaultWebSocket } from './ws-utils.js'
 
 const log = createLogger('mimic:tts')
 
-type AudioChunkCallback = (chunk: Buffer) => void
+export interface TtsSynthesisListener {
+	/** Raw PCM16 at `ttsSampleRate`, in whatever block sizes Cartesia emits. */
+	onAudioChunk: (chunk: Buffer) => void
+	/** Word timings for the audio generated so far, relative to the start of this synthesis. */
+	onWordTimings?: (words: WordTiming[]) => void
+}
 
-const ttsFadeMs = 10
-const maxBufferedPcmBytes = 5 * 1024 * 1024
-const synthesisWatchdogMs = 12_000
+export interface TtsSynthesisHandle {
+	pushTextDelta(delta: string): void
+	triggerSynthesisStart(): void
+	audioComplete: Promise<void>
+}
 
 export interface CreateTtsSpeakerOptions {
 	createWebSocket?: CreateWebSocket
@@ -38,9 +56,20 @@ export interface CreateTtsSpeakerOptions {
 	session?: TtsSocketSession
 }
 
+function toWordTimings(msg: CartesiaTimestamps): WordTiming[] {
+	const { words, start, end } = msg.word_timestamps
+	const count = Math.min(words.length, start.length, end.length)
+	const timings: WordTiming[] = []
+	for (let i = 0; i < count; i++) {
+		timings.push({ word: words[i], startMs: start[i] * 1000, endMs: end[i] * 1000 })
+	}
+	return timings
+}
+
 export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 	const createConn = options.createWebSocket ?? createDefaultWebSocket
 	const voiceId = options.voiceId ?? 'db6b0ed5-d5d3-463d-ae85-518a07d3c2b4'
+	const watchdogMs = config.mimic.timeouts.ttsSynthesisWatchdogMs
 
 	const session =
 		options.session ??
@@ -72,11 +101,12 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 			model_id: config.mimic.cartesia.ttsModel,
 			transcript,
 			voice: { mode: 'id', id: voiceId },
-			output_format: { container: 'raw', encoding: 'pcm_s16le', sample_rate: 48000 },
+			output_format: { container: 'raw', encoding: 'pcm_s16le', sample_rate: ttsSampleRate },
 			language: 'en',
 			context_id: contextId,
 			continue: isContinuation,
 			max_buffer_delay_ms: 0,
+			add_timestamps: true,
 		}
 	}
 
@@ -93,63 +123,20 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 	// ── Core synthesis ───────────────────────────────────────────────────
 
 	/**
-	 * Listens for Cartesia chunk/done/error events scoped to `contextId`.
-	 * Audio chunks arrive as base64, are decoded, frame-aligned, and
-	 * emitted via `onAudioChunk`. Resolves when `done` arrives; rejects
+	 * Listens for Cartesia events scoped to `contextId`. Audio chunks are
+	 * base64-decoded and handed to the listener as-is; `timestamps` events
+	 * are converted to `WordTiming`s. Resolves when `done` arrives; rejects
 	 * on error or watchdog timeout.
 	 */
-	function synthesizeOnSocket(ws: WebSocket, contextId: string, onAudioChunk: AudioChunkCallback) {
-		const pcmParts: Buffer[] = []
-		let pcmLen = 0
+	function synthesizeOnSocket(ws: WebSocket, contextId: string, listener: TtsSynthesisListener) {
 		let settled = false
 		let failSynthesis: ((err: Error) => void) | null = null
 
-		const concatParts = () => {
-			if (pcmParts.length === 0) return Buffer.alloc(0)
-			const buf = Buffer.concat(pcmParts)
-			pcmParts.length = 0
-			pcmLen = 0
-			return buf
-		}
-
-		const emitChunk = (chunk: Buffer) => {
-			let callbackFailed = false
-			safeInvoke(
-				() => onAudioChunk(chunk),
-				(callbackErr) => {
-					callbackFailed = true
-					failSynthesis?.(new Error(`TTS audio callback failed: ${callbackErr.message}`))
-					log.error({ err: callbackErr }, 'onAudioChunk callback threw')
-				},
-			)
-			return !callbackFailed
-		}
-
-		const drainFullFrames = () => {
-			if (pcmLen < ttsFrameBytes) return
-			let pcmBuffer = concatParts()
-			while (pcmBuffer.length >= ttsFrameBytes && !settled) {
-				const slice = pcmBuffer.subarray(0, ttsFrameBytes)
-				pcmBuffer = pcmBuffer.subarray(ttsFrameBytes)
-				if (!emitChunk(slice)) return
-			}
-			if (pcmBuffer.length > 0) {
-				pcmParts.push(pcmBuffer)
-				pcmLen = pcmBuffer.length
-			}
-		}
-
-		const drainRemainderWithFade = () => {
-			if (settled) return
-			const pcmBuffer = concatParts()
-			let offset = 0
-			while (offset < pcmBuffer.length && !settled) {
-				const end = Math.min(offset + ttsFrameBytes, pcmBuffer.length)
-				const slice = pcmBuffer.subarray(offset, end)
-				const isLast = end >= pcmBuffer.length
-				if (!emitChunk(isLast ? applyLinearFade(slice, ttsFadeMs) : slice)) return
-				offset = end
-			}
+		const deliver = (what: string, fn: () => void) => {
+			safeInvoke(fn, (callbackErr) => {
+				failSynthesis?.(new Error(`TTS ${what} callback failed: ${callbackErr.message}`))
+				log.error({ err: callbackErr }, `${what} callback threw`)
+			})
 		}
 
 		const promise = new Promise<void>((resolve, reject) => {
@@ -165,18 +152,11 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 			const resetWatchdog = () => {
 				if (watchdog) clearTimeout(watchdog)
 				watchdog = setTimeout(() => {
-					fail(new Error(`Cartesia TTS synthesis timed out after ${synthesisWatchdogMs}ms`))
-				}, synthesisWatchdogMs)
+					fail(new Error(`Cartesia TTS synthesis timed out after ${watchdogMs}ms`))
+				}, watchdogMs)
 			}
 
 			const finish = () => {
-				if (settled) return
-				settled = true
-				cleanup()
-				resolve()
-			}
-
-			const cancel = () => {
 				if (settled) return
 				settled = true
 				cleanup()
@@ -191,7 +171,8 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 			}
 			failSynthesis = fail
 
-			session.markSynthesisStart(contextId, cancel)
+			// An interrupt cancels quietly: the pipeline is already being torn down.
+			session.markSynthesisStart(contextId, finish)
 
 			function onClose(event: CloseEvent) {
 				if (settled) return
@@ -215,41 +196,36 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 				const msg = parsed.data
 				if ('context_id' in msg && msg.context_id !== contextId) return
 
-				if (msg.type === 'error') {
-					const errMsg = msg.message ?? msg.error ?? msg.title ?? 'unknown error'
-					log.error({ msg: errMsg }, 'Cartesia TTS error')
-					fail(new Error(`Cartesia TTS: ${errMsg}`))
-					return
-				}
-
-				if (msg.type === 'chunk') {
-					try {
-						const decoded = Buffer.from(msg.data, 'base64')
-						pcmParts.push(decoded)
-						pcmLen += decoded.length
-						if (pcmLen > maxBufferedPcmBytes) {
-							log.error({ pcmLen }, 'buffered PCM exceeds memory cap, aborting synthesis')
-							fail(new Error('Cartesia TTS buffered PCM exceeded memory cap'))
+				switch (msg.type) {
+					case 'error': {
+						const errMsg = msg.message ?? msg.error ?? msg.title ?? 'unknown error'
+						log.error({ msg: errMsg }, 'Cartesia TTS error')
+						fail(new Error(`Cartesia TTS: ${errMsg}`))
+						return
+					}
+					case 'chunk': {
+						let decoded: Buffer
+						try {
+							decoded = Buffer.from(msg.data, 'base64')
+						} catch (err) {
+							log.error({ err }, 'failed to decode audio chunk')
+							fail(new Error('Cartesia TTS audio chunk decode failed'))
 							return
 						}
-						drainFullFrames()
-					} catch (err) {
-						log.error({ err }, 'failed to decode audio chunk')
-						fail(new Error('Cartesia TTS audio chunk decode failed'))
+						if (decoded.length > 0) deliver('audio', () => listener.onAudioChunk(decoded))
+						return
 					}
-					return
-				}
-
-				if (msg.type === 'flush_done') {
-					drainFullFrames()
-					return
-				}
-
-				if (msg.type === 'done') {
-					drainFullFrames()
-					drainRemainderWithFade()
-					finish()
-					return
+					case 'timestamps': {
+						if (!listener.onWordTimings) return
+						const timings = toWordTimings(msg)
+						if (timings.length > 0) deliver('word timing', () => listener.onWordTimings!(timings))
+						return
+					}
+					case 'done':
+						finish()
+						return
+					case 'flush_done':
+						return
 				}
 			}
 
@@ -259,19 +235,18 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 		})
 		promise.catch(() => {})
 
-		return {
-			promise,
-			cancel() {
-				settled = true
-			},
-		}
+		return promise
 	}
 
 	// ── Public synthesis API ─────────────────────────────────────────────
 
-	const noopHandle = { pushTextDelta(_text: string) {}, triggerSynthesisStart() {}, audioComplete: Promise.resolve() }
+	const noopHandle: TtsSynthesisHandle = {
+		pushTextDelta() {},
+		triggerSynthesisStart() {},
+		audioComplete: Promise.resolve(),
+	}
 
-	async function preSendTextForSynthesis(text: string, onAudioChunk: AudioChunkCallback) {
+	async function preSendTextForSynthesis(text: string, listener: TtsSynthesisListener): Promise<TtsSynthesisHandle> {
 		const trimmed = text.trim()
 		if (!trimmed) {
 			log.warn('skipping empty pre-send')
@@ -290,8 +265,7 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 		}
 
 		const contextId = `turn-${randomUUID()}`
-		const synth = synthesizeOnSocket(ws, contextId, onAudioChunk)
-		synth.promise.catch(() => {})
+		const synthesis = synthesizeOnSocket(ws, contextId, listener)
 
 		if (!sendJson(ws, buildGenerationMessage(contextId, trimmed, true), 'preSendText:first')) {
 			throw new Error('failed to send first text chunk')
@@ -304,7 +278,7 @@ export function createTtsSpeaker(options: CreateTtsSpeakerOptions = {}) {
 
 		let doneSent = false
 
-		const audioComplete = synth.promise.finally(() => {
+		const audioComplete = synthesis.finally(() => {
 			session.markSynthesisEnd()
 		})
 

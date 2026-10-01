@@ -1,11 +1,11 @@
 import { EventEmitter } from 'node:events'
 
-import { assign, createActor, setup } from 'xstate'
-
 import { config } from '#engine/config.js'
 import { createLogger } from '#engine/logger.js'
 
+import { asrEncoding, asrSampleRate } from '../shared/audio-format.js'
 import { safeInvoke, withTimeout } from '../shared/async-utils.js'
+import { monotonicClock } from '../shared/clock.js'
 import { latestWinsQueue } from '../shared/task.js'
 import { fluxEventSchema, parseWebSocketJsonWithSchema, type WebSocketRawData } from './transport-schemas.js'
 import type { CallerTurnEvent } from './types.js'
@@ -40,99 +40,35 @@ type TranscriberEvents = {
 	callerTurn: [event: CallerTurnEvent]
 }
 
-interface LifecycleContext {
+interface Lifecycle {
 	isClosing: boolean
+	/** A reconnect attempt is scheduled or in flight. */
 	reconnecting: boolean
-	reconnectBackoffMs: number
+	/** Consecutive failed reconnects since the last healthy connection. */
 	reconnectAttempts: number
+	/** Re-applied after a reconnect so keyterms and thresholds survive the drop. */
 	latestConfigureOptions: FluxConfigureOptions | null
 }
 
-type LifecycleEvent =
-	| { type: 'connect_started' }
-	| { type: 'close_started' }
-	| { type: 'close_finished' }
-	| { type: 'reconnect_started' }
-	| { type: 'reconnect_stopped' }
-	| { type: 'reconnect_succeeded' }
-	| { type: 'configure_requested'; options: FluxConfigureOptions }
+/** Exponential backoff: 500, 1000, 2000, … capped at `maxBackoffMs`. */
+export function reconnectBackoffMs(previousAttempts: number) {
+	const { initialBackoffMs, maxBackoffMs } = config.mimic.flux.reconnect
+	return Math.min(initialBackoffMs * 2 ** previousAttempts, maxBackoffMs)
+}
 
 export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
-	const encoding = opts?.encoding ?? 'linear16'
-	const sampleRate = opts?.sampleRate ?? 16000
+	const encoding = opts?.encoding ?? asrEncoding
+	const sampleRate = opts?.sampleRate ?? asrSampleRate
 	const createConn = opts?.createWebSocket ?? createDefaultWebSocket
 	const emitter = new EventEmitter<TranscriberEvents>()
-	const maxReconnectAttempts = 5
+	const { maxAttempts: maxReconnectAttempts } = config.mimic.flux.reconnect
 
-	const lifecycleSetup = setup({
-		types: {
-			context: {} as LifecycleContext,
-			events: {} as LifecycleEvent,
-		},
-	})
-
-	const lifecycleMachine = lifecycleSetup.createMachine({
-		id: 'deepgram-lifecycle',
-		initial: 'running',
-		context: {
-			isClosing: false,
-			reconnecting: false,
-			reconnectBackoffMs: 0,
-			reconnectAttempts: 0,
-			latestConfigureOptions: null,
-		},
-		states: {
-			running: {
-				on: {
-					connect_started: {
-						actions: assign({
-							isClosing: false,
-							reconnecting: false,
-							reconnectBackoffMs: 0,
-							reconnectAttempts: 0,
-						}),
-					},
-					close_started: {
-						actions: assign({
-							isClosing: true,
-							reconnecting: false,
-						}),
-					},
-					close_finished: {
-						actions: assign({
-							isClosing: false,
-						}),
-					},
-					reconnect_started: {
-						actions: assign({
-							reconnecting: true,
-							reconnectAttempts: ({ context }) => context.reconnectAttempts + 1,
-							reconnectBackoffMs: ({ context }) => Math.min((context.reconnectBackoffMs || 500) * 2, 10_000),
-						}),
-					},
-					reconnect_stopped: {
-						actions: assign({
-							reconnecting: false,
-						}),
-					},
-					reconnect_succeeded: {
-						actions: assign({
-							reconnecting: false,
-							reconnectAttempts: 0,
-							reconnectBackoffMs: 0,
-						}),
-					},
-					configure_requested: {
-						actions: assign({
-							latestConfigureOptions: ({ event }) => (event.type === 'configure_requested' ? event.options : null),
-						}),
-					},
-				},
-			},
-		},
-	})
-
-	const lifecycle = createActor(lifecycleMachine).start()
+	const lifecycle: Lifecycle = {
+		isClosing: false,
+		reconnecting: false,
+		reconnectAttempts: 0,
+		latestConfigureOptions: null,
+	}
 
 	let socket: WebSocket | null = null
 	let closeResolve: (() => void) | null = null
@@ -146,19 +82,10 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 
 	// Backpressure: cap bytes queued on the socket itself. If Deepgram or
 	// the TCP stack stalls, `bufferedAmount` balloons and we will drop the
-	// oldest buffered audio rather than grow unbounded. 2s of 16 kHz mono
-	// linear16 is ~64KB; we allow 8s worth before dropping.
+	// newest caller audio rather than grow unbounded. We allow 8s worth.
 	const socketBackpressureLimitBytes = sampleRate * bytesPerSample * 8
 	let droppedBytesSinceLastLog = 0
 	let lastDropLogAt = 0
-
-	function ctx() {
-		return lifecycle.getSnapshot().context
-	}
-
-	function isClosing() {
-		return ctx().isClosing
-	}
 
 	function clearReconnectTimer() {
 		clearTimeout(reconnectTimer ?? undefined)
@@ -213,7 +140,7 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 		const activeSocket = socket
 		activeSocket.send(JSON.stringify(buildConfigureMessage(options)))
 		try {
-			await withTimeout(beginConfigureAwait(), 2000, {
+			await withTimeout(beginConfigureAwait(), config.mimic.timeouts.transcriberConfigureAckMs, {
 				message: 'deepgram configure timed out',
 				onTimeout: clearConfigureAck,
 			})
@@ -231,13 +158,14 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	})
 
 	function buildUrl() {
+		const { flux } = config.mimic
 		const params = new URLSearchParams({
-			model: 'flux-general-en',
+			model: flux.model,
 			encoding,
 			sample_rate: String(sampleRate),
-			eot_threshold: String(config.mimic.flux.eotThreshold),
-			eager_eot_threshold: String(config.mimic.flux.eagerEotThreshold),
-			eot_timeout_ms: String(config.mimic.flux.eotTimeoutMs),
+			eot_threshold: String(flux.eotThreshold),
+			eager_eot_threshold: String(flux.eagerEotThreshold),
+			eot_timeout_ms: String(flux.eotTimeoutMs),
 		})
 		return `wss://api.deepgram.com/v2/listen?${params}`
 	}
@@ -280,8 +208,8 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	function handleConfigureFailure(data: { description?: string; message?: string }) {
 		const detail = data.description ?? data.message ?? 'unknown'
 		log.error({ description: detail }, 'configure failed')
-		settleConfigureFailure(`Deepgram configure failed: ${detail}`)
 		const message = `Deepgram configure failed: ${detail}`
+		settleConfigureFailure(message)
 		emitter.emit('error', message)
 		emitter.emit('callerTurn', { type: 'error', message })
 	}
@@ -387,27 +315,11 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 			}
 			resolveCloseWaiter()
 			settleConfigureFailure('Deepgram socket closed before configure ack')
-			if (!ctx().isClosing && code !== 1000) return attemptReconnect()
-			lifecycle.send({ type: 'close_finished' })
+			if (!lifecycle.isClosing && code !== 1000) return attemptReconnect()
+			lifecycle.isClosing = false
 		}
 		ws.addEventListener('message', onMessage)
 		ws.addEventListener('close', onClose)
-	}
-
-	function reachedReconnectLimit(snapshot: LifecycleContext) {
-		return snapshot.reconnectAttempts >= maxReconnectAttempts
-	}
-
-	function shouldSkipReconnect(snapshot: LifecycleContext) {
-		if (snapshot.reconnecting) return true
-		if (!reachedReconnectLimit(snapshot)) return false
-		log.error({ attempts: snapshot.reconnectAttempts }, 'reconnection failed after max attempts')
-		emitter.emit('error', 'Deepgram reconnection failed after max attempts')
-		return true
-	}
-
-	function stopReconnect() {
-		lifecycle.send({ type: 'reconnect_stopped' })
 	}
 
 	function closeReconnectSocket(ws: WebSocket, context: string) {
@@ -421,11 +333,11 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 		// Ensure reconnection starts with a clean coalescing buffer.
 		resetBufferedAudio()
 		socket = ws
-		lifecycle.send({ type: 'reconnect_succeeded' })
+		lifecycle.reconnecting = false
+		lifecycle.reconnectAttempts = 0
 		log.info('reconnected successfully')
-		const latestConfigure = ctx().latestConfigureOptions
-		if (latestConfigure) {
-			enqueueConfigureLatest(latestConfigure)
+		if (lifecycle.latestConfigureOptions) {
+			enqueueConfigureLatest(lifecycle.latestConfigureOptions)
 		}
 	}
 
@@ -437,30 +349,9 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 		return createConn(buildUrl(), { headers: buildHeaders() })
 	}
 
-	function scheduleReconnectAttempt(backoffMs: number) {
-		reconnectTimer = setTimeout(() => {
-			reconnectTimer = null
-			void runReconnectAttempt()
-		}, backoffMs)
-	}
-
-	function handleReconnectCancelled(ws: WebSocket) {
-		closeReconnectSocket(ws, 'reconnect socket.close failed after shutdown')
-		stopReconnect()
-	}
-
-	function handleReconnectFailure(ws: WebSocket | null, err: unknown) {
-		if (ws) {
-			closeReconnectSocket(ws, 'reconnect socket.close failed')
-		}
-		stopReconnect()
-		log.error({ err, attempt: ctx().reconnectAttempts }, 'reconnect attempt failed')
-		attemptReconnect()
-	}
-
 	async function runReconnectAttempt() {
-		if (isClosing()) {
-			stopReconnect()
+		if (lifecycle.isClosing) {
+			lifecycle.reconnecting = false
 			return
 		}
 		let ws: WebSocket | null = null
@@ -470,24 +361,35 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 			await awaitWebSocketOpen(ws, (err) => {
 				log.error({ err }, 'WebSocket error during reconnect')
 			})
-			if (isClosing()) {
-				handleReconnectCancelled(ws)
+			if (lifecycle.isClosing) {
+				closeReconnectSocket(ws, 'reconnect socket.close failed after shutdown')
+				lifecycle.reconnecting = false
 				return
 			}
 			applyReconnectSuccess(ws)
 		} catch (err) {
-			handleReconnectFailure(ws, err)
+			if (ws) closeReconnectSocket(ws, 'reconnect socket.close failed')
+			lifecycle.reconnecting = false
+			log.error({ err, attempt: lifecycle.reconnectAttempts }, 'reconnect attempt failed')
+			attemptReconnect()
 		}
 	}
 
 	function attemptReconnect() {
-		if (isClosing()) return
-		const snapshot = ctx()
-		if (shouldSkipReconnect(snapshot)) return
-		lifecycle.send({ type: 'reconnect_started' })
-		const started = ctx()
-		log.info({ attempt: started.reconnectAttempts, backoffMs: started.reconnectBackoffMs }, 'reconnecting')
-		scheduleReconnectAttempt(started.reconnectBackoffMs)
+		if (lifecycle.isClosing || lifecycle.reconnecting) return
+		if (lifecycle.reconnectAttempts >= maxReconnectAttempts) {
+			log.error({ attempts: lifecycle.reconnectAttempts }, 'reconnection failed after max attempts')
+			emitter.emit('error', 'Deepgram reconnection failed after max attempts')
+			return
+		}
+		const backoffMs = reconnectBackoffMs(lifecycle.reconnectAttempts)
+		lifecycle.reconnecting = true
+		lifecycle.reconnectAttempts += 1
+		log.info({ attempt: lifecycle.reconnectAttempts, backoffMs }, 'reconnecting')
+		reconnectTimer = setTimeout(() => {
+			reconnectTimer = null
+			void runReconnectAttempt()
+		}, backoffMs)
 	}
 
 	function resetBufferedAudio() {
@@ -507,7 +409,9 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	function connect() {
 		if (connectPromise) return connectPromise
 		if (socket) return Promise.resolve()
-		lifecycle.send({ type: 'connect_started' })
+		lifecycle.isClosing = false
+		lifecycle.reconnecting = false
+		lifecycle.reconnectAttempts = 0
 		clearReconnectTimer()
 		resetBufferedAudio()
 		const thisSocket = connectSocket()
@@ -532,19 +436,19 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	}
 
 	function configure(options: FluxConfigureOptions) {
-		lifecycle.send({ type: 'configure_requested', options })
+		lifecycle.latestConfigureOptions = options
 		if (!socket || socket.readyState !== WebSocket.OPEN) return
 		enqueueConfigureLatest(options)
 	}
 
 	function sendAudio(audioBytes: Buffer) {
-		if (ctx().isClosing || !socket || socket.readyState !== WebSocket.OPEN) return
+		if (lifecycle.isClosing || !socket || socket.readyState !== WebSocket.OPEN) return
 
 		// Guard against socket-level backpressure: if the ws library is
 		// holding unsent bytes, stop queuing more audio so memory stays bounded.
 		if (socket.bufferedAmount > socketBackpressureLimitBytes) {
 			droppedBytesSinceLastLog += audioBytes.length
-			const now = Date.now()
+			const now = monotonicClock.now()
 			if (now - lastDropLogAt >= 1_000) {
 				log.warn(
 					{ bufferedAmount: socket.bufferedAmount, droppedBytes: droppedBytesSinceLastLog },
@@ -586,7 +490,7 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 			new Promise<void>((resolve) => {
 				closeResolve = resolve
 			}),
-			2000,
+			config.mimic.timeouts.transcriberCloseHandshakeMs,
 			{
 				message: 'deepgram close handshake timed out',
 				onTimeout: () => {
@@ -613,7 +517,8 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	function close() {
 		if (closePromise) return closePromise
 		closePromise = (async () => {
-			lifecycle.send({ type: 'close_started' })
+			lifecycle.isClosing = true
+			lifecycle.reconnecting = false
 			settleConfigureFailure('Deepgram transcriber closed')
 			clearReconnectTimer()
 			flushAudio()

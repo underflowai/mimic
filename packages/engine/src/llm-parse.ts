@@ -1,20 +1,15 @@
 import type OpenAI from 'openai'
 import type { ZodType } from 'zod'
 
-import { config } from '#engine/config.js'
 import { createLogger } from '#engine/logger.js'
-import { supportsTemperature } from '#engine/models.js'
+import { models, supportsTemperature } from '#engine/models.js'
+
+import { isAbortLikeError } from './shared/async-utils.js'
 
 const log = createLogger('llm-parse')
 
 function extractLlmContent(result: { choices: Array<{ message?: { content?: string | null } }> }) {
 	return result.choices[0]?.message?.content?.trim() ?? ''
-}
-
-function isAbortLikeError(err: unknown) {
-	if (err instanceof DOMException && err.name === 'AbortError') return true
-	if (err instanceof Error && err.name === 'AbortError') return true
-	return false
 }
 
 export function safeParseJsonWithSchema<T extends ZodType>(raw: string, schema: T, tag: string) {
@@ -37,9 +32,12 @@ export interface BackgroundModelOptions {
 	temperature?: number
 	maxTokens?: number
 	signal?: AbortSignal
-	model?: string
 }
 
+/**
+ * One JSON-mode chat completion against the background model, validated
+ * against `schema`. Returns null on abort, empty output, or invalid shape.
+ */
 export async function callBackgroundModel<T extends ZodType>(
 	client: OpenAI,
 	systemPrompt: string,
@@ -49,15 +47,14 @@ export async function callBackgroundModel<T extends ZodType>(
 	opts?: BackgroundModelOptions,
 ) {
 	if (opts?.signal?.aborted) return null
+	const { model, reasoningEffort } = models.background
 	try {
-		const model = opts?.model ?? config.mimic.backgroundModel
-		const reasoningEffort = config.mimic.backgroundReasoningEffort
 		const result = await client.chat.completions.create(
 			{
 				model,
 				// openai@5.23 types lack 'none'; the API accepts it (verified 2026-09-30).
 				reasoning_effort: reasoningEffort as OpenAI.ReasoningEffort,
-				...(supportsTemperature(model, reasoningEffort) && { temperature: opts?.temperature ?? 0 }),
+				...(supportsTemperature(model, reasoningEffort) ? { temperature: opts?.temperature ?? 0 } : {}),
 				max_completion_tokens: opts?.maxTokens ?? 100,
 				response_format: { type: 'json_object' },
 				messages: [

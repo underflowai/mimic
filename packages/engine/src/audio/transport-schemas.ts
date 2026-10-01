@@ -44,16 +44,36 @@ export const cartesiaFlushDoneSchema = z
 	})
 	.passthrough()
 
+/**
+ * Word-level timing for the audio generated so far (requires `add_timestamps: true`
+ * on the generation request). Times are seconds from the start of the context's audio.
+ */
+export const cartesiaTimestampsSchema = z
+	.object({
+		type: z.literal('timestamps'),
+		context_id: z.string(),
+		done: z.boolean().optional(),
+		status_code: z.number().optional(),
+		word_timestamps: z.object({
+			words: z.array(z.string()),
+			start: z.array(z.number()),
+			end: z.array(z.number()),
+		}),
+	})
+	.passthrough()
+
 export const cartesiaResponseSchema = z.union([
 	cartesiaChunkSchema,
 	cartesiaDoneSchema,
 	cartesiaErrorSchema,
 	cartesiaFlushDoneSchema,
+	cartesiaTimestampsSchema,
 ])
 
 export type CartesiaChunk = z.infer<typeof cartesiaChunkSchema>
 export type CartesiaDone = z.infer<typeof cartesiaDoneSchema>
 export type CartesiaError = z.infer<typeof cartesiaErrorSchema>
+export type CartesiaTimestamps = z.infer<typeof cartesiaTimestampsSchema>
 export type CartesiaResponse = z.infer<typeof cartesiaResponseSchema>
 
 // ── Deepgram Flux ──────────────────────────────────────────────────

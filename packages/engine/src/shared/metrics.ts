@@ -84,30 +84,57 @@ export interface CallMetrics {
 	readonly discardedTurns: number
 }
 
-export interface CallLatencySummary {
+export interface SeriesSummary {
+	avg: number
+	p50: number
+	p95: number
+	min: number
+	max: number
+}
+
+/** The per-turn latency fields; each becomes a Sentry distribution and a summary series. */
+type TurnTimingField = Exclude<keyof TurnTiming, 'turnId' | 'kind'>
+
+const turnTimingMetrics: Record<TurnTimingField, string> = {
+	generationToAudioCompleteMs: 'mimic.turn.generation_to_audio_complete_ms',
+	generationToFirstAudioMs: 'mimic.turn.generation_to_first_audio_ms',
+	turnCompleteToFirstAudioMs: 'mimic.turn.turn_complete_to_first_audio_ms',
+	vadEndToTurnCompleteMs: 'mimic.turn.vad_end_to_turn_complete_ms',
+	vadEndToFirstAudioMs: 'mimic.turn.vad_end_to_first_audio_ms',
+	ttsFirstByteMs: 'mimic.turn.tts_first_byte_ms',
+	llmFirstTokenMs: 'mimic.turn.llm_first_token_ms',
+	llmCompleteMs: 'mimic.turn.llm_complete_ms',
+}
+
+const turnTimingFields = Object.keys(turnTimingMetrics) as TurnTimingField[]
+
+export type CallLatencySummary = Record<TurnTimingField, SeriesSummary> & {
 	turns: number
-	generationToAudioCompleteMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	generationToFirstAudioMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	turnCompleteToFirstAudioMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	vadEndToTurnCompleteMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	vadEndToFirstAudioMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	ttsFirstByteMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	llmFirstTokenMs: { avg: number; p50: number; p95: number; min: number; max: number }
-	llmCompleteMs: { avg: number; p50: number; p95: number; min: number; max: number }
 	barges: number
 	softPauses: number
 	discarded: number
 }
 
-function summarizeSeries(values: number[]) {
+/** Values of one timing field across turns, skipping turns where it was not measured. */
+function timingSeries(turnTimings: readonly TurnTiming[], field: TurnTimingField): number[] {
+	return turnTimings.map((t) => t[field]).filter((v): v is number => v !== null)
+}
+
+function average(values: readonly number[]) {
+	return Math.round(values.reduce((a, b) => a + b, 0) / values.length)
+}
+
+function percentile(sorted: readonly number[], fraction: number) {
+	return sorted[Math.min(Math.ceil(sorted.length * fraction) - 1, sorted.length - 1)]
+}
+
+export function summarizeSeries(values: readonly number[]): SeriesSummary {
 	if (values.length === 0) return { avg: 0, p50: 0, p95: 0, min: 0, max: 0 }
 	const sorted = [...values].sort((a, b) => a - b)
-	const p50Index = Math.min(Math.ceil(sorted.length * 0.5) - 1, sorted.length - 1)
-	const p95Index = Math.min(Math.ceil(sorted.length * 0.95) - 1, sorted.length - 1)
 	return {
-		avg: Math.round(values.reduce((a, b) => a + b, 0) / values.length),
-		p50: sorted[p50Index],
-		p95: sorted[p95Index],
+		avg: average(values),
+		p50: percentile(sorted, 0.5),
+		p95: percentile(sorted, 0.95),
 		min: sorted[0],
 		max: sorted[sorted.length - 1],
 	}
@@ -143,45 +170,9 @@ export function createCallMetrics() {
 
 		recordTurnTiming(timing: TurnTiming) {
 			turnTimings.push(timing)
-			telemetry.metrics.distribution('mimic.turn.generation_to_audio_complete_ms', timing.generationToAudioCompleteMs, {
-				unit: 'millisecond',
-			})
-			if (timing.generationToFirstAudioMs !== null) {
-				telemetry.metrics.distribution('mimic.turn.generation_to_first_audio_ms', timing.generationToFirstAudioMs, {
-					unit: 'millisecond',
-				})
-			}
-			if (timing.turnCompleteToFirstAudioMs !== null) {
-				telemetry.metrics.distribution(
-					'mimic.turn.turn_complete_to_first_audio_ms',
-					timing.turnCompleteToFirstAudioMs,
-					{ unit: 'millisecond' },
-				)
-			}
-			if (timing.vadEndToTurnCompleteMs !== null) {
-				telemetry.metrics.distribution('mimic.turn.vad_end_to_turn_complete_ms', timing.vadEndToTurnCompleteMs, {
-					unit: 'millisecond',
-				})
-			}
-			if (timing.vadEndToFirstAudioMs !== null) {
-				telemetry.metrics.distribution('mimic.turn.vad_end_to_first_audio_ms', timing.vadEndToFirstAudioMs, {
-					unit: 'millisecond',
-				})
-			}
-			if (timing.ttsFirstByteMs !== null) {
-				telemetry.metrics.distribution('mimic.turn.tts_first_byte_ms', timing.ttsFirstByteMs, {
-					unit: 'millisecond',
-				})
-			}
-			if (timing.llmFirstTokenMs !== null) {
-				telemetry.metrics.distribution('mimic.turn.llm_first_token_ms', timing.llmFirstTokenMs, {
-					unit: 'millisecond',
-				})
-			}
-			if (timing.llmCompleteMs !== null) {
-				telemetry.metrics.distribution('mimic.turn.llm_complete_ms', timing.llmCompleteMs, {
-					unit: 'millisecond',
-				})
+			for (const field of turnTimingFields) {
+				const value = timing[field]
+				if (value !== null) telemetry.metrics.distribution(turnTimingMetrics[field], value, { unit: 'millisecond' })
 			}
 			telemetry.metrics.count('mimic.turn.generation_strategy', 1, { attributes: { strategy: timing.kind } })
 		},
@@ -236,32 +227,12 @@ export function createCallMetrics() {
 		},
 
 		summarize(): CallLatencySummary {
-			const generationToComplete = turnTimings.map((t) => t.generationToAudioCompleteMs)
-			const generationToFirstAudio = turnTimings
-				.filter((t) => t.generationToFirstAudioMs !== null)
-				.map((t) => t.generationToFirstAudioMs!)
-			const turnCompleteToFirstAudio = turnTimings
-				.filter((t) => t.turnCompleteToFirstAudioMs !== null)
-				.map((t) => t.turnCompleteToFirstAudioMs!)
-			const vadToTurnComplete = turnTimings
-				.filter((t) => t.vadEndToTurnCompleteMs !== null)
-				.map((t) => t.vadEndToTurnCompleteMs!)
-			const vadToFirstAudio = turnTimings
-				.filter((t) => t.vadEndToFirstAudioMs !== null)
-				.map((t) => t.vadEndToFirstAudioMs!)
-			const ttsFirstBytes = turnTimings.filter((t) => t.ttsFirstByteMs !== null).map((t) => t.ttsFirstByteMs!)
-			const llmFirstTokens = turnTimings.filter((t) => t.llmFirstTokenMs !== null).map((t) => t.llmFirstTokenMs!)
-			const llmCompletes = turnTimings.filter((t) => t.llmCompleteMs !== null).map((t) => t.llmCompleteMs!)
+			const series = Object.fromEntries(
+				turnTimingFields.map((field) => [field, summarizeSeries(timingSeries(turnTimings, field))]),
+			) as Record<TurnTimingField, SeriesSummary>
 			return {
+				...series,
 				turns: turnTimings.length,
-				generationToAudioCompleteMs: summarizeSeries(generationToComplete),
-				generationToFirstAudioMs: summarizeSeries(generationToFirstAudio),
-				turnCompleteToFirstAudioMs: summarizeSeries(turnCompleteToFirstAudio),
-				vadEndToTurnCompleteMs: summarizeSeries(vadToTurnComplete),
-				vadEndToFirstAudioMs: summarizeSeries(vadToFirstAudio),
-				ttsFirstByteMs: summarizeSeries(ttsFirstBytes),
-				llmFirstTokenMs: summarizeSeries(llmFirstTokens),
-				llmCompleteMs: summarizeSeries(llmCompletes),
 				barges: bargeEvents.length,
 				softPauses: softPauseEvents.length,
 				discarded: discardedTurns,
@@ -305,27 +276,13 @@ export function publishCallSummary(snapshot: CallMetrics, durationSeconds: numbe
 		telemetry.metrics.gauge('mimic.call.soft_pause_escalation_rate', escalated / snapshot.softPauseEvents.length)
 	}
 
-	const turnCompleteToFirstAudio = snapshot.turnTimings
-		.filter((t) => t.turnCompleteToFirstAudioMs !== null)
-		.map((t) => t.turnCompleteToFirstAudioMs!)
-	if (turnCompleteToFirstAudio.length > 0) {
-		const avg = Math.round(turnCompleteToFirstAudio.reduce((a, b) => a + b, 0) / turnCompleteToFirstAudio.length)
-		telemetry.metrics.distribution('mimic.call.turn_complete_to_first_audio_avg_ms', avg, { unit: 'millisecond' })
-	}
-
-	const vadEndToTurnComplete = snapshot.turnTimings
-		.filter((t) => t.vadEndToTurnCompleteMs !== null)
-		.map((t) => t.vadEndToTurnCompleteMs!)
-	if (vadEndToTurnComplete.length > 0) {
-		const avg = Math.round(vadEndToTurnComplete.reduce((a, b) => a + b, 0) / vadEndToTurnComplete.length)
-		telemetry.metrics.distribution('mimic.call.vad_end_to_turn_complete_avg_ms', avg, { unit: 'millisecond' })
-	}
-
-	const vadEndToFirstAudio = snapshot.turnTimings
-		.filter((t) => t.vadEndToFirstAudioMs !== null)
-		.map((t) => t.vadEndToFirstAudioMs!)
-	if (vadEndToFirstAudio.length > 0) {
-		const avg = Math.round(vadEndToFirstAudio.reduce((a, b) => a + b, 0) / vadEndToFirstAudio.length)
-		telemetry.metrics.distribution('mimic.call.vad_end_to_first_audio_avg_ms', avg, { unit: 'millisecond' })
+	const perCallAverages: Array<[TurnTimingField, string]> = [
+		['turnCompleteToFirstAudioMs', 'mimic.call.turn_complete_to_first_audio_avg_ms'],
+		['vadEndToTurnCompleteMs', 'mimic.call.vad_end_to_turn_complete_avg_ms'],
+		['vadEndToFirstAudioMs', 'mimic.call.vad_end_to_first_audio_avg_ms'],
+	]
+	for (const [field, metric] of perCallAverages) {
+		const values = timingSeries(snapshot.turnTimings, field)
+		if (values.length > 0) telemetry.metrics.distribution(metric, average(values), { unit: 'millisecond' })
 	}
 }

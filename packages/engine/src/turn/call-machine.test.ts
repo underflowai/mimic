@@ -7,7 +7,7 @@ import { assign, createActor, createMachine } from 'xstate'
 import { createFakeAudioTransport } from '#test/support/fake-audio-transport.js'
 import { waitForCondition } from '#test/support/wait-for-condition.js'
 import { callMachine, dispatchTurnComplete, matchTurnActorState, type CallMachineInput } from './call-machine.js'
-import type { TurnOutcome } from './types.js'
+import { emptyPlaybackSnapshot, type TurnOutcome } from './types.js'
 
 function createNoopCallMachineInput(): CallMachineInput {
 	const transport = createFakeAudioTransport()
@@ -45,7 +45,7 @@ function createNoopCallMachineInput(): CallMachineInput {
 			incrementTurn: () => {},
 			metrics: { recordTurnTiming: () => {} },
 		},
-		getAudioSenderSnapshot: () => ({ sentMs: 0, confirmedWordsPlayed: 0 }),
+		getPlaybackSnapshot: () => emptyPlaybackSnapshot,
 	}
 }
 
@@ -92,7 +92,7 @@ function createInterruptibleTurnActorMachine(options?: { initialSubstate?: 'gene
 					kind: 'interrupted',
 					turnId: context.turnId,
 					transcript: context.userTranscript,
-					interruptContext: { fullDraft: 'draft', sentMs: 10, heardPortion: 'draft' },
+					interruptContext: { fullDraft: 'draft', sentMs: 10, playedMs: 10, heardPortion: 'draft' },
 					reason: context.interruptReason as TurnOutcome extends { reason: infer R } ? R : never,
 				} as TurnOutcome
 			}
@@ -127,7 +127,8 @@ function createDispatchContext(overrides?: Partial<Record<string, unknown>>) {
 		silenceFollowUpCount: 0,
 		runTurnDeps: createNoopCallMachineInput().runTurnDeps,
 		commitDeps: createNoopCallMachineInput().commitDeps,
-		getAudioSenderSnapshot: null,
+		getPlaybackSnapshot: () => emptyPlaybackSnapshot,
+		clock: { now: () => 0 },
 		...overrides,
 	}
 }

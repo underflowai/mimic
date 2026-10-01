@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events'
 
 import { createLogger } from '#engine/logger.js'
 
+import { monotonicClock } from '../shared/clock.js'
 import type { CallTurn } from '../shared/prompt-turns.js'
 import { createDeepgramTranscriber, type DeepgramTranscriberConfig } from './deepgram-transcriber.js'
 
@@ -39,7 +40,7 @@ export function createListenTranscriber(opts?: DeepgramTranscriberConfig) {
 
 	async function connect() {
 		turns.length = 0
-		startedAt = Date.now()
+		startedAt = monotonicClock.now()
 		await transcriber.connect()
 	}
 
@@ -48,8 +49,8 @@ export function createListenTranscriber(opts?: DeepgramTranscriberConfig) {
 	}
 
 	function getDurationSeconds() {
-		if (!startedAt) return 0
-		return Math.round((Date.now() - startedAt) / 1000)
+		if (startedAt === null) return 0
+		return Math.round((monotonicClock.now() - startedAt) / 1000)
 	}
 
 	async function close() {

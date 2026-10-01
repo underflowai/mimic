@@ -2,19 +2,18 @@
  * Frame alignment transform.
  *
  * Re-chunks an incoming PCM byte stream into fixed-size frames. TTS
- * emits arbitrarily sized PCM blocks; the LiveKit encoder, interrupt
- * drain math, and playback tracker all assume consistent 100ms chunks
- * (see `maxChunkBytes` in `shared/audio-pacing.ts`).
+ * emits arbitrarily sized PCM blocks; the transport, interrupt drain
+ * math, and playback tracker all assume consistent `ttsFrameMs` frames
+ * (`ttsFrameBytes` in `shared/audio-format.ts`).
  *
- * The transform applies a linear fade to the final partial frame on
- * flush so the stream ends smoothly when the source closes naturally.
+ * The transform applies a short linear fade to the final partial frame
+ * on flush so the stream ends smoothly when the source closes naturally.
  */
 
 import { Transform, type TransformCallback } from 'node:stream'
 
-import { applyLinearFade, maxChunkBytes } from '../../shared/audio-pacing.js'
-
-const flushFadeMs = 10
+import { ttsFrameBytes } from '../../shared/audio-format.js'
+import { applyLinearFade, ttsTailFadeMs } from '../../shared/audio-pacing.js'
 
 interface FrameAlignOptions {
 	chunkBytes?: number
@@ -22,8 +21,8 @@ interface FrameAlignOptions {
 }
 
 export function createFrameAlignTransform(options: FrameAlignOptions = {}): Transform {
-	const chunkBytes = options.chunkBytes ?? maxChunkBytes
-	const fadeMs = options.fadeOnFlushMs ?? flushFadeMs
+	const chunkBytes = options.chunkBytes ?? ttsFrameBytes
+	const fadeMs = options.fadeOnFlushMs ?? ttsTailFadeMs
 	let carry: Buffer | null = null
 
 	return new Transform({

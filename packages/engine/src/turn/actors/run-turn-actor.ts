@@ -9,8 +9,8 @@
  *   - presynthesized: buffered eager PCM → frame align → …
  *
  * Sends back events to TurnActor:
- *   - `agent_text_finalized { agentResponse }` — full response text is known
- *     (immediate for presynth, after LLM drain for tokens)
+ *   - `audio_started { agentResponse, endCallRequested }` — full response
+ *     text is known (immediate for presynth, after LLM drain for tokens)
  *   - `first_audio_sent { at }` — first PCM reached the playback tracker
  *   - `stream_done { result }` — pipeline finished successfully
  *   - `stream_empty` — pipeline completed without audio
@@ -31,7 +31,9 @@ import type { PlaybackTracker } from '../../audio/streams/playback-tracker.js'
 import type { AudioSink, AudioTransport } from '../../audio/streams/types.js'
 import type { TtsSpeaker } from '../../audio/tts-speaker.js'
 import type { Director } from '../../intelligence/director.js'
+import type { WordTiming } from '../../shared/audio-pacing.js'
 import { isAbortLikeError } from '../../shared/async-utils.js'
+import type { Clock } from '../../shared/clock.js'
 import type { TurnStrategy } from '../strategy.js'
 
 const log = createLogger('mimic:pipeline')
@@ -54,6 +56,8 @@ export interface ActiveTurnHandle {
 	sink: AudioSink
 	tracker: PlaybackTracker
 	pauseGate: PauseGate
+	/** Word timings for the turn's audio so far (live). */
+	wordTimeline: () => readonly WordTiming[]
 }
 
 export interface RunTurnActorDeps {
@@ -74,6 +78,7 @@ export interface RunTurnActorInput {
 	signal: AbortSignal
 	generationAbort: AbortController
 	generationStartedAt: number
+	clock: Clock
 	deps: RunTurnActorDeps
 }
 
@@ -85,7 +90,7 @@ export type RunTurnActorEvent =
 	| { type: 'stream_error'; error: unknown }
 
 export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInput>(({ input, sendBack }) => {
-	const { strategy, turnId, signal, generationAbort, generationStartedAt, deps } = input
+	const { strategy, turnId, signal, generationAbort, generationStartedAt, clock, deps } = input
 	let canceled = false
 
 	function buildSource(): { source: PipelineSource; userTranscript: string; initialResponse: string } {
@@ -137,10 +142,17 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 		sink,
 		signal,
 		source,
+		clock,
 		onFirstAudio: (at) => sendBack({ type: 'first_audio_sent', at }),
 	})
 
-	deps.registerActiveTurn({ turnId, sink, tracker: handle.tracker, pauseGate: handle.pauseGate })
+	deps.registerActiveTurn({
+		turnId,
+		sink,
+		tracker: handle.tracker,
+		pauseGate: handle.pauseGate,
+		wordTimeline: handle.wordTimeline,
+	})
 
 	// Emit `audio_started` the moment the agent response text is known.
 	// For cached / presynth sources that is immediate; for token sources
@@ -181,7 +193,7 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 				type: 'stream_done',
 				result: {
 					agentResponse: result.agentResponse,
-					draftMs: Date.now() - generationStartedAt,
+					draftMs: clock.now() - generationStartedAt,
 					firstAudioAt: result.firstAudioAt,
 					ttsFirstByteMs: result.ttsFirstByteMs,
 					ttftMs: result.ttftMs,

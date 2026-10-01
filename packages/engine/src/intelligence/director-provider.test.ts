@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { config } from '#engine/config.js'
+import { models } from '#engine/models.js'
 
 import { resolveVoiceDirectorProvider } from './director-provider.js'
 
@@ -15,10 +15,26 @@ describe('resolveVoiceDirectorProvider', () => {
 		try {
 			const result = await resolveVoiceDirectorProvider()
 			assert.equal(result.provider, 'openai')
-			assert.equal(result.model, config.mimic.director.defaultOpenaiModel)
+			assert.equal(result.model, models.director.openai.model)
+			assert.equal(result.reasoningEffort, models.director.openai.reasoningEffort)
 		} finally {
 			if (original !== undefined) process.env.MIMIC_DIRECTOR_PROVIDER = original
 		}
+	})
+
+	it('drops the default reasoning effort when the caller overrides the model', async () => {
+		const result = await resolveVoiceDirectorProvider({ provider: 'openai', model: 'gpt-5.4-mini' })
+		assert.equal(result.model, 'gpt-5.4-mini')
+		assert.equal(result.reasoningEffort, undefined)
+	})
+
+	it('passes an explicit reasoning effort through', async () => {
+		const result = await resolveVoiceDirectorProvider({
+			provider: 'openai',
+			model: 'gpt-6.1-sol',
+			reasoningEffort: 'high',
+		})
+		assert.equal(result.reasoningEffort, 'high')
 	})
 
 	it('selects anthropic when env is set to anthropic', async () => {
@@ -27,7 +43,8 @@ describe('resolveVoiceDirectorProvider', () => {
 		try {
 			const result = await resolveVoiceDirectorProvider()
 			assert.equal(result.provider, 'anthropic')
-			assert.equal(result.model, config.mimic.director.defaultAnthropicModel)
+			assert.equal(result.model, models.director.anthropic.model)
+			assert.equal(result.reasoningEffort, undefined)
 		} finally {
 			if (original !== undefined) {
 				process.env.MIMIC_DIRECTOR_PROVIDER = original
@@ -41,7 +58,10 @@ describe('resolveVoiceDirectorProvider', () => {
 		const original = process.env.MIMIC_DIRECTOR_PROVIDER
 		process.env.MIMIC_DIRECTOR_PROVIDER = 'unknown-provider'
 		try {
-			await assert.rejects(() => resolveVoiceDirectorProvider(), /MIMIC_DIRECTOR_PROVIDER must be "openai" or "anthropic"/)
+			await assert.rejects(
+				() => resolveVoiceDirectorProvider(),
+				/MIMIC_DIRECTOR_PROVIDER must be "openai" or "anthropic"/,
+			)
 		} finally {
 			if (original !== undefined) {
 				process.env.MIMIC_DIRECTOR_PROVIDER = original

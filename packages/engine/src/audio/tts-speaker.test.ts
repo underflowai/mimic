@@ -4,10 +4,14 @@ import { describe, it } from 'node:test'
 import { flushImmediate } from '#test/support/async.js'
 import { AutoOpenMockSocket } from '#test/support/mock-websocket.js'
 import { createMockTtsSessionHarness } from '#test/support/tts-session-fixture.js'
-import { createTtsSpeaker } from './tts-speaker.js'
+import { ttsSampleRate } from '../shared/audio-format.js'
+import type { WordTiming } from '../shared/audio-pacing.js'
+import { createTtsSpeaker, type TtsSynthesisListener } from './tts-speaker.js'
 
-/** Must match pcmFrameBytes in tts-speaker (48kHz s16le mono, 20ms). */
-const pcmFrameBytes = 48000 * 2 * 0.02
+/** Deliberately not a whole number of frames: the speaker passes provider chunks through untouched. */
+const mockChunkBytes = 1234
+
+const ignoreAudio: TtsSynthesisListener = { onAudioChunk: () => {} }
 
 type MockScenario = 'ok' | 'error' | 'delayed'
 
@@ -30,7 +34,7 @@ class MockCartesiaTtsSocket extends AutoOpenMockSocket {
 		if (!isFinal) return
 
 		if (this.scenario === 'ok') {
-			const frame = Buffer.alloc(pcmFrameBytes, 9)
+			const frame = Buffer.alloc(mockChunkBytes, 9)
 			queueMicrotask(() => {
 				if (!this.isOpen) return
 				this.emitJsonMessage({
@@ -40,6 +44,11 @@ class MockCartesiaTtsSocket extends AutoOpenMockSocket {
 					status_code: 206,
 					step_time: 10,
 					context_id: contextId,
+				})
+				this.emitJsonMessage({
+					type: 'timestamps',
+					context_id: contextId,
+					word_timestamps: { words: ['Hello', 'there.'], start: [0, 0.25], end: [0.2, 0.6] },
 				})
 				queueMicrotask(() => {
 					if (!this.isOpen) return
@@ -68,7 +77,7 @@ class MockCartesiaTtsSocket extends AutoOpenMockSocket {
 		if (this.scenario === 'delayed') {
 			setTimeout(() => {
 				if (!this.isOpen) return
-				const frame = Buffer.alloc(pcmFrameBytes, 3)
+				const frame = Buffer.alloc(mockChunkBytes, 3)
 				this.emitJsonMessage({
 					type: 'chunk',
 					data: frame.toString('base64'),
@@ -101,14 +110,19 @@ describe('preSendTextForSynthesis', () => {
 		const sentBefore = sockets[0].sent.length
 
 		const chunks: Buffer[] = []
-		const handle = await speaker.preSendTextForSynthesis('Hello there.', (c) => chunks.push(c))
+		const words: WordTiming[] = []
+		const handle = await speaker.preSendTextForSynthesis('Hello there.', {
+			onAudioChunk: (c) => chunks.push(c),
+			onWordTimings: (w) => words.push(...w),
+		})
 
 		const newSent = sockets[0].sent.slice(sentBefore)
-		const hasInitialSend = newSent.some((s) => {
-			const p = JSON.parse(s)
-			return p.transcript === 'Hello there.' && p.continue === true
-		})
-		assert.ok(hasInitialSend, 'should send text with continue:true immediately')
+		const initial = newSent
+			.map((s) => JSON.parse(s))
+			.find((p) => p.transcript === 'Hello there.' && p.continue === true)
+		assert.ok(initial, 'should send text with continue:true immediately')
+		assert.equal(initial.add_timestamps, true, 'should request word timestamps')
+		assert.equal(initial.output_format.sample_rate, ttsSampleRate)
 
 		handle.triggerSynthesisStart()
 		await handle.audioComplete
@@ -122,7 +136,11 @@ describe('preSendTextForSynthesis', () => {
 			'should send continue:false after trigger',
 		)
 		assert.ok(chunks.length >= 1, 'should deliver audio chunks')
-		assert.equal(chunks[0].length, pcmFrameBytes)
+		assert.equal(chunks[0].length, mockChunkBytes, 'provider chunks are passed through unframed')
+		assert.deepEqual(words, [
+			{ word: 'Hello', startMs: 0, endMs: 200 },
+			{ word: 'there.', startMs: 250, endMs: 600 },
+		])
 	})
 
 	it('pushTextDelta sends additional continuation messages before trigger', async () => {
@@ -130,7 +148,7 @@ describe('preSendTextForSynthesis', () => {
 		await speaker.connect()
 		const sentBefore = sockets[0].sent.length
 
-		const handle = await speaker.preSendTextForSynthesis('First part. ', () => {})
+		const handle = await speaker.preSendTextForSynthesis('First part. ', ignoreAudio)
 		handle.pushTextDelta('Second part.')
 		handle.triggerSynthesisStart()
 		await handle.audioComplete
@@ -146,7 +164,7 @@ describe('preSendTextForSynthesis', () => {
 		const { speaker } = createTestSpeaker('error')
 		await speaker.connect()
 
-		const handle = await speaker.preSendTextForSynthesis('fail', () => {})
+		const handle = await speaker.preSendTextForSynthesis('fail', ignoreAudio)
 		handle.triggerSynthesisStart()
 		await assert.rejects(handle.audioComplete, /synthetic failure/)
 	})
@@ -155,7 +173,7 @@ describe('preSendTextForSynthesis', () => {
 		const { speaker } = createTestSpeaker('delayed')
 		await speaker.connect()
 
-		const handle = await speaker.preSendTextForSynthesis('wait', () => {})
+		const handle = await speaker.preSendTextForSynthesis('wait', ignoreAudio)
 		handle.triggerSynthesisStart()
 		await flushImmediate()
 		speaker.interrupt()
@@ -166,8 +184,8 @@ describe('preSendTextForSynthesis', () => {
 		const { speaker } = createTestSpeaker('ok')
 		await speaker.connect()
 
-		const firstHandle = await speaker.preSendTextForSynthesis('occupying socket', () => {})
-		const secondHandle = await speaker.preSendTextForSynthesis('supersedes first', () => {})
+		const firstHandle = await speaker.preSendTextForSynthesis('occupying socket', ignoreAudio)
+		const secondHandle = await speaker.preSendTextForSynthesis('supersedes first', ignoreAudio)
 		secondHandle.triggerSynthesisStart()
 		await secondHandle.audioComplete
 		await firstHandle.audioComplete
@@ -177,12 +195,12 @@ describe('preSendTextForSynthesis', () => {
 		const { speaker } = createTestSpeaker('ok')
 		await speaker.connect()
 
-		const handle = await speaker.preSendTextForSynthesis('first', () => {})
+		const handle = await speaker.preSendTextForSynthesis('first', ignoreAudio)
 		handle.triggerSynthesisStart()
 		await handle.audioComplete
 
 		const chunks: Buffer[] = []
-		const handle2 = await speaker.preSendTextForSynthesis('second works', (c: Buffer) => chunks.push(c))
+		const handle2 = await speaker.preSendTextForSynthesis('second works', { onAudioChunk: (c) => chunks.push(c) })
 		handle2.triggerSynthesisStart()
 		await handle2.audioComplete
 		assert.ok(chunks.length >= 1, 'should be able to synthesize after pre-send completes')
@@ -193,7 +211,7 @@ describe('preSendTextForSynthesis', () => {
 		await speaker.connect()
 		const sentBefore = sockets[0].sent.length
 
-		const handle = await speaker.preSendTextForSynthesis('  ', () => {})
+		const handle = await speaker.preSendTextForSynthesis('  ', ignoreAudio)
 		handle.pushTextDelta('ignored')
 		handle.triggerSynthesisStart()
 		await handle.audioComplete
@@ -213,7 +231,7 @@ describe('preSendTextForSynthesis', () => {
 		await speaker.connect()
 		const sentBefore = sockets[0].sent.length
 
-		const handle = await speaker.preSendTextForSynthesis('content', () => {})
+		const handle = await speaker.preSendTextForSynthesis('content', ignoreAudio)
 		handle.triggerSynthesisStart()
 		handle.pushTextDelta('too late')
 		await handle.audioComplete
@@ -240,8 +258,8 @@ describe('preSendTextForSynthesis', () => {
 		}
 		const speaker = createTtsSpeaker({ session: session as never })
 
-		await assert.rejects(() => speaker.preSendTextForSynthesis('hello', () => {}), /socket unavailable/)
-		await assert.rejects(() => speaker.preSendTextForSynthesis('hello again', () => {}), /socket unavailable/)
+		await assert.rejects(() => speaker.preSendTextForSynthesis('hello', ignoreAudio), /socket unavailable/)
+		await assert.rejects(() => speaker.preSendTextForSynthesis('hello again', ignoreAudio), /socket unavailable/)
 	})
 })
 

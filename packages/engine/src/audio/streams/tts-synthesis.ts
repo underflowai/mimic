@@ -10,16 +10,19 @@
  *
  * Timing metrics (`firstTokenAt`, `ttsSendAt`, `ttsFirstByteAt`,
  * `firstAudio`) track the first session so TTFAB numbers reflect
- * true user-observed latency.
+ * true user-observed latency. Word timings reported by the speaker are
+ * accumulated into `wordTimeline()` for heard-portion estimation.
  */
 
 import { Transform, type TransformCallback } from 'node:stream'
 
 import { createLogger } from '#engine/logger.js'
 
+import type { WordTiming } from '../../shared/audio-pacing.js'
 import { isAbortLikeError } from '../../shared/async-utils.js'
+import { monotonicClock, type Clock } from '../../shared/clock.js'
 import { extractTtsControlTags, speechTagTextCanStream } from '../tts-sanitizer.js'
-import type { TtsSpeaker } from '../tts-speaker.js'
+import type { TtsSpeaker, TtsSynthesisHandle as SpeakerHandle } from '../tts-speaker.js'
 import type { SentenceChunkEvent } from './sentence-chunker.js'
 
 const log = createLogger('mimic:tts-stream')
@@ -28,14 +31,16 @@ export interface TtsSynthesisHandle {
 	transform: Transform
 	/** Resolves when the first PCM byte has been emitted downstream. */
 	firstAudio: Promise<number>
-	/** Resolves with the sanitized TTS delta send timestamp, or null if no audio was sent. */
+	/** Timestamp of the first text delta sent to the speaker, or null if none was sent. */
 	ttsSendAt: () => number | null
-	/** Resolves with the timestamp the first PCM chunk was emitted. */
+	/** Timestamp the first PCM chunk was emitted. */
 	ttsFirstByteAt: () => number | null
-	/** Resolves with the first LLM delta timestamp seen by the transform. */
+	/** Timestamp of the first LLM delta seen by the transform. */
 	firstTokenAt: () => number | null
 	/** Exact normalized text sent to the TTS speaker across all sessions. */
 	textSent: () => string
+	/** Word timings reported by the speaker so far, relative to the start of this turn's audio. Live array. */
+	wordTimeline: () => readonly WordTiming[]
 }
 
 export interface TtsSynthesisOptions {
@@ -43,20 +48,21 @@ export interface TtsSynthesisOptions {
 	sanitize: (text: string) => string
 	logContext?: Record<string, unknown>
 	signal?: AbortSignal
+	clock?: Clock
 }
-
-type TtsHandle = Awaited<ReturnType<TtsSpeaker['preSendTextForSynthesis']>>
 
 export function createTtsSynthesisTransform(options: TtsSynthesisOptions): TtsSynthesisHandle {
 	const { tts, sanitize } = options
+	const clock = options.clock ?? monotonicClock
 
-	let handle: TtsHandle | null = null
+	let handle: SpeakerHandle | null = null
 	let pendingDelta = ''
 	let firstTokenAt: number | null = null
 	let ttsSendAt: number | null = null
 	let ttsFirstByteAt: number | null = null
 	let audioEmitCount = 0
 	let textSent = ''
+	const words: WordTiming[] = []
 	let firstAudioResolve!: (at: number) => void
 	let firstAudioReject!: (err: Error) => void
 	const firstAudio = new Promise<number>((resolve, reject) => {
@@ -75,7 +81,7 @@ export function createTtsSynthesisTransform(options: TtsSynthesisOptions): TtsSy
 
 	function handleAudioChunk(pcm: Buffer, push: (chunk: Buffer) => void) {
 		if (audioEmitCount === 0) {
-			ttsFirstByteAt = Date.now()
+			ttsFirstByteAt = clock.now()
 			firstAudioResolve(ttsFirstByteAt)
 		}
 		audioEmitCount++
@@ -98,9 +104,10 @@ export function createTtsSynthesisTransform(options: TtsSynthesisOptions): TtsSy
 		pendingDelta = ''
 		if (/^\s*$/.test(firstDelta)) return 'skip'
 		try {
-			ttsSendAt ??= Date.now()
-			handle = await tts.preSendTextForSynthesis(firstDelta, (pcm) => {
-				handleAudioChunk(pcm, push)
+			ttsSendAt ??= clock.now()
+			handle = await tts.preSendTextForSynthesis(firstDelta, {
+				onAudioChunk: (pcm) => handleAudioChunk(pcm, push),
+				onWordTimings: (timings) => words.push(...timings),
 			})
 			recordTextSent(firstDelta)
 			return 'ok'
@@ -134,31 +141,18 @@ export function createTtsSynthesisTransform(options: TtsSynthesisOptions): TtsSy
 		return 'ok'
 	}
 
-	async function awaitAudioComplete(currentHandle: TtsHandle): Promise<void> {
+	async function awaitAudioComplete(currentHandle: SpeakerHandle): Promise<void> {
 		if (options.signal?.aborted) return
 		await new Promise<void>((resolve) => {
 			let settled = false
-			const onAbort = () => {
+			const finish = () => {
 				if (settled) return
 				settled = true
-				options.signal?.removeEventListener('abort', onAbort)
+				options.signal?.removeEventListener('abort', finish)
 				resolve()
 			}
-			options.signal?.addEventListener('abort', onAbort, { once: true })
-			currentHandle.audioComplete.then(
-				() => {
-					if (settled) return
-					settled = true
-					options.signal?.removeEventListener('abort', onAbort)
-					resolve()
-				},
-				() => {
-					if (settled) return
-					settled = true
-					options.signal?.removeEventListener('abort', onAbort)
-					resolve()
-				},
-			)
+			options.signal?.addEventListener('abort', finish, { once: true })
+			currentHandle.audioComplete.then(finish, finish)
 		})
 	}
 
@@ -179,7 +173,7 @@ export function createTtsSynthesisTransform(options: TtsSynthesisOptions): TtsSy
 					callback()
 					return
 				}
-				firstTokenAt ??= Date.now()
+				firstTokenAt ??= clock.now()
 				pendingDelta += chunkEvent.text
 				callback()
 				return
@@ -245,6 +239,7 @@ export function createTtsSynthesisTransform(options: TtsSynthesisOptions): TtsSy
 		ttsFirstByteAt: () => ttsFirstByteAt,
 		firstTokenAt: () => firstTokenAt,
 		textSent: () => textSent,
+		wordTimeline: () => words,
 	}
 }
 

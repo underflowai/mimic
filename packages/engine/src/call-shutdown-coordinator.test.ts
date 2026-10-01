@@ -23,8 +23,8 @@ describe('createCallShutdownCoordinator', () => {
 
 		const coordinator = createCallShutdownCoordinator({
 			log: { info: logInfo },
-			startTimeMs: 1_000,
-			nowMs: () => 31_000,
+			startedAt: 1_000,
+			clock: { now: () => 31_000 },
 			markClosing: () => order.push('markClosing'),
 			abortCall: () => order.push('abortCall'),
 			interruptActiveTurn: () => order.push('interrupt:call_ended'),
@@ -69,8 +69,8 @@ describe('createCallShutdownCoordinator', () => {
 		const logInfo = mock.fn((..._args: unknown[]) => {})
 		const coordinator = createCallShutdownCoordinator({
 			log: { info: logInfo },
-			startTimeMs: 0,
-			nowMs: () => 1_000,
+			startedAt: 0,
+			clock: { now: () => 1_000 },
 			markClosing: () => {},
 			abortCall: () => {},
 			interruptActiveTurn: () => {},
@@ -99,8 +99,8 @@ describe('createCallShutdownCoordinator', () => {
 		const order: string[] = []
 		const coordinator = createCallShutdownCoordinator({
 			log: { info: () => {} },
-			startTimeMs: 0,
-			nowMs: () => 1_000,
+			startedAt: 0,
+			clock: { now: () => 1_000 },
 			markClosing: () => order.push('markClosing'),
 			abortCall: () => order.push('abortCall'),
 			interruptActiveTurn: () => order.push('interrupt'),

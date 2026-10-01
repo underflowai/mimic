@@ -21,7 +21,7 @@ function createTestEngine(overrides?: TestEngineOverrides) {
 		{
 			onFire: (token) => fired.push(token),
 			classifyBackchannel: classifier,
-			nowMs: overrides?.nowMs,
+			clock: overrides?.nowMs ? { now: overrides.nowMs } : undefined,
 		},
 		{
 			minSpeechGateMs: overrides?.minSpeechGateMs ?? 0,

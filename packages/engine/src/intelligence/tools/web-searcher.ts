@@ -8,16 +8,15 @@
 import type OpenAI from 'openai'
 import { z } from 'zod'
 
-import { loadPrompt } from '#engine/prompts.js'
-import { config } from '#engine/config.js'
-import { createLogger } from '#engine/logger.js'
-
 import { safeParseJsonWithSchema } from '#engine/llm-parse.js'
+import { createLogger } from '#engine/logger.js'
+import { models, supportsTemperature } from '#engine/models.js'
+import { renderPromptTemplate } from '#engine/prompts.js'
+
 import { formatTurnsForPrompt, type CallTurn } from '../../shared/prompt-turns.js'
 
 const log = createLogger('mimic:web-search')
 
-const searchModel = config.mimic.searchModel
 const initialMaxOutputTokens = 1_000
 const retryMaxOutputTokens = 2_000
 
@@ -28,7 +27,7 @@ const searchResponseSchema = {
 		enrichment: {
 			type: ['string', 'null'],
 			description:
-				'Concise answer for Aurora, max 200 words. Specific numbers, real data, concrete details. Null only if search returned nothing useful.',
+				'Concise answer for the voice agent, max 200 words. Specific numbers, real data, concrete details. Null only if search returned nothing useful.',
 		},
 	},
 	required: ['enrichment'],
@@ -63,31 +62,36 @@ function responseLooksTruncated(response: SearchResponseLike, maxOutputTokens: n
 	return status === 'incomplete' || reason === 'max_output_tokens' || outputTokens >= maxOutputTokens
 }
 
-export function createWebSearcher(client: OpenAI) {
-	let cachedPrompt: string | null = null
+export interface WebSearcherOptions {
+	/** The voice agent's name, so the researcher knows who it is briefing. */
+	agentName: string
+}
 
-	async function getSearchPrompt() {
-		if (!cachedPrompt) {
-			cachedPrompt = await loadPrompt('instructions/web-searcher')
-		}
+export function createWebSearcher(client: OpenAI, options: WebSearcherOptions) {
+	const { agentName } = options
+	const { model } = models.webSearch
+	let cachedPrompt: Promise<string> | null = null
+
+	function getSearchPrompt() {
+		cachedPrompt ??= renderPromptTemplate('instructions/web-searcher', { agentName })
 		return cachedPrompt
 	}
 
 	async function search(topic: string, conversationTurns: CallTurn[], callerDateTime?: string, signal?: AbortSignal) {
 		const systemPrompt = await getSearchPrompt()
-		const conversation = formatTurnsForPrompt(conversationTurns)
+		const conversation = formatTurnsForPrompt(conversationTurns, { agentLabel: agentName })
 		const dateLine = callerDateTime ? `## Current date/time\n${callerDateTime}\n\n` : ''
 		const userMessage =
 			`${dateLine}## Research topic\n${topic}\n\n` +
 			`## Conversation so far\n${conversation}\n\n` +
-			`Search for the topic above and provide the answer for Aurora.`
+			`Search for the topic above and provide the answer for ${agentName}.`
 
 		async function runSearch(maxOutputTokens: number) {
 			return client.responses.create(
 				{
-					model: searchModel,
+					model,
 					max_output_tokens: maxOutputTokens,
-					temperature: 0.3,
+					...(supportsTemperature(model) ? { temperature: 0.3 } : {}),
 					instructions: systemPrompt,
 					input: userMessage,
 					tools: [{ type: 'web_search' }],

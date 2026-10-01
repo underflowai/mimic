@@ -12,9 +12,14 @@
  * passed in and remain call-scoped.
  */
 
-import { Readable, type Stream } from 'node:stream'
+import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
+import type { WordTiming } from '../../shared/audio-pacing.js'
+import { monotonicClock, type Clock } from '../../shared/clock.js'
+import type { DirectorStreamEvent, EagerAudioSink } from '../../shared/streaming-types.js'
+import { extractTtsControlTags } from '../tts-sanitizer.js'
+import type { TtsSpeaker } from '../tts-speaker.js'
 import { createFrameAlignTransform } from './frame-align.js'
 import { createPauseGate, type PauseGate } from './pause-gate.js'
 import { createPlaybackTracker, type PlaybackTracker } from './playback-tracker.js'
@@ -22,10 +27,6 @@ import { createSentenceChunkerTransform } from './sentence-chunker.js'
 import { createPresynthPcmReadable, createTokenReadable } from './sources.js'
 import { createTtsSynthesisTransform } from './tts-synthesis.js'
 import type { AudioSink } from './types.js'
-
-import type { DirectorStreamEvent, EagerAudioSink } from '../../shared/streaming-types.js'
-import { extractTtsControlTags } from '../tts-sanitizer.js'
-import type { TtsSpeaker } from '../tts-speaker.js'
 
 export type PipelineSource =
 	| {
@@ -47,6 +48,7 @@ export interface PipelineDeps {
 	sink: AudioSink
 	signal: AbortSignal
 	source: PipelineSource
+	clock?: Clock
 	/** Called when the first PCM byte has reached the tracker. */
 	onFirstAudio?: (at: number) => void
 }
@@ -76,11 +78,14 @@ export interface PipelineHandle {
 	/** Awaited by the turn actor; resolves when all audio has been queued. */
 	completion: Promise<PipelineResult>
 	endCallRequested: () => boolean
+	/** Word timings for this turn's audio so far (live). */
+	wordTimeline: () => readonly WordTiming[]
 }
 
 export function createPipeline(deps: PipelineDeps): PipelineHandle {
+	const clock = deps.clock ?? monotonicClock
 	const pauseGate = createPauseGate()
-	const tracker = createPlaybackTracker()
+	const tracker = createPlaybackTracker(clock)
 	const frameAlign = createFrameAlignTransform()
 
 	let agentResponseOnResolve!: (value: string) => void
@@ -88,7 +93,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 		agentResponseOnResolve = resolve
 	})
 
-	const generationStartedAt = Date.now()
+	const generationStartedAt = clock.now()
 	let firstAudioAt: number | null = null
 	let ttsSendAt: number | null = null
 	let ttsFirstByteAt: number | null = null
@@ -96,9 +101,10 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 	let llmCompleteAt: number | null = null
 	let endCallRequested = false
 
-	const stages: Stream[] = []
+	const stages: Array<NodeJS.ReadableStream | NodeJS.ReadWriteStream | NodeJS.WritableStream> = []
 	let source: Readable
 	let ttsHandle: ReturnType<typeof createTtsSynthesisTransform> | null = null
+	let wordTimeline: () => readonly WordTiming[]
 
 	switch (deps.source.kind) {
 		case 'tokens': {
@@ -106,23 +112,26 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 			source = token.stream
 			token.finalResponse.then(
 				(value) => {
-					llmCompleteAt = Date.now()
+					llmCompleteAt = clock.now()
 					const extracted = extractTtsControlTags(value)
 					endCallRequested = endCallRequested || extracted.endCallRequested
 					agentResponseOnResolve(deps.sanitize(extracted.text))
 				},
 				() => {
-					llmCompleteAt = Date.now()
+					llmCompleteAt = clock.now()
 					agentResponseOnResolve('')
 				},
 			)
 			const chunker = createSentenceChunkerTransform()
-			ttsHandle = createTtsSynthesisTransform({
+			const synthesis = createTtsSynthesisTransform({
 				tts: deps.tts,
 				sanitize: deps.sanitize,
 				signal: deps.signal,
+				clock,
 			})
-			stages.push(source, chunker, ttsHandle.transform, frameAlign, pauseGate, tracker, deps.sink)
+			ttsHandle = synthesis
+			wordTimeline = synthesis.wordTimeline
+			stages.push(source, chunker, synthesis.transform, frameAlign, pauseGate, tracker, deps.sink)
 			break
 		}
 		case 'presynth': {
@@ -132,6 +141,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 			const extracted = extractTtsControlTags(presynth.agentResponse)
 			endCallRequested = presynth.endCallRequested === true || extracted.endCallRequested
 			agentResponseOnResolve(deps.sanitize(extracted.text))
+			wordTimeline = () => presynth.sink.words
 			stages.push(source, frameAlign, pauseGate, tracker, deps.sink)
 			break
 		}
@@ -158,8 +168,7 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 
 	const completion = (async (): Promise<PipelineResult> => {
 		try {
-			// @ts-expect-error variadic pipeline typings do not accept a Stream[] directly
-			await pipeline(...stages, { signal: deps.signal })
+			await pipeline(stages, { signal: deps.signal })
 		} catch (err) {
 			if (!deps.signal.aborted) throw err
 		}
@@ -190,5 +199,6 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 		agentResponseReady: agentResponsePromise,
 		completion,
 		endCallRequested: () => endCallRequested,
+		wordTimeline: () => wordTimeline(),
 	}
 }

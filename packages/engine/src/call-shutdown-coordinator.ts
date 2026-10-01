@@ -18,6 +18,8 @@
  * reaches step 6 regardless of upstream failures.
  */
 
+import { monotonicClock, type Clock } from './shared/clock.js'
+
 interface ShutdownLogger {
 	info: (...args: unknown[]) => void
 }
@@ -40,8 +42,9 @@ export interface CallShutdownResult<TTurn, TMetricsSnapshot> {
 
 export interface CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot extends MetricsSnapshotLike, TSummary> {
 	log: ShutdownLogger
-	startTimeMs: number
-	nowMs?: () => number
+	/** `clock.now()` reading taken when the call started. */
+	startedAt: number
+	clock?: Clock
 	markClosing: () => void
 	abortCall: () => void
 	interruptActiveTurn: () => void
@@ -58,7 +61,7 @@ export interface CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot extends Met
 export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends MetricsSnapshotLike, TSummary>(
 	deps: CallShutdownCoordinatorDeps<TTurn, TMetricsSnapshot, TSummary>,
 ) {
-	const nowMs = deps.nowMs ?? Date.now
+	const clock = deps.clock ?? monotonicClock
 
 	let closePromise: Promise<CallShutdownResult<TTurn, TMetricsSnapshot>> | null = null
 
@@ -118,7 +121,7 @@ export function createCallShutdownCoordinator<TTurn, TMetricsSnapshot extends Me
 
 		deps.log.info({ turnCount: turns.length }, 'call ended')
 
-		const durationSeconds = Math.round((nowMs() - deps.startTimeMs) / 1000)
+		const durationSeconds = Math.round((clock.now() - deps.startedAt) / 1000)
 		deps.publishMetrics?.(snapshot, durationSeconds)
 
 		if (runtimeError) throw runtimeError

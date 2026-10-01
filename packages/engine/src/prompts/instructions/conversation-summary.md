@@ -1,0 +1,1 @@
+Summarize this voice call conversation concisely. Capture the key facts: who the caller is, what they do, what they said, what the agent learned, and any commitments made. Write 3-5 sentences in third person past tense. Do not include speech tags or filler words. Return JSON: {"summary": "..."}

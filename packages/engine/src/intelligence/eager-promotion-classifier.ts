@@ -16,18 +16,12 @@
  *
  * ## Model + prompt
  *
- * Selected via `scripts/mimic/eval-eager-promotion.manual.ts` across
- * 42 cases × 6 prompts × 3 models × 3 runs (2268 classifications):
- *
- *   | Model / Prompt                    | Acc   | FP | FN | Latency |
- *   |-----------------------------------|-------|----|----|---------|
- *   | 8B + terse (previous production)  | 78.6% | 27 |  0 | 310ms   |
- *   | 70B + v2-explicit (this file)     | 97.6% |  0 |  3 | 591ms   |
- *
- * The 8B model could not discriminate on this task at any prompt — it
- * collapsed into always-promote (previous prod, 27 FPs out of 42) or
- * always-discard. The 70B actually reasons about the transcript delta
- * and draft fit.
+ * Runs on the shared background model (`models.background`) with the prompt
+ * in `prompts/instructions/eager-promotion-classifier.md`. The prompt was
+ * chosen by an offline eval (42 cases × 6 prompts × 3 models × 3 runs):
+ * terse prompts on small models collapsed into always-promote (27 FPs out
+ * of 42), while the explicit prompt reached 97.6% accuracy with zero FPs.
+ * Re-run that eval before changing the prompt or the background model.
  *
  * ### Latency is masked on the critical path
  *
@@ -38,16 +32,16 @@
 import type OpenAI from 'openai'
 import { z } from 'zod'
 
-import { loadPrompt } from '#engine/prompts.js'
 import { callBackgroundModel } from '#engine/llm-parse.js'
+import { loadPrompt } from '#engine/prompts.js'
 
 const promotionSchema = z.object({
 	promote: z.boolean(),
 })
 
-let cachedPrompt: string | null = null
-async function getSystemPrompt() {
-	if (!cachedPrompt) cachedPrompt = await loadPrompt('instructions/eager-promotion-classifier')
+let cachedPrompt: Promise<string> | null = null
+function getSystemPrompt() {
+	cachedPrompt ??= loadPrompt('instructions/eager-promotion-classifier')
 	return cachedPrompt
 }
 
@@ -100,7 +94,7 @@ function stripFiller(text: string): string {
 
 /**
  * Tiered fast-path: determines whether the speculative transcript is
- * close enough to the final transcript to skip the 70B LLM classifier.
+ * close enough to the final transcript to skip the LLM classifier.
  *
  *   Tier 1: Normalized exact match (punctuation/case differences).
  *   Tier 2: Equal after stripping ASR filler words.

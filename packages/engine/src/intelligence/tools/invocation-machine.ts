@@ -14,6 +14,8 @@
 
 import { assign, fromPromise, sendParent, setup, type ActorRefFrom } from 'xstate'
 
+import { config } from '#engine/config.js'
+
 import type { CallTurn } from '../../shared/prompt-turns.js'
 import type { ToolDefinition } from './runner.js'
 import type { ToolTransportResult } from './transport.js'
@@ -29,13 +31,12 @@ export interface ToolInvocationInput {
 export interface ToolInvocationContext {
 	abort: AbortController
 	conversationTurns: CallTurn[]
-	createdAt: number
 	directorNote: string | null
 	missingArgs: string[]
 	originatingTranscript: string
 	query: string
-	readyAt: number | null
 	result: string | null
+	/** Allocated from the supervisor's counter; doubles as creation order. */
 	taskId: number
 	tool: ToolDefinition | null
 	toolArgs: Record<string, unknown>
@@ -89,7 +90,7 @@ function resolveTool(tools: ToolDefinition[], toolName: string): ToolDefinition 
 	return tools.find((t) => t.name === toolName) ?? null
 }
 
-const executionTimeoutMs = 30_000
+const executionTimeoutMs = config.mimic.timeouts.toolExecutionMs
 
 export const invocationMachineSetup = setup({
 	types: {
@@ -114,12 +115,10 @@ export const invocationMachine = invocationMachineSetup.createMachine({
 	context: ({ input }) => ({
 		abort: new AbortController(),
 		conversationTurns: input.conversationTurns,
-		createdAt: Date.now(),
 		directorNote: null,
 		missingArgs: [],
 		originatingTranscript: input.transcript,
 		query: input.transcript,
-		readyAt: null,
 		result: null,
 		taskId: input.taskId,
 		tool: null,
@@ -228,7 +227,6 @@ export const invocationMachine = invocationMachineSetup.createMachine({
 						guard: ({ event }) => 'result' in event.output,
 						target: 'ready',
 						actions: assign({
-							readyAt: () => Date.now(),
 							result: ({ event }) => ('result' in event.output ? event.output.result : null),
 						}),
 					},

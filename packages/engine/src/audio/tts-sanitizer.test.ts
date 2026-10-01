@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { sanitizeForTranscript, sanitizeForTts, speechTagTextCanStream } from './tts-sanitizer.js'
+import {
+	endCallTag,
+	extractTtsControlTags,
+	sanitizeForTranscript,
+	sanitizeForTts,
+	speechTagTextCanStream,
+} from './tts-sanitizer.js'
 
 describe('sanitizeForTts', () => {
 	describe('markdown stripping', () => {
@@ -111,5 +117,37 @@ describe('sanitizeForTranscript', () => {
 			sanitizeForTranscript('Still interested? {"date": "next Wednesday", "timezone": "America/Los_Angeles"}'),
 			'Still interested?',
 		)
+	})
+})
+
+describe('extractTtsControlTags', () => {
+	it('strips the end-call tag and reports it', () => {
+		const { text, endCallRequested } = extractTtsControlTags(`Goodbye for now! ${endCallTag}`)
+		assert.equal(text, 'Goodbye for now!')
+		assert.equal(endCallRequested, true)
+	})
+
+	it('accepts spacing and case variants of the tag', () => {
+		for (const variant of ['[END-CALL]', '[end call]', '[ end_call ]', '[EndCall]']) {
+			const { text, endCallRequested } = extractTtsControlTags(`Bye. ${variant}`)
+			assert.equal(text, 'Bye.', variant)
+			assert.equal(endCallRequested, true, variant)
+		}
+	})
+
+	it('leaves other square-bracket tags alone', () => {
+		const { text, endCallRequested } = extractTtsControlTags('[laughter] That is funny.')
+		assert.equal(text, '[laughter] That is funny.')
+		assert.equal(endCallRequested, false)
+	})
+
+	it('does not trim the ends of a delta, so streamed deltas still join correctly', () => {
+		const { text } = extractTtsControlTags('hello ')
+		assert.equal(text, 'hello ')
+	})
+
+	it('never reaches TTS or the transcript', () => {
+		assert.equal(sanitizeForTts(`Take care! ${endCallTag}`), 'Take care!')
+		assert.equal(sanitizeForTranscript(`Take care! ${endCallTag}`), 'Take care!')
 	})
 })

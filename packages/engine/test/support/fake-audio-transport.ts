@@ -27,6 +27,8 @@ export interface FakeAudioSink extends AudioSink {
 	directFrames: Buffer[]
 	clearQueueCount: number
 	waitForPlayoutCount: number
+	/** What `queuedPlayoutMs()` reports; tests set this to simulate unplayed audio. */
+	queuedMs: number
 }
 
 class FakeSink extends Writable implements FakeAudioSink {
@@ -34,6 +36,7 @@ class FakeSink extends Writable implements FakeAudioSink {
 	directFrames: Buffer[] = []
 	clearQueueCount = 0
 	waitForPlayoutCount = 0
+	queuedMs = 0
 
 	constructor() {
 		super({ decodeStrings: false, highWaterMark: 1 })
@@ -51,6 +54,10 @@ class FakeSink extends Writable implements FakeAudioSink {
 
 	clearQueue(): void {
 		this.clearQueueCount++
+	}
+
+	queuedPlayoutMs(): number {
+		return this.queuedMs
 	}
 
 	async writeFrameDirect(chunk: Buffer): Promise<void> {

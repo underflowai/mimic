@@ -8,13 +8,14 @@
  * At Node runtime the global `WebSocket` IS undici's implementation, whose
  * constructor accepts the extended init `{ headers, protocols, dispatcher }`
  * on top of `string | string[]`. `@types/node` types this correctly only
- * when DOM lib is NOT loaded. Consumers like `apps/web` include
- * `"lib": ["DOM", ...]` for client bundles, and because `libs/core` exports
- * source `.ts` (not `.d.ts`) via its package.json, TS ends up re-typing this
- * file under DOM lib where the constructor only accepts `(url, protocols?)`.
- * This file only ever runs in Node, so we alias the constructor to the
- * true runtime shape once, at the module top, and use that for construction.
+ * when the DOM lib is NOT loaded; a consumer that type-checks this package
+ * with `"lib": ["DOM", ...]` sees a constructor that only accepts
+ * `(url, protocols?)`. This file only ever runs in Node, so we alias the
+ * constructor to the true runtime shape once, at the module top, and use
+ * that for construction.
  */
+
+import { config } from '#engine/config.js'
 
 type NodeWebSocketInit = string | string[] | { headers?: Record<string, string>; protocols?: string | string[] }
 type NodeWebSocketConstructor = new (url: string | URL, init?: NodeWebSocketInit) => WebSocket
@@ -47,7 +48,11 @@ export function extractWebSocketError(event: Event): Error {
  * On success, replaces the one-shot error handler with `onPersistentError`.
  * Rejects if the socket does not open within `timeoutMs` or closes before opening.
  */
-export function awaitWebSocketOpen(ws: WebSocket, onPersistentError: (err: Error) => void, timeoutMs = 10_000) {
+export function awaitWebSocketOpen(
+	ws: WebSocket,
+	onPersistentError: (err: Error) => void,
+	timeoutMs = config.mimic.timeouts.websocketOpenMs,
+) {
 	return new Promise<void>((resolve, reject) => {
 		let settled = false
 		const cleanup = () => {

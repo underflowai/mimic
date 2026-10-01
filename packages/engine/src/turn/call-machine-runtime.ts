@@ -20,7 +20,9 @@
  * `sendToCallMachine(...)` and subscribe to `turn_outcome` emissions.
  */
 
+import { randomUUID } from 'node:crypto'
 import { Writable } from 'node:stream'
+
 import type OpenAI from 'openai'
 import { createActor, enqueueActions, fromCallback, fromPromise } from 'xstate'
 
@@ -42,10 +44,10 @@ import {
 	type ToolSupervisorSnapshot,
 } from '../intelligence/tools/supervisor-machine.js'
 import { createToolTransport } from '../intelligence/tools/transport.js'
-import type { TranscriptToolEvent } from '../intelligence/tools/types.js'
 import { watchForToolAction } from '../intelligence/tools/watcher.js'
 import type { BackgroundIntelligence, Director, EagerAudioSink } from '../intelligence/types.js'
 import { isAbortLikeError } from '../shared/async-utils.js'
+import { monotonicClock, type Clock } from '../shared/clock.js'
 import type { Metrics, SoftPauseEvent, TurnOutcomeMetric } from '../shared/metrics.js'
 import type { CallTurn } from '../shared/prompt-turns.js'
 import type { ActiveTurnHandle } from './actors/run-turn-actor.js'
@@ -55,7 +57,7 @@ import {
 } from './call-machine-selectors.js'
 import { callMachine, getTurnActorSnapshot } from './call-machine.js'
 import { runTurnActorLogic, turnActorMachine, type CommitActorDeps, type RunTurnActorDeps } from './turn-actor.js'
-import type { InterruptReason } from './types.js'
+import { emptyPlaybackSnapshot, type HangupSource, type InterruptReason, type PlaybackSnapshot } from './types.js'
 
 const log = createLogger('mimic:turn')
 export type { CommittedTurn, TurnOutcome } from './types.js'
@@ -67,6 +69,8 @@ export interface CallMachineRuntimeDeps {
 	director: Director
 	backgroundClient: OpenAI
 	metrics: Metrics
+	/** Monotonic clock for all latency measurement. Defaults to `performance.now()`. */
+	clock?: Clock
 	/**
 	 * Lazy getter for the audio transport. Late-bound so the orchestrator
 	 * can be constructed before the LiveKit voice agent attaches a
@@ -103,10 +107,18 @@ export interface CallMachineRuntimeDeps {
 	getDirectorTurns: () => CallTurn[]
 	tools?: import('../intelligence/tools/runner.js').ToolDefinition[]
 	executeTool?: import('../intelligence/tools/transport.js').ToolExecutor
-	onSilenceHangup: () => void
+	/**
+	 * Whether the director may end the call with the `[end-call]` tag.
+	 * When false the tag is still stripped from speech, but ignored.
+	 */
+	endCallEnabled: boolean
+	/** The engine wants the host to hang up (silence watchdog exhausted, or the director asked). */
+	onHangupRequested: (source: HangupSource) => void
 }
 
 export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
+	const clock = deps.clock ?? monotonicClock
+
 	const commitUserOnly = (_: unknown, params: { userTranscript: string }) => {
 		deps.director.commitTurn({ kind: 'user_only', user: params.userTranscript })
 	}
@@ -137,21 +149,20 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 		if (options.destroySink && !handle.sink.destroyed) handle.sink.destroy()
 	}
 
-	function getActiveTurnSnapshot() {
+	function getPlaybackSnapshot(): PlaybackSnapshot {
 		const handle = activeTurn
-		if (!handle) return { sentMs: 0, confirmedWordsPlayed: 0 }
-		const snap = handle.tracker.snapshot()
-		return { sentMs: snap.sentMs, confirmedWordsPlayed: snap.confirmedWordsPlayed }
+		if (!handle) return emptyPlaybackSnapshot
+		const { sentMs } = handle.tracker.snapshot()
+		return {
+			sentMs,
+			playedMs: Math.max(0, sentMs - handle.sink.queuedPlayoutMs()),
+			words: handle.wordTimeline(),
+		}
 	}
 
 	function activeTurnLogFields() {
-		const handle = activeTurn
-		const playback = getActiveTurnSnapshot()
-		return {
-			activeTurnId: handle?.turnId ?? null,
-			sentMs: playback.sentMs,
-			confirmedWordsPlayed: playback.confirmedWordsPlayed,
-		}
+		const { sentMs, playedMs } = getPlaybackSnapshot()
+		return { activeTurnId: activeTurn?.turnId ?? null, sentMs, playedMs }
 	}
 
 	// ------------------------------------------------------------------
@@ -180,6 +191,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 		writable.clearQueue = () => {
 			sink.chunks.length = 0
 		}
+		writable.queuedPlayoutMs = () => 0
 		writable.writeFrameDirect = async (chunk) => {
 			if (sink.done) return
 			if (sink.forward) {
@@ -198,7 +210,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 				{ transcript: string; controlBlock: string; signal: AbortSignal }
 			>(async ({ input }) => {
 				const tokenized = deps.director.streamDraftTokenized(input.transcript, input.controlBlock, input.signal)
-				const sink: EagerAudioSink = { chunks: [], done: false, forward: null }
+				const sink: EagerAudioSink = { chunks: [], words: [], done: false, forward: null }
 				const captureSink = createEagerCaptureSink(sink)
 				const pipeline = createPipeline({
 					tts: deps.specTts,
@@ -206,7 +218,9 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					sink: captureSink,
 					signal: input.signal,
 					source: { kind: 'tokens', events: tokenized.events },
+					clock,
 				})
+				sink.words = pipeline.wordTimeline()
 				const agentResponsePromise = pipeline.agentResponseReady.then((response) => deps.sanitize(response))
 				const ttsPromise = pipeline.completion
 					.then((result) => {
@@ -334,36 +348,6 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	// generation unnecessarily.
 	let lastEagerNormalized: string | null = null
 	let lastFinalNormalized: string | null = null
-	let transcriptEventLog: TranscriptToolEvent[] = []
-
-	function appendTranscriptEvent(event: TranscriptToolEvent) {
-		transcriptEventLog.push(event)
-		if (transcriptEventLog.length > 80) {
-			transcriptEventLog = transcriptEventLog.slice(-80)
-		}
-	}
-
-	function mapCallEventToTranscriptEvent(event: { type: string; [key: string]: unknown }): TranscriptToolEvent | null {
-		switch (event.type) {
-			case 'caller_turn_start':
-			case 'caller_update':
-			case 'caller_eager_turn':
-			case 'caller_turn_resumed':
-			case 'caller_turn_complete': {
-				const transcript = typeof event.transcript === 'string' ? event.transcript : ''
-				const confidence = typeof event.confidence === 'number' ? event.confidence : undefined
-				if (!transcript.trim()) return null
-				return {
-					type: event.type,
-					transcript,
-					confidence,
-					recordedAtMs: Date.now(),
-				}
-			}
-			default:
-				return null
-		}
-	}
 
 	function normalizeEagerTranscript(transcript: string) {
 		return transcript
@@ -549,7 +533,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 			onSubstantiveSpeechTimeout: (_, params) => {
 				log.info('substantive speech timer fired, interrupting')
 				if (params.vadSpeechStartAt > 0) {
-					telemetry.metrics.distribution('mimic.interrupt.classification_ms', Date.now() - params.vadSpeechStartAt, {
+					telemetry.metrics.distribution('mimic.interrupt.classification_ms', clock.now() - params.vadSpeechStartAt, {
 						unit: 'millisecond',
 					})
 				}
@@ -663,16 +647,20 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 						strategy: { kind: 'fresh' as const, transcript: '', controlBlock },
 						turnId: context.nextTurnId,
 						userTranscript: '',
-						generationStartedAt: Date.now(),
+						generationStartedAt: clock.now(),
 					}),
 					pendingSilenceClosing: () => p.silenceClosing === true,
 					nextTurnId: () => context.nextTurnId + 1,
 				})
 				enqueue.raise({ type: 'reset_idle' })
 			}),
-			requestCallHangup: (_, params: { source: 'silence' | 'end_call_tag' }) => {
+			requestCallHangup: (_, params: { source: HangupSource }) => {
+				if (params.source === 'end_call_tag' && !deps.endCallEnabled) {
+					log.warn('director emitted [end-call] but endCallEnabled is false; ignoring')
+					return
+				}
 				log.info({ source: params.source }, 'call hangup requested')
-				deps.onSilenceHangup()
+				deps.onHangupRequested(params.source)
 			},
 			onTranscriberError: (_, params) => {
 				log.warn({ message: params.message }, 'transcriber reported runtime error')
@@ -680,7 +668,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 			commitToolResultToDirector: (_, params) => {
 				const { toolName, result } = params as { toolName: string; result: string }
 				if (!toolName || !result) return
-				const callId = `supervisor_${toolName}_${Date.now()}`
+				const callId = `supervisor_${toolName}_${randomUUID()}`
 				deps.director.commitToolCall({ id: callId, name: toolName, args: {} })
 				deps.director.commitToolResult(callId, result)
 				log.info({ toolName, callId }, 'committed supervisor tool result to director history')
@@ -693,9 +681,9 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 		},
 	})
 
-	const getAudioSenderSnapshot = () => getActiveTurnSnapshot()
-
-	const actor = createActor(providedCallMachine, { input: { runTurnDeps, commitDeps, getAudioSenderSnapshot } }).start()
+	const actor = createActor(providedCallMachine, {
+		input: { runTurnDeps, commitDeps, getPlaybackSnapshot, clock },
+	}).start()
 
 	actor.on('turn_outcome', ({ outcome }) => {
 		clearActiveTurn(outcome.turnId, { destroySink: true })
@@ -751,8 +739,6 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	// ------------------------------------------------------------------
 
 	function sendToCallMachine(event: { type: string; [key: string]: unknown }) {
-		const transcriptEvent = mapCallEventToTranscriptEvent(event)
-		if (transcriptEvent) appendTranscriptEvent(transcriptEvent)
 		actor.send(event as never)
 	}
 
@@ -793,7 +779,6 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 		resetToolTasks() {
 			const toolActor = actor.getSnapshot().children['tool-pipeline'] as ToolSupervisorActor | undefined
 			toolActor?.send({ type: 'RESET' })
-			transcriptEventLog = []
 		},
 		stop() {
 			const toolActor = actor.getSnapshot().children['tool-pipeline'] as ToolSupervisorActor | undefined

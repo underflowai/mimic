@@ -7,7 +7,7 @@ describe('web-searcher', () => {
 	it('createWebSearcher exposes search method', async () => {
 		const { createWebSearcher } = await import('./web-searcher.js')
 		const client = new OpenAI({ apiKey: 'test-key' })
-		const searcher = createWebSearcher(client)
+		const searcher = createWebSearcher(client, { agentName: 'Aurora' })
 		assert.equal(typeof searcher.search, 'function')
 	})
 
@@ -28,11 +28,32 @@ describe('web-searcher', () => {
 			}
 		})
 		const client = { responses: { create } } as unknown as OpenAI
-		const searcher = createWebSearcher(client)
+		const searcher = createWebSearcher(client, { agentName: 'Aurora' })
 
 		const result = await searcher.search('topic', [])
 
 		assert.equal(result, 'Useful result')
 		assert.equal(create.mock.calls.length, 2)
+	})
+
+	it('addresses the agent by name in the prompt and labels its turns', async () => {
+		const { createWebSearcher } = await import('./web-searcher.js')
+		const create = mock.fn(async (_input: { instructions: string; input: string }) => ({
+			output: [{ type: 'web_search_call' }],
+			usage: { input_tokens: 10, output_tokens: 20 },
+			output_text: '{"enrichment":"ok"}',
+		}))
+		const client = { responses: { create } } as unknown as OpenAI
+		const searcher = createWebSearcher(client, { agentName: 'Arlo' })
+
+		await searcher.search('topic', [
+			{ role: 'agent', content: 'How can I help?' },
+			{ role: 'user', content: 'Tell me about topic' },
+		])
+
+		const request = create.mock.calls[0].arguments[0]
+		assert.match(request.instructions, /Arlo/)
+		assert.doesNotMatch(request.instructions, /Aurora|insurance/i)
+		assert.match(request.input, /Arlo: "How can I help\?"/)
 	})
 })

@@ -5,6 +5,7 @@ import OpenAI from 'openai'
 
 import { config } from '#engine/config.js'
 import { createLogger } from '#engine/logger.js'
+import type { ReasoningEffort } from '#engine/models.js'
 
 import { resolveVoiceDirectorProvider } from './intelligence/director-provider.js'
 import type { MimicDirectorProvider } from './config.js'
@@ -24,6 +25,7 @@ import { classifyEagerPromotion } from './intelligence/eager-promotion-classifie
 import { createWebSearcher } from './intelligence/tools/web-searcher.js'
 import type { InterruptContext } from './intelligence/types.js'
 import { createOrchestratorRuntime } from './orchestrator-runtime.js'
+import { monotonicClock } from './shared/clock.js'
 import { createCallMetrics, publishCallSummary } from './shared/metrics.js'
 import { auroraPersona, type VoicePersona } from './shared/voice-persona.js'
 import {
@@ -32,7 +34,7 @@ import {
 	type TurnControlBlockContext,
 } from './turn-control-block-builder.js'
 import { createCallMachineRuntime } from './turn/call-machine-runtime.js'
-import type { TurnOutcome } from './turn/types.js'
+import type { HangupSource, TurnOutcome } from './turn/types.js'
 
 const baseLog = createLogger('mimic')
 
@@ -53,9 +55,10 @@ export interface CallOrchestratorConfig {
 	persona?: VoicePersona
 	/** LLM provider for the voice director. Defaults to `'openai'`. */
 	directorProvider?: MimicDirectorProvider
-	/** LLM model name. Defaults to provider-specific default from config. */
+	/** LLM model name. Defaults to the provider's entry in the model registry. */
 	directorModel?: string
-	directorReasoningEffort?: import('./models.js').ReasoningEffort
+	/** OpenAI `reasoning_effort` for the director. Defaults to the registry effort unless `directorModel` is set. */
+	directorReasoningEffort?: ReasoningEffort
 	systemPrompt: string
 	userFirstName: string
 	userLastName?: string
@@ -81,6 +84,12 @@ export interface CallOrchestratorConfig {
 	tools?: import('./intelligence/tools/runner.js').ToolDefinition[]
 	executeTool?: import('./intelligence/tools/transport.js').ToolExecutor
 	maxCompletionTokens?: number
+	/**
+	 * Lets the director end the call by finishing a reply with `[end-call]`.
+	 * When enabled the director is told about the tag and the tag triggers
+	 * `onHangupRequested('end_call_tag')`; when disabled the tag is still
+	 * stripped from speech but otherwise ignored. Defaults to `false`.
+	 */
 	endCallEnabled?: boolean
 }
 
@@ -107,9 +116,12 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 	})
 	const openai = new OpenAI({ apiKey: config.mimic.openai.apiKey })
 
-	log.info({ provider: directorProvider, model: directorModel, reasoningEffort: directorReasoningEffort }, 'director provider selected')
+	log.info(
+		{ provider: directorProvider, model: directorModel, reasoningEffort: directorReasoningEffort },
+		'director provider selected',
+	)
 
-	const transcriber = createDeepgramTranscriber({ encoding: 'linear16', sampleRate: 16000 })
+	const transcriber = createDeepgramTranscriber()
 	const tts = createTtsSpeaker({ voiceId: persona.ttsVoiceId })
 	const specTts = createTtsSpeaker({ voiceId: persona.ttsVoiceId })
 	let turnCount = 0
@@ -120,16 +132,18 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		systemPrompt: callConfig.systemPrompt,
 		maxCompletionTokens: callConfig.maxCompletionTokens,
 	})
-	const webSearcher = createWebSearcher(openai)
+	const webSearcher = createWebSearcher(openai, { agentName: persona.firstName })
 	const metrics = createCallMetrics()
 	const events = new EventEmitter()
+	const endCallEnabled = callConfig.endCallEnabled === true
 
 	// ------------------------------------------------------------------
 	// Call-scoped mutable state
 	// ------------------------------------------------------------------
 
 	const callAbort = new AbortController()
-	const startTime = Date.now()
+	const clock = monotonicClock
+	const startedAt = clock.now()
 
 	const backchannelClassifier = createBackchannelClassifier(openai, callAbort.signal)
 	let backchannelEngine: ReturnType<typeof createBackchannelEngine> | null = null
@@ -152,6 +166,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 	const backgroundIntelligence = createBackgroundIntelligence({
 		client: openai,
 		callSignal: callAbort.signal,
+		agentName: persona.firstName,
 		transcriber,
 		director,
 	})
@@ -173,6 +188,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		getUserTimezone: () => callConfig.userTimezone,
 		buildTurnControlBlock: (ctx) => callConfig.buildTurnControlBlock(ctx),
 		textQualityBlock: callConfig.textQualityBlock,
+		endCallEnabled,
 	})
 
 	function assembleControlBlock(transcript: string, outcome: TurnCarryover, opts?: TurnControlBlockBuildOptions) {
@@ -191,6 +207,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 
 	const callMachineRuntime = createCallMachineRuntime({
 		callSignal: callAbort.signal,
+		clock,
 		tts,
 		specTts,
 		director,
@@ -220,13 +237,14 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		getDirectorTurns: () => director.listTurns(),
 		tools: callConfig.tools,
 		executeTool: callConfig.executeTool,
-		// Silence watchdog exhausted its check-in budget. Emit the hangup
-		// event so the transport layer (createVoiceAgent) can tear down the
-		// LiveKit room — that disconnect flow also triggers our own
-		// `shutdownCoordinator.close()` via the regular session-end path,
-		// which closes the caller out of the room at the same time.
-		onSilenceHangup: () => {
-			events.emit('hangupRequested')
+		endCallEnabled,
+		// Either the silence watchdog exhausted its check-in budget or the
+		// director ended its reply with `[end-call]`. Emit the hangup event so
+		// the transport layer (createVoiceAgent) can tear down the room — that
+		// disconnect flow also triggers our own `shutdownCoordinator.close()`
+		// via the regular session-end path.
+		onHangupRequested: (source) => {
+			events.emit('hangupRequested', source)
 		},
 	})
 	const callMachineActor = callMachineRuntime.actor
@@ -248,6 +266,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		backchannelEngine = createBackchannelEngine({
 			onFire: (token) => callConfig.onBackchannel?.(token),
 			classifyBackchannel: (transcript) => backchannelClassifier.classify(transcript),
+			clock,
 		})
 	}
 
@@ -257,14 +276,10 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		if (outcome.kind !== 'committed') return
 
 		previousTurnOutcome.lastCallerTranscript = outcome.turn.userTranscript
-		backgroundIntelligence
-			.runPostCommitTasks({
-				userTranscript: outcome.turn.userTranscript,
-				agentResponse: outcome.turn.agentResponse,
-			})
-			.catch((err) => {
-				log.error({ err }, 'post-commit tasks failed')
-			})
+		backgroundIntelligence.runPostCommitTasks({
+			userTranscript: outcome.turn.userTranscript,
+			agentResponse: outcome.turn.agentResponse,
+		})
 		callConfig.onTurnCommitted?.({
 			userTranscript: outcome.turn.userTranscript,
 			assistantResponse: outcome.turn.agentResponse,
@@ -296,7 +311,7 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 
 	type InternalEventName = 'hangupRequested'
 
-	function registerInternalListener(event: InternalEventName, listener: () => void) {
+	function registerInternalListener(event: InternalEventName, listener: (source: HangupSource) => void) {
 		events.on(event, listener)
 		return () => events.off(event, listener)
 	}
@@ -307,7 +322,8 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 
 	const shutdownCoordinator = createCallShutdownCoordinator({
 		log,
-		startTimeMs: startTime,
+		clock,
+		startedAt,
 		markClosing: () => callMachineRuntime.markClosing(),
 		abortCall: () => callAbort.abort(),
 		interruptActiveTurn: () => callMachineRuntime.interruptActiveTurn('call_ended'),
@@ -352,11 +368,14 @@ export async function createCallOrchestrator(originalConfig: CallOrchestratorCon
 		start: runtime.start,
 		handleCallerAudio: runtime.handleCallerAudio,
 		/**
-		 * Fires when the silence watchdog has decided the call should end (the
-		 * goodbye turn has already committed). The transport layer should use
+		 * Fires when the engine has decided the call should end: either the
+		 * silence watchdog ran out of check-ins or (with `endCallEnabled`) the
+		 * director finished a reply with `[end-call]`. In both cases the
+		 * goodbye turn has already committed. The transport layer should use
 		 * this signal to disconnect the room, which in turn closes the caller.
 		 */
-		onHangupRequested: (callback: () => void) => registerInternalListener('hangupRequested', callback),
+		onHangupRequested: (callback: (source: HangupSource) => void) =>
+			registerInternalListener('hangupRequested', callback),
 		isAgentSpeaking: () => callMachineRuntime.isAgentStreaming(),
 		close: () => shutdownCoordinator.close(),
 	}

@@ -1,18 +1,22 @@
 /**
  * Backchannel Clip Loader
  *
- * Loads pre-generated backchannel audio clips from disk. These are static
- * PCM16 48kHz mono WAV files, generated once and committed to the repo.
- * No network calls at runtime.
+ * Loads pre-generated backchannel audio clips from disk. These are raw
+ * PCM16 mono files at `ttsSampleRate`, one per token per Cartesia voice,
+ * generated once and committed to the repo. No network calls at runtime.
+ *
+ * Clips live in `audio/<ttsVoiceId>/<token>.pcm` so a persona's clips are
+ * found by the same voice id the TTS speaker uses — there is no separate
+ * voice-name mapping to keep in sync.
  *
  * Loading is fail-fast: if any token's file is missing or unreadable we
  * throw, rather than return a partially-populated map that would cause
  * silent UX degradation (the classifier could pick a token we can't
  * actually play).
  *
- * To regenerate clips, run:
- *   cd libs/core
- *   pnpm exec tsx scripts/generate-backchannel-clips.ts
+ * To (re)generate clips for a voice:
+ *   cd packages/engine
+ *   node --env-file=../../.env --import tsx scripts/generate-backchannel-clips.ts <ttsVoiceId>
  */
 
 import { readFile } from 'node:fs/promises'
@@ -21,44 +25,31 @@ import { fileURLToPath } from 'node:url'
 
 import { createLogger } from '#engine/logger.js'
 
-import type { BackchannelToken } from './engine.js'
+import { backchannelTokens, type BackchannelToken } from './tokens.js'
 
 const log = createLogger('mimic:bc-clips')
 
 const audioDir = fileURLToPath(new URL('./audio', import.meta.url))
 
-function clipDirForVoice(ttsVoiceId: string) {
-	return join(audioDir, ttsVoiceId)
-}
-
-const clipFiles: Record<BackchannelToken, string> = {
-	'mm-hmm': 'mm-hmm.pcm',
-	right: 'right.pcm',
-	yeah: 'yeah.pcm',
-	'got-it': 'got-it.pcm',
-	okay: 'okay.pcm',
-	'uh-huh': 'uh-huh.pcm',
-	sure: 'sure.pcm',
-	'i-see': 'i-see.pcm',
+export function clipFileName(token: BackchannelToken) {
+	return `${token}.pcm`
 }
 
 const loadedClips = new Map<string, Promise<Map<BackchannelToken, Buffer>>>()
 
-export function loadBackchannelClips(ttsVoiceId = 'Sarah') {
+export function loadBackchannelClips(ttsVoiceId: string) {
 	const existing = loadedClips.get(ttsVoiceId)
 	if (existing) return existing
 
-	const clipDir = clipDirForVoice(ttsVoiceId)
+	const clipDir = join(audioDir, ttsVoiceId)
 	const promise = (async () => {
 		const clips = new Map<BackchannelToken, Buffer>()
-		const entries = Object.entries(clipFiles) as [BackchannelToken, string][]
-
 		const missing: Array<{ token: BackchannelToken; file: string; err: unknown }> = []
 		await Promise.all(
-			entries.map(async ([token, file]) => {
+			backchannelTokens.map(async (token) => {
+				const file = clipFileName(token)
 				try {
-					const buf = await readFile(join(clipDir, file))
-					clips.set(token, buf)
+					clips.set(token, await readFile(join(clipDir, file)))
 				} catch (err) {
 					missing.push({ token, file, err })
 				}
@@ -71,7 +62,7 @@ export function loadBackchannelClips(ttsVoiceId = 'Sarah') {
 			throw new Error(
 				`Missing backchannel clip assets for voice "${ttsVoiceId}": ${missing
 					.map((m) => m.token)
-					.join(', ')}. Run scripts/generate-backchannel-clips.ts.`,
+					.join(', ')}. Run scripts/generate-backchannel-clips.ts ${ttsVoiceId}.`,
 			)
 		}
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { latestWinsQueue, singleFlight } from './task.js'
+import { coalesceRuns, latestWinsQueue, singleFlight } from './task.js'
 
 function deferred<T>() {
 	let resolve: (value: T) => void = () => {}
@@ -67,6 +67,46 @@ describe('task primitives', () => {
 		enqueue(42)
 		await new Promise<void>((resolve) => setTimeout(resolve, 20))
 
+		assert.equal(errors.length, 1)
+		assert.equal(errors[0]!.message, 'boom')
+	})
+
+	it('coalesceRuns collapses requests made during a run into one follow-up run', async () => {
+		const gate = deferred<void>()
+		let runs = 0
+		const schedule = coalesceRuns(async () => {
+			runs++
+			if (runs === 1) await gate.promise
+		})
+
+		schedule()
+		schedule()
+		schedule()
+		schedule()
+		assert.equal(runs, 1, 'only the first request starts immediately')
+
+		gate.resolve()
+		await new Promise<void>((resolve) => setTimeout(resolve, 20))
+		assert.equal(runs, 2, 'all requests made during the run collapse into one follow-up')
+	})
+
+	it('coalesceRuns reports failures through onError and keeps accepting work', async () => {
+		const errors: Error[] = []
+		let runs = 0
+		const schedule = coalesceRuns(
+			async () => {
+				runs++
+				if (runs === 1) throw new Error('boom')
+			},
+			(err) => errors.push(err),
+		)
+
+		schedule()
+		await new Promise<void>((resolve) => setTimeout(resolve, 20))
+		schedule()
+		await new Promise<void>((resolve) => setTimeout(resolve, 20))
+
+		assert.equal(runs, 2)
 		assert.equal(errors.length, 1)
 		assert.equal(errors[0]!.message, 'boom')
 	})

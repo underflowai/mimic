@@ -8,8 +8,9 @@ Mimic powers voice calls. When a caller speaks, Mimic transcribes their speech i
 2. **Eager EOT** — when Flux signals an early end-of-turn (`EagerEndOfTurn`), Mimic starts generating a response and pre-synthesizing audio via a dedicated spec TTS session before the caller has fully finished. It may also fire backchannel tokens ("mm-hmm", "right") so the caller feels heard.
 3. **Caller finishes** — Flux emits the final `EndOfTurn`. If the eager draft is ready and the transcript hasn't diverged, pre-generated audio flushes immediately. If the transcript changed, a promotion classifier races against fresh generation to decide whether the eager draft is still usable.
 4. **Agent responds** — the LLM response streams token-by-token into TTS (Cartesia Sonic), which streams audio chunks back to the caller.
-5. **If the caller interrupts**, Mimic stops speaking, estimates what they heard via `estimateHeardPortion`, and prepares the next response with that context (partial transcript committed with an em-dash).
-6. **Tools** — when the caller triggers a tool (booking, search, etc.), a fast intent detector starts a stall while a schema-aware tool runner extracts exact arguments, executes, and appends the query/result to persistent call state.
+5. **If the caller interrupts**, Mimic stops speaking and works out what they actually heard: Cartesia's word timestamps are lined up against how much audio had left the transport's playout queue (`estimateHeardPortion`), and the next response is prepared with that context (partial transcript committed with an em-dash).
+6. **Ending the call** — the silence watchdog closes out an unresponsive caller; when the host enables `endCallEnabled`, the director can also finish a reply with `[end-call]`, which is stripped from speech and surfaces as `onHangupRequested('end_call_tag')`.
+7. **Tools** — when the caller triggers a tool (booking, search, etc.), a fast intent detector starts a stall while a schema-aware tool runner extracts exact arguments, executes, and appends the query/result to persistent call state.
 
 ## System Architecture
 
@@ -149,16 +150,16 @@ stateDiagram-v2
 
 ## Interrupt Model
 
-Interrupts stop the agent mid-speech when the caller starts talking, the call ends, or the caller speaks substantially during a soft-pause. The system is layered: CallMachine decides *when* to interrupt, TurnActor decides *how* to clean up, and the outcome feeds back into the next turn.
+Interrupts stop the agent mid-speech when the caller starts talking, the call ends, or the caller speaks substantially during a soft-pause. The system is layered: CallMachine decides _when_ to interrupt, TurnActor decides _how_ to clean up, and the outcome feeds back into the next turn.
 
 ### Interrupt sources
 
-| Source | InterruptReason | Trigger |
-| --- | --- | --- |
-| New caller turn arrives while agent is speaking | `new_turn_started` | `caller_turn_complete` during `inTurn` |
-| Call disconnects | `call_ended` | Shutdown coordinator |
-| Caller speaks for longer than substantiveSpeechMs during soft-pause | `caller_substantive_speech` | Timer in TurnActor `softPaused` |
-| VAD yield timer fires during awaitingPlayback | `caller_started_speaking` | Timer in TurnActor `awaitingPlayback.vadActive` |
+| Source                                                              | InterruptReason             | Trigger                                         |
+| ------------------------------------------------------------------- | --------------------------- | ----------------------------------------------- |
+| New caller turn arrives while agent is speaking                     | `new_turn_started`          | `caller_turn_complete` during `inTurn`          |
+| Call disconnects                                                    | `call_ended`                | Shutdown coordinator                            |
+| Caller speaks for longer than substantiveSpeechMs during soft-pause | `caller_substantive_speech` | Timer in TurnActor `softPaused`                 |
+| VAD yield timer fires during awaitingPlayback                       | `caller_started_speaking`   | Timer in TurnActor `awaitingPlayback.vadActive` |
 
 ### Flow
 
@@ -179,7 +180,7 @@ TurnActor                                          │
   │     1. Abort LLM generation (AbortController.abort)
   │     2. Clear audio buffer + optional fade tail
   │     3. Interrupt TTS session (WebSocket cancel message)
-  │     4. Compute heardPortion via estimateHeardPortion (barge)
+  │     4. Compute heardPortion from the TTS word timeline + played-out ms (barge)
   │     5. Commit partial transcript to director history
   │     6. Cancel eager pipeline (sendParent → cancel_eager_from_turn)
   │     7. Assign interruptReason + clear stale state
@@ -202,13 +203,13 @@ CallMachine
 
 The `buildInterruptPlan(state, trigger)` function in `turn-actor.ts` maps the TurnActor's current state to the correct cleanup resources:
 
-| TurnActor state | abort | audio+tts | barge | softPause | Notes |
-| --- | --- | --- | --- | --- | --- |
-| generating | yes | yes | no | no | No audio sent yet; clears draft, commits user transcript |
-| streaming | yes | yes | yes | no | Audio in flight; estimates heard portion |
-| softPaused | yes | yes | yes | yes | Audio paused; skips fade, records soft-pause metrics |
-| awaiting | no | yes | yes | no | Abort already nulled; audio/TTS may have residual |
-| awaiting (call_ended) | no | no | no | no | Just commits the draft |
+| TurnActor state       | abort | audio+tts | barge | softPause | Notes                                                    |
+| --------------------- | ----- | --------- | ----- | --------- | -------------------------------------------------------- |
+| generating            | yes   | yes       | no    | no        | No audio sent yet; clears draft, commits user transcript |
+| streaming             | yes   | yes       | yes   | no        | Audio in flight; estimates heard portion                 |
+| softPaused            | yes   | yes       | yes   | yes       | Audio paused; skips fade, records soft-pause metrics     |
+| awaiting              | no    | yes       | yes   | no        | Abort already nulled; audio/TTS may have residual        |
+| awaiting (call_ended) | no    | no        | no    | no        | Just commits the draft                                   |
 
 ### Eager cancellation
 
@@ -286,7 +287,7 @@ The control block is a per-turn `<context>` injection that gives the LLM situati
 
 Event-driven XState actor that fires short acknowledgement tokens while the caller is still speaking. Gates on min speech duration (~3s), refractory period (~4s), min word count (4), and low EOT confidence (<0.35 — avoids firing near end-of-thought). Suppresses after interrupted outcomes. Tokens: `mm-hmm`, `right`, `yeah`, `got-it`, `okay`, `uh-huh`, `sure`, `i-see`.
 
-Classifier uses a fast background model (JSON schema) to pick the appropriate token or skip.
+Classifier uses a fast background model (JSON schema) to pick the appropriate token or skip. Clips are pre-rendered per Cartesia voice id (`backchannel/audio/<ttsVoiceId>/`) with `scripts/generate-backchannel-clips.ts`; the token list and minimum word count live in `backchannel/tokens.ts`.
 
 ## Background Intelligence
 
@@ -299,6 +300,8 @@ Post-commit background tasks:
 
 Keyterms (capped at 100) are pushed to `transcriber.configure({ keyterms })` so Deepgram improves recognition of domain-specific names over the course of the call. Initial keyterms can be seeded via `CallOrchestratorConfig.keyterms`.
 
+All tasks share one bounded queue; summarization is additionally coalesced (`coalesceRuns`) so repeated commits collapse into a single follow-up summary. Prompts live in `prompts/instructions/` and address the agent by its persona name.
+
 ## Audio Pipeline
 
 The outbound pipeline is built fresh for every turn:
@@ -309,19 +312,21 @@ Source Readable → SentenceChunker → TtsSynthesis → FrameAlign → PauseGat
 
 Sources: token Readable (fresh/first/proactive), PCM Readable (presynthesized — skips TTS).
 
+The TTS speaker emits provider chunks untouched (plus Cartesia word timestamps); `frame-align` is the single place audio is cut into 20 ms frames. Sample formats are defined once in `shared/audio-format.ts`; all latency deltas use the injected monotonic `Clock`.
+
 Two Cartesia TTS speaker instances are created per call: **primary** (used by the live turn pipeline) and **spec** (used by the eager pipeline for speculative synthesis). This prevents contention between live and speculative audio.
 
 ## External Services
 
-| Area              | Service                      | Notes                                                                  |
-| ----------------- | ---------------------------- | ---------------------------------------------------------------------- |
-| ASR               | Deepgram Flux (WebSocket)    | `flux-general-en`, eager EOT + standard EOT thresholds                 |
-| TTS               | Cartesia Sonic (WebSocket)   | 48kHz PCM, dual sessions (primary + spec), context continuations       |
-| Voice Director    | OpenAI or Anthropic          | Configurable via `MIMIC_DIRECTOR_PROVIDER` env                         |
-| Background models | OpenAI                       | Backchannel, tool intent, eager validation, entity extraction, summary |
-| Web search        | OpenAI Responses API         | `web_search` tool type                                                 |
-| Custom tools      | WebSocket callback bridge    | SDK executes tools locally, results returned over WS                   |
-| VAD               | Silero v5 (local ONNX/WASM)  | ~32ms frames at 16kHz, no cloud dependency                             |
+| Area              | Service                     | Notes                                                                      |
+| ----------------- | --------------------------- | -------------------------------------------------------------------------- |
+| ASR               | Deepgram Flux (WebSocket)   | `MIMIC_FLUX_MODEL` (default `flux-general-en`), env-tunable EOT thresholds |
+| TTS               | Cartesia Sonic (WebSocket)  | 48kHz PCM + word timestamps, dual sessions (primary + spec)                |
+| Voice Director    | OpenAI or Anthropic         | Configurable via `MIMIC_DIRECTOR_PROVIDER` env                             |
+| Background models | OpenAI                      | Backchannel, tool intent, eager validation, entity extraction, summary     |
+| Web search        | OpenAI Responses API        | `web_search` tool type                                                     |
+| Custom tools      | WebSocket callback bridge   | SDK executes tools locally, results returned over WS                       |
+| VAD               | Silero v5 (local ONNX/WASM) | ~32ms frames at 16kHz, no cloud dependency                                 |
 
 ## Folder Guide
 
@@ -332,6 +337,8 @@ mimic/
   call-shutdown-coordinator.ts    — ordered shutdown + metrics publish
   turn-control-block-builder.ts   — control block assembly + shared signals
   index.ts                        — curated public API
+  config.ts                       — env-backed secrets + validated tuning knobs
+  models.ts                       — model registry + capability predicates
 
   turn/                           — turn coordination
     call-machine.ts               — call state machine (idle/inTurn/interrupted)
@@ -363,7 +370,7 @@ mimic/
       tts-synthesis.ts            — per-sentence TTS Transform
       frame-align.ts              — PCM rechunker + fade
       pause-gate.ts               — soft-pause buffering
-      playback-tracker.ts         — sent-ms / word accounting
+      playback-tracker.ts         — sent-ms accounting + interrupt drain/fade
       livekit-sink.ts             — LiveKit Writable + AudioTransport
       types.ts                    — AudioTransport + stream interfaces
 
@@ -371,7 +378,7 @@ mimic/
     director.ts                   — LLM streaming chat, history management, commit variants
     director-provider.ts          — OpenAI / Anthropic model selection
     eager-machine.ts              — speculation state machine
-    eager-promotion-classifier.ts — spec→final transcript matching (conservative, Groq)
+    eager-promotion-classifier.ts — spec→final transcript matching (conservative)
     tools/supervisor-machine.ts   — tool supervisor, spawns per-invocation child actors
     tools/invocation-machine.ts   — per-tool lifecycle (detecting/awaiting_args/executing/ready/claimed/delivered)
     tools/watcher.ts              — tool intent classifier: execute/not-ready/none per utterance
@@ -385,15 +392,18 @@ mimic/
   backchannel/                    — active listening
     engine.ts                     — backchannel state machine (gates, classifier, fire)
     classifier.ts                 — backchannel token classifier
-    clips.ts                      — pre-loaded PCM backchannel clips
+    clips.ts                      — pre-loaded PCM backchannel clips (per voice id)
+    tokens.ts                     — token vocabulary + shared min word count
     types.ts                      — BackchannelCallerTurnEvent, BackchannelTurnOutcome
 
   shared/                         — utilities
-    task.ts                       — singleFlight, latestWinsQueue
+    task.ts                       — singleFlight, latestWinsQueue, coalesceRuns
     metrics.ts                    — call metrics + Sentry telemetry distributions
     prompt-turns.ts               — CallTurn + formatTurnsForPrompt
     streaming-types.ts            — DirectorStreamEvent + EagerAudioSink
-    audio-pacing.ts               — chunk sizing, fade, heard-portion estimation
+    audio-format.ts               — PCM sample formats (ASR 16 kHz, TTS 48 kHz, 20 ms frames)
+    audio-pacing.ts               — word timings, fade, heard-portion estimation
+    clock.ts                      — injectable monotonic clock
     voice-persona.ts              — Aurora/Arlo persona configs + Cartesia voice IDs
     async-utils.ts                — withTimeout, isAbortLikeError, safeInvoke
 ```

@@ -5,9 +5,11 @@
 import { fromCallback, sendTo, setup, type DoneActorEvent, type ErrorActorEvent, type SnapshotFrom } from 'xstate'
 
 import { config } from '#engine/config.js'
+
 import { sanitizeForTranscript } from '../audio/tts-sanitizer.js'
 import type { InterruptContext } from '../intelligence/types.js'
 import { estimateHeardPortion } from '../shared/audio-pacing.js'
+import type { Clock } from '../shared/clock.js'
 import type { SoftPauseOutcome, SoftPauseSource, TurnTiming } from '../shared/metrics.js'
 import { commitActorLogic, type CommitActorDeps, type CommitActorOutput } from './actors/commit-actor.js'
 import { playbackWaitActor } from './actors/playback-wait-actor.js'
@@ -19,7 +21,7 @@ import {
 	type RunTurnStrategyInput,
 	type StreamResult,
 } from './actors/run-turn-actor.js'
-import type { CommittedTurn, InterruptReason, TurnOutcome } from './types.js'
+import type { CommittedTurn, InterruptReason, PlaybackSnapshot, TurnOutcome } from './types.js'
 
 export type TurnActorExecutionStrategy = RunTurnStrategyInput
 
@@ -49,11 +51,13 @@ export interface TurnActorInput {
 	callerVadEndAt: number
 	runTurnDeps: RunTurnActorDeps
 	commitDeps: CommitActorDeps
-	getAudioSenderSnapshot: () => { sentMs: number; confirmedWordsPlayed: number }
+	getPlaybackSnapshot: () => PlaybackSnapshot
+	clock: Clock
 }
 
 export interface TurnActorContext {
 	input: TurnActorInput
+	clock: Clock
 	turnId: number
 	userTranscript: string
 	agentResponse: string
@@ -110,8 +114,10 @@ function hasResource(config: InterruptConfig, resource: InterruptResource) {
 }
 
 function softPauseDurationMs(context: TurnActorContext) {
-	return context.pausedAt > 0 ? Date.now() - context.pausedAt : 0
+	return context.pausedAt > 0 ? context.clock.now() - context.pausedAt : 0
 }
+
+const now = ({ context }: { context: TurnActorContext }) => context.clock.now()
 
 const turnActorSetup = setup({
 	types: {
@@ -152,9 +158,9 @@ const turnActorSetup = setup({
 		flushPausedBuffer: () => {},
 	},
 	delays: {
-		substantiveSpeechMs: config.mimic.substantiveSpeechMs,
-		yieldWindowMs: config.mimic.yieldWindowMs,
-		playbackTimeoutMs: 5000,
+		substantiveSpeechMs: () => config.mimic.turnTaking.substantiveSpeechMs,
+		yieldWindowMs: () => config.mimic.turnTaking.yieldWindowMs,
+		playbackTimeoutMs: () => config.mimic.timeouts.playbackConfirmMs,
 	},
 	guards: {
 		isCallEnded: ({ event }) => isCallEndedInterrupt(event as TurnActorEvent),
@@ -186,7 +192,8 @@ const assignOnStreamDone = turnActorSetup.assign({
 		event.type === 'stream_done' ? event.result.endCallRequested : context.endCallRequested,
 })
 
-const assignVadSpeechStart = turnActorSetup.assign({ vadSpeechStartAt: () => Date.now() })
+const assignVadSpeechStart = turnActorSetup.assign({ vadSpeechStartAt: now })
+const assignVadSpeechEnd = turnActorSetup.assign({ lastVadSpeechEndAt: now })
 const clearVadSpeechStart = turnActorSetup.assign({ vadSpeechStartAt: 0 })
 
 function recordSoftPauseMetrics(outcome: SoftPauseOutcome) {
@@ -201,7 +208,7 @@ function recordSoftPauseMetrics(outcome: SoftPauseOutcome) {
 function enterSoftPause(source: SoftPauseSource) {
 	return turnActorSetup.enqueueActions(({ enqueue }) => {
 		enqueue('onSuspendAudio')
-		enqueue.assign({ pausedAt: () => Date.now(), softPauseSource: source })
+		enqueue.assign({ pausedAt: now, softPauseSource: source })
 	})
 }
 
@@ -212,7 +219,7 @@ const resumeFromSoftPause = turnActorSetup.enqueueActions(({ enqueue }) => {
 	enqueue.assign({
 		pausedAt: 0,
 		softPauseSource: 'unknown',
-		lastVadSpeechEndAt: () => Date.now(),
+		lastVadSpeechEndAt: now,
 	})
 })
 
@@ -249,10 +256,10 @@ function cleanupTts(enqueue: TurnEnqueue, config: InterruptConfig) {
 
 function cleanupBarge(enqueue: TurnEnqueue, context: TurnActorContext, config: InterruptConfig) {
 	if (!hasResource(config, 'barge')) return
-	const { sentMs, confirmedWordsPlayed } = context.input.getAudioSenderSnapshot()
+	const { sentMs, playedMs, words } = context.input.getPlaybackSnapshot()
 	const spokenDraft = sanitizeForTranscript(context.draftResponse)
-	const heardPortion = estimateHeardPortion(spokenDraft, sentMs, confirmedWordsPlayed)
-	const interruptCtx: InterruptContext = { fullDraft: spokenDraft, sentMs, heardPortion }
+	const heardPortion = estimateHeardPortion(spokenDraft, playedMs, words)
+	const interruptCtx: InterruptContext = { fullDraft: spokenDraft, sentMs, playedMs, heardPortion }
 	enqueue.assign({ computedInterruptContext: interruptCtx })
 	enqueue({ type: 'recordBarge', params: { draft: spokenDraft } })
 	if (interruptCtx.heardPortion) {
@@ -295,18 +302,12 @@ function maybeCommitUserOnlyOnInterrupt(
 	enqueue({ type: 'commitUserOnly', params: { userTranscript: context.userTranscript } })
 }
 
-function applyInterruptAssign(
-	enqueue: TurnEnqueue,
-	_context: TurnActorContext,
-	event: TurnActorEvent,
-	config: InterruptConfig,
-) {
+function applyInterruptAssign(enqueue: TurnEnqueue, event: TurnActorEvent, config: InterruptConfig) {
 	enqueue.assign({ interruptReason: config.reason ?? interruptReasonFrom(event, 'caller_started_speaking') })
 	if (hasResource(config, 'abort')) enqueue.assign({ abort: null })
 	if (config.clearVad !== false) enqueue.assign({ vadSpeechStartAt: 0 })
 	if (hasResource(config, 'softPause')) enqueue.assign({ pausedAt: 0, softPauseSource: 'unknown' })
 	if (config.clearDraft) enqueue.assign({ draftResponse: '' })
-	void _context
 }
 
 function interruptWith(config: InterruptConfig) {
@@ -320,7 +321,7 @@ function interruptWith(config: InterruptConfig) {
 		maybeCommitOnCallEnded(enqueue, context, event as TurnActorEvent, config.onCallEndedCommit ?? null)
 		maybeCommitUserOnlyOnInterrupt(enqueue, context, event as TurnActorEvent, config)
 		enqueue('cancelEager')
-		applyInterruptAssign(enqueue, context, event as TurnActorEvent, config)
+		applyInterruptAssign(enqueue, event as TurnActorEvent, config)
 	})
 }
 
@@ -387,6 +388,7 @@ const yieldTimerInterruptFromAwaiting = interruptWith(buildInterruptPlan('awaiti
 function buildTurnIdentityContext(input: TurnActorInput) {
 	return {
 		input,
+		clock: input.clock,
 		turnId: input.turnId,
 		userTranscript: input.userTranscript,
 		generationStartedAt: input.generationStartedAt,
@@ -497,6 +499,7 @@ function buildInterruptedOutcome(context: TurnActorContext) {
 		interruptContext: context.computedInterruptContext ?? {
 			fullDraft: context.draftResponse,
 			sentMs: 0,
+			playedMs: 0,
 			heardPortion: '',
 		},
 		reason: context.interruptReason!,
@@ -529,6 +532,7 @@ export const turnActorMachine = turnActorSetup.createMachine({
 					signal: context.abort!.signal,
 					generationAbort: context.abort!,
 					generationStartedAt: context.generationStartedAt,
+					clock: context.clock,
 					deps: context.input.runTurnDeps,
 				}),
 			},
@@ -555,7 +559,7 @@ export const turnActorMachine = turnActorSetup.createMachine({
 							on: {
 								vad_speech_end: {
 									target: 'flowing',
-									actions: [turnActorSetup.assign({ lastVadSpeechEndAt: () => Date.now() }), clearVadSpeechStart],
+									actions: [assignVadSpeechEnd, clearVadSpeechStart],
 								},
 							},
 						},
@@ -621,7 +625,7 @@ export const turnActorMachine = turnActorSetup.createMachine({
 					on: {
 						vad_speech_end: {
 							target: 'waiting',
-							actions: [turnActorSetup.assign({ lastVadSpeechEndAt: () => Date.now() }), clearVadSpeechStart],
+							actions: [assignVadSpeechEnd, clearVadSpeechStart],
 						},
 					},
 				},

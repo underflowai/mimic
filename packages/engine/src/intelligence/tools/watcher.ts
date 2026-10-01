@@ -1,23 +1,23 @@
 /**
  * Tool Watcher — background LLM that decides if/when to execute a tool.
  *
- * Uses Claude Sonnet 4.6 via OpenAI-compatible endpoint with structured output
- * for high-quality intent detection and arg extraction. Returns:
+ * Runs `models.toolWatcher` through the Responses API with a strict JSON
+ * schema for intent detection and arg extraction. Returns:
  *   - execute: all required args are present, fire the tool
  *   - not_ready: tool is relevant but args are missing
  *   - none: no tool action needed
  */
 
-import OpenAI from 'openai'
+import type OpenAI from 'openai'
 import { z } from 'zod'
 
 import { config } from '#engine/config.js'
-import { modelConfig } from '#engine/models.js'
-import { loadPrompt } from '#engine/prompts.js'
 import { createLogger } from '#engine/logger.js'
+import { models } from '#engine/models.js'
+import { loadPrompt } from '#engine/prompts.js'
+
 import { formatTurnsForPrompt, type CallTurn } from '../../shared/prompt-turns.js'
 import type { ToolDefinition } from './runner.js'
-import type { TranscriptToolEvent } from './types.js'
 
 const log = createLogger('mimic:tool-watcher')
 
@@ -46,13 +46,12 @@ export interface ToolWatcherInput {
 	priorToolResults?: Array<{ toolName: string; result: string }>
 	existingToolName?: string
 	existingToolArgs?: Record<string, unknown>
-	transcriptEvents?: TranscriptToolEvent[]
 	signal?: AbortSignal
 }
 
-let cachedPrompt: string | null = null
-async function getSystemPrompt() {
-	if (!cachedPrompt) cachedPrompt = await loadPrompt('instructions/tool-watcher')
+let cachedPrompt: Promise<string> | null = null
+function getSystemPrompt() {
+	cachedPrompt ??= loadPrompt('instructions/tool-watcher')
 	return cachedPrompt
 }
 
@@ -86,17 +85,6 @@ const FALLBACK: WatcherDecision = {
 	missing: null,
 	directorNote: null,
 	reasoning: 'watcher returned no parseable result',
-}
-
-const watcherTimeoutMs = 8_000
-
-let openaiClient: OpenAI | null = null
-function getClient(client?: unknown) {
-	if (client && typeof client === 'object' && 'responses' in client) return client as OpenAI
-	if (!openaiClient) {
-		openaiClient = new OpenAI({ apiKey: config.mimic.openai.apiKey })
-	}
-	return openaiClient
 }
 
 function buildArgsSchemaForTools(tools: ToolDefinition[]) {
@@ -181,7 +169,7 @@ function buildResponseSchema(tools: ToolDefinition[]) {
 	}
 }
 
-export async function watchForToolAction(_client: unknown, input: ToolWatcherInput): Promise<WatcherDecision> {
+export async function watchForToolAction(client: OpenAI, input: ToolWatcherInput): Promise<WatcherDecision> {
 	const systemPrompt = await getSystemPrompt()
 	const conversation = formatTurnsForPrompt(input.recentTurns.slice(-10))
 
@@ -206,20 +194,19 @@ export async function watchForToolAction(_client: unknown, input: ToolWatcherInp
 	const responseSchema = buildResponseSchema(input.tools)
 
 	try {
-		const client = getClient(_client)
-		const watcherConfig = modelConfig.toolWatcher
+		const watcher = models.toolWatcher
+		const timeout = config.mimic.timeouts.toolWatcherMs
 		const response = (await client.responses.create(
 			{
-				model: watcherConfig.model,
-				max_output_tokens: watcherConfig.maxTokens,
+				model: watcher.model,
+				max_output_tokens: watcher.maxOutputTokens,
+				reasoning: { effort: watcher.reasoningEffort },
 				instructions: systemPrompt,
 				input: userParts.join('\n'),
 				text: { format: { type: 'json_schema', ...responseSchema.json_schema } },
 				stream: false,
-				...('reasoningEffort' in watcherConfig &&
-					watcherConfig.reasoningEffort && { reasoning: { effort: watcherConfig.reasoningEffort } }),
 			} as Parameters<typeof client.responses.create>[0],
-			input.signal ? { signal: input.signal, timeout: watcherTimeoutMs } : { timeout: watcherTimeoutMs },
+			input.signal ? { signal: input.signal, timeout } : { timeout },
 		)) as OpenAI.Responses.Response
 
 		const textBlock = response.output.find((b: { type: string }) => b.type === 'message')

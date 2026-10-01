@@ -18,6 +18,7 @@ describe('createPresynthPcmReadable', () => {
 		const bufferedChunk = Buffer.from('stale-audio')
 		const sink: EagerAudioSink = {
 			chunks: [bufferedChunk],
+			words: [],
 			done: true,
 			forward: null,
 		}

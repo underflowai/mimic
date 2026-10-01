@@ -14,8 +14,11 @@ import {
 	type SnapshotFrom,
 } from 'xstate'
 
+import { config } from '#engine/config.js'
+
 import { eagerMachine, type EagerMachineActor } from '../intelligence/eager-machine.js'
 import { toolSupervisor, type ToolSupervisorActor } from '../intelligence/tools/supervisor-machine.js'
+import { monotonicClock, type Clock } from '../shared/clock.js'
 import { selectStrategy, type EagerStateValue, type TurnStrategy } from './strategy.js'
 import {
 	turnActorMachine,
@@ -25,7 +28,13 @@ import {
 	type TurnActorMachine,
 	type TurnActorSnapshot,
 } from './turn-actor.js'
-import type { InterruptReason, TurnOutcome } from './types.js'
+import {
+	emptyPlaybackSnapshot,
+	type HangupSource,
+	type InterruptReason,
+	type PlaybackSnapshot,
+	type TurnOutcome,
+} from './types.js'
 
 export type { PlaybackWaitSendEvent } from './actors/playback-wait-actor.js'
 export type {
@@ -39,10 +48,7 @@ export type {
 } from './turn-actor.js'
 export type { InterruptReason } from './types.js'
 
-/** Silence watchdog — fixed idle delay before each follow-up check. */
-const silenceIdleMs = 6_000
-/** Maximum number of silence follow-up turns before closing guidance is used. */
-const maxSilenceFollowUps = 3
+const { silenceIdleMs, maxSilenceFollowUps } = config.mimic.turnTaking
 
 export interface PendingStrategy {
 	strategy: TurnActorExecutionStrategy
@@ -73,13 +79,15 @@ export interface CallMachineContext {
 	silenceFollowUpCount: number
 	runTurnDeps: RunTurnActorDeps | null
 	commitDeps: CommitActorDeps | null
-	getAudioSenderSnapshot: (() => { sentMs: number; confirmedWordsPlayed: number }) | null
+	getPlaybackSnapshot: (() => PlaybackSnapshot) | null
+	clock: Clock
 }
 
 export interface CallMachineInput {
 	runTurnDeps: RunTurnActorDeps
 	commitDeps: CommitActorDeps
-	getAudioSenderSnapshot: () => { sentMs: number; confirmedWordsPlayed: number }
+	getPlaybackSnapshot: () => PlaybackSnapshot
+	clock?: Clock
 }
 
 type TurnCompleteEvent = {
@@ -171,7 +179,7 @@ const callMachineSetup = setup({
 		commitUserOnly: (_, _params: { userTranscript: string }) => {},
 		recordTurnOutcomeMetric: (_, _params: { outcome: TurnOutcome }) => {},
 		requestSilenceFollowUp: (_, _params: { silenceFollowUpCount: number; silenceClosing: boolean }) => {},
-		requestCallHangup: (_, _params: { source: 'silence' | 'end_call_tag' }) => {},
+		requestCallHangup: (_, _params: { source: HangupSource }) => {},
 		onTranscriberError: (_, _params: { message: string }) => {},
 		commitToolResultToDirector: (_, _params: { toolName: string; result: string }) => {},
 	},
@@ -208,14 +216,21 @@ function buildOutcomeFromStrategy(strategy: TurnStrategy, turnId: number) {
 	return { kind: 'deferred', turnId, reason: 'soft_paused' } as const
 }
 
-function buildPendingTurnState(strategy: TurnActorExecutionStrategy, event: TurnCompleteEvent, turnId: number) {
+function buildPendingTurnState(
+	strategy: TurnActorExecutionStrategy,
+	event: TurnCompleteEvent,
+	turnId: number,
+	generationStartedAt: number,
+): PendingStrategy {
 	return {
 		strategy,
 		turnId,
 		userTranscript: event.transcript,
-		generationStartedAt: Date.now(),
+		generationStartedAt,
 	}
 }
+
+const now = ({ context }: { context: CallMachineContext }) => context.clock.now()
 
 function isRacingPromotionStrategy(
 	strategy: TurnActorExecutionStrategy,
@@ -365,7 +380,10 @@ function dispatchIdleTurnComplete(params: IdleDispatchParams, turnId: number) {
 	const execution = toExecutionStrategy(strategy)
 	if (!execution)
 		return { kind: 'emit', outcome: { kind: 'discarded', turnId, reason: 'failed' } } satisfies DispatchResult
-	return { kind: 'start', pending: buildPendingTurnState(execution, params.event, turnId) } satisfies DispatchResult
+	return {
+		kind: 'start',
+		pending: buildPendingTurnState(execution, params.event, turnId, params.context.clock.now()),
+	} satisfies DispatchResult
 }
 
 function dispatchTurnComplete(params: DispatchParams) {
@@ -415,7 +433,7 @@ function applyStartDispatch(enqueue: CallEnqueue, dispatch: Extract<DispatchResu
 		})
 	}
 	enqueue.assign({
-		lastTurnCompleteAt: () => Date.now(),
+		lastTurnCompleteAt: now,
 		callerVadEndAt: ({ context }: { context: CallMachineContext }) => context.lastVadSpeechEndAt,
 	})
 	enqueue.assign({ nextTurnId: ({ context }: { context: CallMachineContext }) => context.nextTurnId + 1 })
@@ -428,13 +446,13 @@ function applyStartDispatch(enqueue: CallEnqueue, dispatch: Extract<DispatchResu
 function applyInterruptDispatch(enqueue: CallEnqueue, dispatch: Extract<DispatchResult, { kind: 'interrupt-active' }>) {
 	enqueue.assign({ pendingTurnComplete: () => dispatch.pending })
 	enqueue.assign({
-		lastTurnCompleteAt: () => Date.now(),
+		lastTurnCompleteAt: now,
 		callerVadEndAt: ({ context }: { context: CallMachineContext }) => context.lastVadSpeechEndAt,
 	})
 	enqueue.sendTo('turnActor', { type: 'interrupt', reason: 'new_turn_started' })
 }
 
-function updateAfterTurnDone(_context: CallMachineContext, outcome: TurnOutcome) {
+function updateAfterTurnDone(outcome: TurnOutcome) {
 	return {
 		pendingStrategy: null,
 		pendingSilenceClosing: false,
@@ -451,7 +469,7 @@ function handleTurnDone(enqueue: CallEnqueue, context: CallMachineContext, raw: 
 	if (context.pendingSilenceClosing && raw.kind === 'committed') {
 		enqueue({ type: 'requestCallHangup', params: { source: 'silence' } })
 	}
-	enqueue.assign(updateAfterTurnDone(context, raw))
+	enqueue.assign(updateAfterTurnDone(raw))
 }
 
 function raisePendingTurnComplete(enqueue: CallEnqueue, pending: PendingTurnComplete) {
@@ -480,7 +498,8 @@ function turnActorInputFromContext(context: CallMachineContext) {
 		callerVadEndAt: context.callerVadEndAt,
 		runTurnDeps: context.runTurnDeps,
 		commitDeps: context.commitDeps,
-		getAudioSenderSnapshot: context.getAudioSenderSnapshot ?? (() => ({ sentMs: 0, confirmedWordsPlayed: 0 })),
+		getPlaybackSnapshot: context.getPlaybackSnapshot ?? (() => emptyPlaybackSnapshot),
+		clock: context.clock,
 	}
 }
 
@@ -550,7 +569,7 @@ export const callMachine = callMachineSetup.createMachine({
 	id: 'call',
 	initial: 'idle',
 	entry: [
-		spawnChild('eagerPipeline', { id: 'eager-pipeline' }),
+		spawnChild('eagerPipeline', { id: 'eager-pipeline', input: ({ context }) => ({ clock: context.clock }) }),
 		spawnChild('toolPipeline', { id: 'tool-pipeline', input: { tools: [] } }),
 	],
 	exit: [stopChild('eager-pipeline'), stopChild('tool-pipeline')],
@@ -569,7 +588,8 @@ export const callMachine = callMachineSetup.createMachine({
 		silenceFollowUpCount: 0,
 		runTurnDeps: input?.runTurnDeps ?? null,
 		commitDeps: input?.commitDeps ?? null,
-		getAudioSenderSnapshot: input?.getAudioSenderSnapshot ?? null,
+		getPlaybackSnapshot: input?.getPlaybackSnapshot ?? null,
+		clock: input?.clock ?? monotonicClock,
 	}),
 	on: {
 		allocate_turn_id: { actions: callMachineSetup.assign({ nextTurnId: ({ context }) => context.nextTurnId + 1 }) },
@@ -587,7 +607,7 @@ export const callMachine = callMachineSetup.createMachine({
 			},
 		},
 		vad_speech_start: {},
-		vad_speech_end: { actions: callMachineSetup.assign({ lastVadSpeechEndAt: () => Date.now() }) },
+		vad_speech_end: { actions: callMachineSetup.assign({ lastVadSpeechEndAt: now }) },
 		transcriber_error: {
 			actions: {
 				type: 'onTranscriberError',
@@ -662,7 +682,7 @@ export const callMachine = callMachineSetup.createMachine({
 								strategy: { kind: 'first_turn', openingBlock: event.openingBlock },
 								turnId: context.nextTurnId,
 								userTranscript: '',
-								generationStartedAt: Date.now(),
+								generationStartedAt: context.clock.now(),
 							}),
 							pendingSilenceClosing: false,
 						})
@@ -813,7 +833,7 @@ export const callMachine = callMachineSetup.createMachine({
 				vad_speech_start: { actions: sendTo('turnActor', { type: 'vad_speech_start' }) },
 				vad_speech_end: {
 					actions: [
-						callMachineSetup.assign({ lastVadSpeechEndAt: () => Date.now() }),
+						callMachineSetup.assign({ lastVadSpeechEndAt: now }),
 						sendTo('turnActor', { type: 'vad_speech_end' }),
 					],
 				},

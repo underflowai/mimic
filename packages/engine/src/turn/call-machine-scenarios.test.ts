@@ -11,6 +11,7 @@ import { describe, it, mock } from 'node:test'
 
 import { createFakeAudioTransport, type FakeAudioTransport } from '#test/support/fake-audio-transport.js'
 import { waitForCondition } from '#test/support/wait-for-condition.js'
+import type { TtsSynthesisListener } from '../audio/tts-speaker.js'
 import { createCallMachineRuntime, type CallMachineRuntimeDeps } from './call-machine-runtime.js'
 import type { TurnOutcome } from './types.js'
 
@@ -32,17 +33,17 @@ function deferred<T>() {
 // Mock deps factory — every mock is inspectable
 // ---------------------------------------------------------------------------
 
-const { ttsFrameBytes } = await import('../shared/audio-pacing.js')
+const { ttsFrameBytes } = await import('../shared/audio-format.js')
 
 function makeScenarioTts() {
 	return {
 		interrupt: mock.fn(),
 		connect: mock.fn(async () => {}),
 		close: mock.fn(),
-		preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => ({
+		preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => ({
 			pushTextDelta: () => {},
 			triggerSynthesisStart: () => {
-				onChunk(Buffer.alloc(ttsFrameBytes, 1))
+				listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1))
 			},
 			audioComplete: Promise.resolve(),
 		})),
@@ -130,7 +131,8 @@ function createDeps(overrides?: LooseOverrides, transportRef?: { current: FakeAu
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		endCallEnabled: false,
+		onHangupRequested: mock.fn(),
 		...(rest as Partial<CallMachineRuntimeDeps>),
 	} satisfies CallMachineRuntimeDeps
 	return deps
@@ -253,11 +255,11 @@ describe('scenario: backchannel suppression', () => {
 			interrupt: mock.fn(),
 			close: mock.fn(),
 			connect: mock.fn(async () => {}),
-			preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => {
+			preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => {
 				synthCallCount++
 				return {
 					pushTextDelta: () => {},
-					triggerSynthesisStart: () => onChunk(Buffer.alloc(1920, 1)),
+					triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
 					audioComplete: synthCallCount === 1 ? new Promise<void>(() => {}) : Promise.resolve(),
 				}
 			}),
@@ -298,7 +300,7 @@ describe('scenario: barge-in records metrics and interrupts TTS', () => {
 			interrupt: mock.fn(),
 			close: mock.fn(),
 			connect: mock.fn(async () => {}),
-			preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => {
+			preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => {
 				synthCallCount++
 				if (synthCallCount === 1) {
 					return {
@@ -306,14 +308,14 @@ describe('scenario: barge-in records metrics and interrupts TTS', () => {
 						triggerSynthesisStart: () => {
 							// Flush one chunk so the tracker registers audio;
 							// then block audioComplete forever.
-							onChunk(Buffer.alloc(1920, 1))
+							listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1))
 						},
 						audioComplete: new Promise<void>(() => {}),
 					}
 				}
 				return {
 					pushTextDelta: () => {},
-					triggerSynthesisStart: () => onChunk(Buffer.alloc(1920, 1)),
+					triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
 					audioComplete: Promise.resolve(),
 				}
 			}),
@@ -490,10 +492,10 @@ describe('scenario: soft pause records metrics', () => {
 			interrupt: mock.fn(),
 			close: mock.fn(),
 			connect: mock.fn(async () => {}),
-			preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (c: Buffer) => void) => {
+			preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => {
 				return {
 					pushTextDelta: () => {},
-					triggerSynthesisStart: () => onChunk(Buffer.alloc(1920, 1)),
+					triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
 					audioComplete: new Promise<void>((resolve) => {
 						audioCompleteResolvers.push(resolve)
 					}),
@@ -705,4 +707,3 @@ describe('scenario: opening turn commit payload', () => {
 		engine.stop()
 	})
 })
-

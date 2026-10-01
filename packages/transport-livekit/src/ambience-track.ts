@@ -1,10 +1,12 @@
 import { execSync } from 'node:child_process'
 
 import { AudioFrame, AudioSource, LocalAudioTrack } from '@livekit/rtc-node'
+import { ttsFrameMs, ttsSampleRate } from '@mimic/engine'
 
-const SAMPLE_RATE = 48000
+/** Published alongside the agent voice track, so it shares the voice format. */
+const SAMPLE_RATE = ttsSampleRate
 const CHANNELS = 1
-const SAMPLES_PER_FRAME = (SAMPLE_RATE * 20) / 1000
+const SAMPLES_PER_FRAME = (SAMPLE_RATE * ttsFrameMs) / 1000
 
 export interface AmbienceTrackOptions {
 	filePath: string
@@ -25,7 +27,7 @@ export function createAmbienceTrack(options: AmbienceTrackOptions) {
 
 	console.log(`[ambience] decoding ${options.filePath} (gain=${gain})`)
 	const raw = decodeToRawPcm(options.filePath)
-	const samples = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2)
+	const samples = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / Int16Array.BYTES_PER_ELEMENT)
 
 	for (let i = 0; i < samples.length; i++) {
 		samples[i] = Math.round(samples[i] * gain)

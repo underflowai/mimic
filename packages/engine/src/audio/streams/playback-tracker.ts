@@ -14,20 +14,14 @@
 
 import { Transform, type TransformCallback } from 'node:stream'
 
-import {
-	applyLinearFade,
-	avgMsPerWord,
-	interruptDrainMs,
-	interruptFadeMs,
-	maxChunkBytes,
-	progressMarkIntervalBytes,
-	ttsBytesPerMs,
-} from '../../shared/audio-pacing.js'
+import { ttsBytesToMs, ttsFrameBytes, ttsMsToBytes } from '../../shared/audio-format.js'
+import { applyLinearFade, interruptDrainMs, interruptFadeMs } from '../../shared/audio-pacing.js'
+import { monotonicClock, type Clock } from '../../shared/clock.js'
 import type { PlaybackProgress } from './types.js'
 
 export interface PlaybackTracker extends Transform {
 	snapshot(): PlaybackProgress
-	/** Build a faded copy of the trailing buffer for interrupt drain. */
+	/** Build a faded copy of the trailing buffer for interrupt drain, split into transport frames. */
 	buildFadeTail(drainMs?: number, fadeMs?: number): Buffer[]
 	/** Reset internal counters (between turns). */
 	reset(): void
@@ -35,15 +29,13 @@ export interface PlaybackTracker extends Transform {
 	readonly firstChunk: Promise<number>
 }
 
-export function createPlaybackTracker(): PlaybackTracker {
+export function createPlaybackTracker(clock: Clock = monotonicClock): PlaybackTracker {
 	let sentMs = 0
 	let sentBytes = 0
 	let started = false
-	let nextProgressMarkAt = progressMarkIntervalBytes
-	let confirmedWordsPlayed = 0
 	let recentChunks: Buffer[] = []
 	let recentTotal = 0
-	const maxRecentBytes = Math.round(interruptDrainMs * ttsBytesPerMs)
+	const maxRecentBytes = ttsMsToBytes(interruptDrainMs)
 	let firstChunkResolve!: (at: number) => void
 	let firstChunkReject!: (err: Error) => void
 	const firstChunk = new Promise<number>((resolve, reject) => {
@@ -54,20 +46,15 @@ export function createPlaybackTracker(): PlaybackTracker {
 	function track(chunk: Buffer) {
 		if (!started) {
 			started = true
-			firstChunkResolve(Date.now())
+			firstChunkResolve(clock.now())
 		}
-		sentMs += chunk.length / ttsBytesPerMs
+		sentMs += ttsBytesToMs(chunk.length)
 		sentBytes += chunk.length
 
 		recentChunks.push(chunk)
 		recentTotal += chunk.length
 		while (recentTotal > maxRecentBytes && recentChunks.length > 1) {
 			recentTotal -= recentChunks.shift()!.length
-		}
-
-		if (sentBytes >= nextProgressMarkAt) {
-			confirmedWordsPlayed = Math.floor(sentMs / avgMsPerWord)
-			nextProgressMarkAt += progressMarkIntervalBytes
 		}
 	}
 
@@ -93,17 +80,17 @@ export function createPlaybackTracker(): PlaybackTracker {
 	})
 
 	const tracker = transform as PlaybackTracker
-	tracker.snapshot = () => ({ sentMs, sentBytes, confirmedWordsPlayed, started })
+	tracker.snapshot = () => ({ sentMs, sentBytes, started })
 	tracker.buildFadeTail = (drainMs = interruptDrainMs, fadeMs = interruptFadeMs) => {
 		if (recentChunks.length === 0) return []
-		const drainBytes = Math.round(drainMs * ttsBytesPerMs)
+		const drainBytes = ttsMsToBytes(drainMs)
 		const combined = Buffer.concat(recentChunks)
 		const tail = combined.subarray(Math.max(0, combined.length - drainBytes))
 		if (tail.length === 0) return []
 		const faded = applyLinearFade(tail, fadeMs)
 		const frames: Buffer[] = []
-		for (let offset = 0; offset < faded.length; offset += maxChunkBytes) {
-			frames.push(Buffer.from(faded.subarray(offset, Math.min(offset + maxChunkBytes, faded.length))))
+		for (let offset = 0; offset < faded.length; offset += ttsFrameBytes) {
+			frames.push(Buffer.from(faded.subarray(offset, Math.min(offset + ttsFrameBytes, faded.length))))
 		}
 		recentChunks = []
 		recentTotal = 0
@@ -113,8 +100,6 @@ export function createPlaybackTracker(): PlaybackTracker {
 		sentMs = 0
 		sentBytes = 0
 		started = false
-		nextProgressMarkAt = progressMarkIntervalBytes
-		confirmedWordsPlayed = 0
 		recentChunks = []
 		recentTotal = 0
 	}

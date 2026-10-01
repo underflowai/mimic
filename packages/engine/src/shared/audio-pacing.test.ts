@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { applyLinearFade, avgMsPerWord, estimateHeardPortion } from './audio-pacing.js'
+import { applyLinearFade, avgMsPerWord, estimateHeardPortion, type WordTiming } from './audio-pacing.js'
 
 describe('applyLinearFade', () => {
 	it('fades the tail of a buffer to near-zero', () => {
@@ -24,60 +24,94 @@ describe('applyLinearFade', () => {
 	})
 })
 
+/** Builds an evenly spaced timeline: word i spans [i*ms, (i+1)*ms). */
+function evenTimeline(words: string[], msPerWord: number): WordTiming[] {
+	return words.map((word, i) => ({ word, startMs: i * msPerWord, endMs: (i + 1) * msPerWord }))
+}
+
 describe('estimateHeardPortion', () => {
 	it('returns empty when no draft', () => {
-		assert.equal(estimateHeardPortion('', 1000, 0), '')
+		assert.equal(estimateHeardPortion('', 1000), '')
 	})
 
-	it('uses confirmed words when positive', () => {
-		const draft = 'one two three four five'
-		assert.equal(estimateHeardPortion(draft, 10_000, 2), 'one two')
+	it('returns empty when nothing has played', () => {
+		assert.equal(estimateHeardPortion('anything here', 0), '')
+		assert.equal(estimateHeardPortion('anything here', 0, evenTimeline(['anything', 'here'], 300)), '')
 	})
 
-	it('falls back to timing when no confirmed words', () => {
-		const draft = 'one two three four'
-		const ms = 2 * avgMsPerWord
-		const heard = estimateHeardPortion(draft, ms, 0)
-		assert.match(heard, /^one two/)
-	})
-
-	const boundarySnappingCases = [
-		{
-			description: 'snaps to period boundary',
-			draft: 'Covers liability. Also umbrella and flood coverage.',
-			wordsHeard: 4,
-			expected: 'Covers liability.',
-		},
-		{
-			description: 'snaps to comma boundary',
-			draft: 'Covers liability, umbrella and flood',
-			wordsHeard: 3,
-			expected: 'Covers liability,',
-		},
-		{
-			description: 'snaps to em dash boundary',
-			draft: 'The policy — which is comprehensive — covers everything',
-			wordsHeard: 4,
-			expected: 'The policy —',
-		},
-		{
-			description: 'falls back to raw slice when no boundary in range',
-			draft: 'one two three four five',
-			wordsHeard: 2,
-			expected: 'one two',
-		},
-		{
-			description: 'returns empty for zero sentMs',
-			draft: 'anything here',
-			wordsHeard: 0,
-			expected: '',
-		},
-	]
-
-	for (const { description, draft, wordsHeard, expected } of boundarySnappingCases) {
-		it(`boundary snapping: ${description}`, () => {
-			const sentMs = wordsHeard === 0 ? 0 : wordsHeard * avgMsPerWord
-			assert.equal(estimateHeardPortion(draft, sentMs, 0), expected)
+	describe('with a word timeline', () => {
+		it('counts only words whose playback finished', () => {
+			const draft = 'one two three four five'
+			const timeline = evenTimeline(draft.split(' '), 300)
+			// 650 ms: "one" (ends 300) and "two" (ends 600) finished; "three" ends at 900.
+			assert.equal(estimateHeardPortion(draft, 650, timeline), 'one two')
 		})
-	}
+
+		it('uses the timeline over the average-rate fallback', () => {
+			const draft = 'one two three four five'
+			// Fast speech: 100 ms per word. The fallback would only credit 1 word for 500 ms.
+			const timeline = evenTimeline(draft.split(' '), 100)
+			assert.equal(estimateHeardPortion(draft, 500, timeline), 'one two three four five')
+		})
+
+		it('treats a word that is mid-playback as unheard', () => {
+			const draft = 'one two three'
+			const timeline = evenTimeline(draft.split(' '), 300)
+			assert.equal(estimateHeardPortion(draft, 299, timeline), '')
+			assert.equal(estimateHeardPortion(draft, 300, timeline), 'one')
+		})
+
+		it('never credits more words than the draft contains', () => {
+			const draft = 'one two'
+			const timeline = evenTimeline(['one', 'two', 'three', 'four'], 100)
+			assert.equal(estimateHeardPortion(draft, 10_000, timeline), 'one two')
+		})
+
+		it('snaps the heard words back to a clause boundary', () => {
+			const draft = 'Covers liability. Also umbrella and flood coverage.'
+			const timeline = evenTimeline(draft.split(' '), 200)
+			// 4 words heard ("Covers liability. Also umbrella") → snaps to the period.
+			assert.equal(estimateHeardPortion(draft, 800, timeline), 'Covers liability.')
+		})
+	})
+
+	describe('without a timeline (average-rate fallback)', () => {
+		it('credits one word per avgMsPerWord', () => {
+			const draft = 'one two three four'
+			assert.match(estimateHeardPortion(draft, 2 * avgMsPerWord), /^one two/)
+		})
+
+		const boundarySnappingCases = [
+			{
+				description: 'snaps to period boundary',
+				draft: 'Covers liability. Also umbrella and flood coverage.',
+				wordsHeard: 4,
+				expected: 'Covers liability.',
+			},
+			{
+				description: 'snaps to comma boundary',
+				draft: 'Covers liability, umbrella and flood',
+				wordsHeard: 3,
+				expected: 'Covers liability,',
+			},
+			{
+				description: 'snaps to em dash boundary',
+				draft: 'The policy — which is comprehensive — covers everything',
+				wordsHeard: 4,
+				expected: 'The policy —',
+			},
+			{
+				description: 'falls back to raw slice when no boundary in range',
+				draft: 'one two three four five',
+				wordsHeard: 2,
+				expected: 'one two',
+			},
+		]
+
+		for (const { description, draft, wordsHeard, expected } of boundarySnappingCases) {
+			it(`boundary snapping: ${description}`, () => {
+				assert.equal(estimateHeardPortion(draft, wordsHeard * avgMsPerWord), expected)
+			})
+		}
+	})
 })

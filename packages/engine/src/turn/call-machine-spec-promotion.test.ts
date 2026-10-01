@@ -3,7 +3,8 @@ import { describe, it, mock } from 'node:test'
 
 import { createFakeAudioTransport } from '#test/support/fake-audio-transport.js'
 import { waitForCondition } from '#test/support/wait-for-condition.js'
-import { ttsFrameBytes } from '../shared/audio-pacing.js'
+import type { TtsSynthesisListener } from '../audio/tts-speaker.js'
+import { ttsFrameBytes } from '../shared/audio-format.js'
 import { createCallMachineRuntime, type CallMachineRuntimeDeps, type TurnOutcome } from './call-machine-runtime.js'
 
 function getEagerState(engine: ReturnType<typeof createCallMachineRuntime>) {
@@ -52,9 +53,9 @@ function createEagerOnlyDeps(opts?: { validateResult?: boolean; specAudioComplet
 			interrupt: mock.fn(),
 			connect: mock.fn(async () => {}),
 			close: mock.fn(),
-			preSendTextForSynthesis: mock.fn(async (_text: string, onChunk: (chunk: Buffer) => void) => ({
+			preSendTextForSynthesis: mock.fn(async (_text: string, listener: TtsSynthesisListener) => ({
 				pushTextDelta: () => {},
-				triggerSynthesisStart: () => onChunk(Buffer.alloc(ttsFrameBytes, 1)),
+				triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
 				audioComplete: Promise.resolve(),
 			})),
 		} as CallMachineRuntimeDeps['tts'],
@@ -62,11 +63,11 @@ function createEagerOnlyDeps(opts?: { validateResult?: boolean; specAudioComplet
 			interrupt: mock.fn(),
 			connect: mock.fn(async () => {}),
 			close: mock.fn(),
-			preSendTextForSynthesis: mock.fn(async (text: string, onChunk: (chunk: Buffer) => void) => {
+			preSendTextForSynthesis: mock.fn(async (text: string, listener: TtsSynthesisListener) => {
 				preSendTexts.push(text)
 				return {
 					pushTextDelta: () => {},
-					triggerSynthesisStart: () => onChunk(Buffer.alloc(ttsFrameBytes, 1)),
+					triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(ttsFrameBytes, 1)),
 					audioComplete: opts?.specAudioComplete ?? Promise.resolve(),
 				}
 			}),
@@ -120,7 +121,8 @@ function createEagerOnlyDeps(opts?: { validateResult?: boolean; specAudioComplet
 		webSearcher: { search: mock.fn(async () => null) } as CallMachineRuntimeDeps['webSearcher'],
 		getCallerDateTime: () => undefined,
 		getDirectorTurns: () => [],
-		onSilenceHangup: mock.fn(),
+		endCallEnabled: false,
+		onHangupRequested: mock.fn(),
 	}
 
 	return { deps, streamTokenizedCalls, preSendTexts, speculationEvents }

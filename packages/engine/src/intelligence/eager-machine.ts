@@ -10,6 +10,7 @@
 
 import { fromPromise, sendParent, setup, type ActorRefFrom, type DoneActorEvent, type ErrorActorEvent } from 'xstate'
 
+import { monotonicClock, type Clock } from '../shared/clock.js'
 import type { EagerAudioSink } from './types.js'
 
 export interface EagerPreparedResult {
@@ -25,7 +26,12 @@ export interface ValidationResult {
 	valid: boolean
 }
 
+export interface EagerMachineInput {
+	clock?: Clock
+}
+
 export interface EagerMachineContext {
+	clock: Clock
 	turnId: number
 	transcript: string
 	controlBlock: string
@@ -77,6 +83,7 @@ type InternalEvent =
 export const eagerMachineSetup = setup({
 	types: {
 		context: {} as EagerMachineContext,
+		input: {} as EagerMachineInput,
 		events: {} as EagerMachineEvent | InternalEvent,
 	},
 	actors: {
@@ -94,6 +101,8 @@ export const eagerMachineSetup = setup({
 		interruptSpecTts: () => {},
 	},
 })
+
+const now = ({ context }: { context: EagerMachineContext }) => context.clock.now()
 
 const resetContext = eagerMachineSetup.assign({
 	turnId: 0,
@@ -116,7 +125,7 @@ const assignEagerTurn = eagerMachineSetup.assign({
 	transcript: ({ event }) => (event.type === 'EAGER_TURN' ? event.transcript : ''),
 	controlBlock: ({ event }) => (event.type === 'EAGER_TURN' ? event.controlBlock : ''),
 	abort: () => new AbortController(),
-	eagerStartedAt: () => Date.now(),
+	eagerStartedAt: now,
 	eagerDraft: null,
 	eagerGeneratedAt: 0,
 	validatedTranscript: null,
@@ -159,7 +168,7 @@ const assignEagerDraft = eagerMachineSetup.assign({
 			controlBlock: output.controlBlock,
 		}
 	},
-	eagerGeneratedAt: () => Date.now(),
+	eagerGeneratedAt: now,
 	validatedTranscript: null,
 	sink: ({ event }) => {
 		if (!('output' in event) || event.output === null) return null
@@ -203,7 +212,7 @@ const recordMetric = (outcome: 'promoted' | 'discarded_diverged') =>
 				outcome,
 				specTranscript: context.eagerDraft?.userTranscript ?? '',
 				finalTranscript: context.transcript,
-				durationMs: context.eagerStartedAt > 0 ? Date.now() - context.eagerStartedAt : 0,
+				durationMs: context.eagerStartedAt > 0 ? context.clock.now() - context.eagerStartedAt : 0,
 			}),
 		)
 	})
@@ -211,7 +220,8 @@ const recordMetric = (outcome: 'promoted' | 'discarded_diverged') =>
 export const eagerMachine = eagerMachineSetup.createMachine({
 	id: 'eager',
 	initial: 'idle',
-	context: {
+	context: ({ input }) => ({
+		clock: input?.clock ?? monotonicClock,
 		turnId: 0,
 		transcript: '',
 		controlBlock: '',
@@ -225,7 +235,7 @@ export const eagerMachine = eagerMachineSetup.createMachine({
 		ttsPromise: null,
 		turnResumedSince: false,
 		pendingValidate: null,
-	},
+	}),
 	on: {
 		CANCEL: {
 			target: '.idle',

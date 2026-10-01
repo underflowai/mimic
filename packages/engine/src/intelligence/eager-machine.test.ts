@@ -35,7 +35,7 @@ function createPreparedResult(transcript: string, controlBlock: string): EagerPr
 		agentResponse: `draft for ${transcript}`,
 		userTranscript: transcript,
 		controlBlock,
-		sink: { chunks: [], done: true, forward: null },
+		sink: { chunks: [], words: [], done: true, forward: null },
 		triggerSynthesisStart: () => {},
 		ttsPromise: Promise.resolve(),
 	}
@@ -155,6 +155,7 @@ describe('eager machine', () => {
 	it('cancel clears speculative sink buffers and forwarding hook', async () => {
 		const sink = {
 			chunks: [Buffer.from('stale-audio')],
+			words: [],
 			done: false,
 			forward: (_chunk: Buffer) => {},
 		}

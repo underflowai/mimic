@@ -16,7 +16,7 @@ import type {
 	StreamResult,
 } from './actors/run-turn-actor.js'
 import { turnActorMachine, type TurnActorInput } from './turn-actor.js'
-import type { CommittedTurn, TurnOutcome } from './types.js'
+import { emptyPlaybackSnapshot, type CommittedTurn, type PlaybackSnapshot, type TurnOutcome } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +33,19 @@ function createDeferred<T>() {
 }
 
 const waitOpts = { timeout: 2000 }
+
+/** Two words fully played out of a 100 ms send. */
+function twoWordsHeardSnapshot(): PlaybackSnapshot {
+	return {
+		sentMs: 100,
+		playedMs: 100,
+		words: [
+			{ word: 'word1', startMs: 0, endMs: 40 },
+			{ word: 'word2', startMs: 40, endMs: 80 },
+			{ word: 'word3', startMs: 80, endMs: 120 },
+		],
+	}
+}
 
 function defaultStrategy(): RunTurnStrategyInput {
 	return { kind: 'fresh', transcript: 'hello', controlBlock: 'test block' }
@@ -80,12 +93,13 @@ function createTurnActorInput(overrides?: Partial<TurnActorInput>): TurnActorInp
 		strategy: defaultStrategy(),
 		turnId: 1,
 		userTranscript: 'hello',
-		generationStartedAt: Date.now() - 200,
-		lastTurnCompleteAt: Date.now() - 500,
-		callerVadEndAt: Date.now() - 400,
+		generationStartedAt: performance.now() - 200,
+		lastTurnCompleteAt: performance.now() - 500,
+		callerVadEndAt: performance.now() - 400,
 		runTurnDeps: defaultRunTurnDeps(),
 		commitDeps: defaultCommitDeps(),
-		getAudioSenderSnapshot: () => ({ sentMs: 100, confirmedWordsPlayed: 2 }),
+		getPlaybackSnapshot: twoWordsHeardSnapshot,
+		clock: { now: () => performance.now() },
 		...overrides,
 	}
 }
@@ -94,7 +108,7 @@ function defaultStreamResult(): StreamResult {
 	return {
 		agentResponse: 'Sure, I can help with that.',
 		draftMs: 150,
-		firstAudioAt: Date.now() - 50,
+		firstAudioAt: performance.now() - 50,
 		ttsFirstByteMs: 30,
 		ttftMs: 80,
 		ttcMs: 120,
@@ -329,7 +343,7 @@ describe('TurnActor machine', () => {
 		it('commits user_only when no agent audio was heard', async () => {
 			const pipeline = createControllablePipeline()
 			const { actor, actionCalls } = startActor(pipeline, {
-				getAudioSenderSnapshot: () => ({ sentMs: 0, confirmedWordsPlayed: 0 }),
+				getPlaybackSnapshot: () => emptyPlaybackSnapshot,
 			})
 
 			await pipeline.ready
@@ -414,10 +428,10 @@ describe('TurnActor machine', () => {
 	})
 
 	describe('computedInterruptContext in interrupted output', () => {
-		it('uses real sentMs/heardPortion from getAudioSenderSnapshot', async () => {
+		it('derives heardPortion from the playback snapshot word timeline', async () => {
 			const pipeline = createControllablePipeline()
 			const { actor } = startActor(pipeline, {
-				getAudioSenderSnapshot: () => ({ sentMs: 100, confirmedWordsPlayed: 2 }),
+				getPlaybackSnapshot: twoWordsHeardSnapshot,
 			})
 
 			await pipeline.ready
@@ -432,9 +446,9 @@ describe('TurnActor machine', () => {
 			if (output.kind === 'interrupted') {
 				const ctx: InterruptContext = output.interruptContext
 				assert.equal(ctx.sentMs, 100)
+				assert.equal(ctx.playedMs, 100)
 				assert.equal(ctx.fullDraft, 'word1 word2 word3 word4 word5')
-				assert.ok(ctx.heardPortion.length > 0, 'heardPortion should be non-empty')
-				assert.ok(ctx.heardPortion.startsWith('word1'))
+				assert.equal(ctx.heardPortion, 'word1 word2')
 			}
 		})
 
@@ -674,7 +688,7 @@ describe('TurnActor machine', () => {
 		it('assigns firstAudioAt on first_audio_sent before stream_done', async () => {
 			const pipeline = createControllablePipeline()
 			const { actor } = startActor(pipeline)
-			const firstAudioAt = Date.now()
+			const firstAudioAt = performance.now()
 
 			await pipeline.ready
 			pipeline.sendBack({ type: 'first_audio_sent', at: firstAudioAt })

@@ -2,6 +2,7 @@ import type OpenAI from 'openai'
 
 import { createLogger } from '#engine/logger.js'
 import { supportsTemperature } from '#engine/models.js'
+import { loadPrompt } from '#engine/prompts.js'
 
 import { sanitizeForTranscript } from '../audio/tts-sanitizer.js'
 import { isAbortLikeError } from '../shared/async-utils.js'
@@ -11,6 +12,13 @@ import type { DirectorConfig } from './types.js'
 const log = createLogger('mimic:director')
 
 const pauseTagRe = /\[(long-)?pause\]\s*/gi
+
+let cachedToolResultNudge: Promise<string> | null = null
+/** User-role message sent in place of a transcript when a tool result arrives with no caller speech. */
+function getToolResultNudge() {
+	cachedToolResultNudge ??= loadPrompt('instructions/tool-result-nudge').then((text) => text.trim())
+	return cachedToolResultNudge
+}
 export type CommittedTurnContent =
 	| { kind: 'exchange'; user: string; agent: string }
 	| { kind: 'partial_exchange'; user: string; heardAgentPortion: string }
@@ -43,9 +51,7 @@ export function createDirector(cfg: DirectorConfig) {
 	}
 	// openai@5.23 types lack 'none'; the API accepts it (verified 2026-09-30).
 	if (cfg.reasoningEffort) completionParams.reasoning_effort = cfg.reasoningEffort as OpenAI.ReasoningEffort
-	if (supportsTemperature(model, cfg.reasoningEffort)) {
-		completionParams.temperature = 0.3
-	}
+	if (supportsTemperature(model, cfg.reasoningEffort)) completionParams.temperature = 0.3
 
 	let conversationSummary: string | null = null
 
@@ -54,7 +60,7 @@ export function createDirector(cfg: DirectorConfig) {
 		log.info({ turnsCovered, summaryLength: summary.length }, 'conversation summary applied')
 	}
 
-	function buildMessages(controlBlock: string, transcript: string) {
+	async function buildMessages(controlBlock: string, transcript: string) {
 		const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
 			{ role: 'system', content: cfg.systemPrompt },
 		]
@@ -85,11 +91,7 @@ export function createDirector(cfg: DirectorConfig) {
 		if (controlBlock) messages.push({ role: 'system', content: controlBlock })
 
 		if (isEmptyTranscript && toolHistory.length > 0) {
-			messages.push({
-				role: 'user',
-				content:
-					'[A tool result arrived. Review what you already said. If you already communicated the outcome, respond with just a brief natural closing or silence. Do not restate information.]',
-			})
+			messages.push({ role: 'user', content: await getToolResultNudge() })
 		} else {
 			messages.push({ role: 'user', content: transcript })
 		}
@@ -119,50 +121,24 @@ export function createDirector(cfg: DirectorConfig) {
 		}
 	}
 
+	/** Non-streaming convenience over `streamDraftTokenized`: resolves with the full response, or null when aborted/empty. */
 	async function generateDraft(userTranscript: string, controlBlock: string, signal?: AbortSignal) {
-		const messages = buildMessages(controlBlock, userTranscript)
-		log.info({ priorTurnCount: turns.length, controlBlock }, 'control block')
-
-		let stream: Awaited<ReturnType<typeof client.chat.completions.create>>
-		try {
-			stream = await client.chat.completions.create({ ...completionParams, messages }, signal ? { signal } : undefined)
-		} catch (err) {
-			if (signal?.aborted || isAbortLikeError(err)) return null
-			throw err
-		}
-
-		let fullResponse = ''
-		let lastUsage: unknown
-
-		try {
-			for await (const chunk of stream) {
-				if (signal?.aborted) break
-				const delta = chunk.choices[0]?.delta
-				if (delta?.content) fullResponse += delta.content
-				if (chunk.usage) lastUsage = chunk.usage
-			}
-		} catch (err) {
-			if (signal?.aborted || isAbortLikeError(err)) return null
-			throw err
-		}
-
-		logCacheUsage(lastUsage)
-
+		const { events } = streamDraftTokenized(userTranscript, controlBlock, signal)
+		let next = await events.next()
+		while (!next.done) next = await events.next()
 		if (signal?.aborted) return null
-		const trimmed = fullResponse.trim()
-		if (!trimmed) {
+		if (!next.value) {
 			log.warn({ userTranscript }, 'LLM returned empty response')
 			return null
 		}
-
-		return { userTranscript, agentResponse: trimmed }
+		return { userTranscript, agentResponse: next.value }
 	}
 
 	function streamDraftTokenized(userTranscript: string, controlBlock: string, signal?: AbortSignal) {
-		const messages = buildMessages(controlBlock, userTranscript)
 		log.info({ priorTurnCount: turns.length, controlBlock }, 'control block')
 
 		async function* events() {
+			const messages = await buildMessages(controlBlock, userTranscript)
 			let stream: Awaited<ReturnType<typeof client.chat.completions.create>>
 			try {
 				stream = await client.chat.completions.create(

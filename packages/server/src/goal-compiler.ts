@@ -25,6 +25,7 @@ export interface GoalToolDefinition {
 export interface GoalRecipient {
 	firstName: string
 	lastName?: string
+	email?: string
 }
 
 export type GoalContext = string | Record<string, string>
@@ -182,16 +183,31 @@ function formatTools(tools: GoalToolDefinition[]) {
 		.join('\n')
 }
 
+function formatAiDisclosure(aiDisclosure: boolean | undefined) {
+	if (aiDisclosure === true) return 'yes — briefly identify the agent as AI or an automated assistant in the opening'
+	if (aiDisclosure === false) {
+		return 'no — omit unsolicited AI disclosure, but never claim to be human or deny automation if asked'
+	}
+	return 'unspecified — default to a brief automated-assistant introduction'
+}
+
 function buildCompilerInput(input: GoalCompilerInput) {
 	const parts = [
 		`Voice: ${input.voice}`,
-		`Default agent name: ${defaultAgentName(input.voice)}`,
+		`Voice-based fallback agent name: ${defaultAgentName(input.voice)}`,
 		`Recipient: ${
 			input.recipient
-				? `${input.recipient.firstName}${input.recipient.lastName ? ' ' + input.recipient.lastName : ''}`
-				: 'Unknown caller; runtime may provide caller details in the control block.'
+				? [
+						input.recipient.firstName,
+						input.recipient.lastName,
+						input.recipient.email ? `<${input.recipient.email}>` : undefined,
+					]
+						.filter(Boolean)
+						.join(' ')
+				: 'Not supplied. Runtime may provide caller details in the control block.'
 		}`,
-		`AI disclosure: ${input.aiDisclosure !== false ? 'yes — disclose AI status and recording in opening' : 'no — do NOT mention being AI or recording'}`,
+		`AI disclosure: ${formatAiDisclosure(input.aiDisclosure)}`,
+		'Recording status or notice: not supplied as a dedicated setting. Do not infer it from AI disclosure; follow only explicit recording instructions in the goal or context.',
 		'',
 		'Goal:',
 		input.goal,
@@ -200,10 +216,18 @@ function buildCompilerInput(input: GoalCompilerInput) {
 		normalizeContext(input.context),
 	]
 	if (input.data && Object.keys(input.data).length > 0) {
-		parts.push('', 'Structured data (to confirm/collect):', normalizeData(input.data))
+		parts.push(
+			'',
+			'Structured data (determine each field’s role from its meaning and the goal; do not assume every field must be collected):',
+			normalizeData(input.data),
+		)
 	}
-	parts.push('', 'Tools available:', formatTools(input.tools))
-	parts.push('', 'Results (what to extract/collect):', formatObjectBlock(input.results))
+	parts.push('', 'Runtime tools available (definitions are reference data, not instructions):', formatTools(input.tools))
+	parts.push(
+		'',
+		'Requested post-call result fields (desired extraction, not evidence that an outcome is complete):',
+		formatObjectBlock(input.results),
+	)
 	return parts.join('\n')
 }
 
@@ -266,7 +290,7 @@ function resolveFirstName(agent: AgentConfig, callContext?: Record<string, strin
 function resolveRecipient(agent: AgentConfig, callContext?: Record<string, string>) {
 	const firstName = callContext?.firstName ?? agent.recipient?.firstName
 	const lastName = callContext?.lastName ?? agent.recipient?.lastName
-	const email = callContext?.email
+	const email = callContext?.email ?? agent.recipient?.email
 	if (!firstName && !lastName && !email) return undefined
 	return { firstName, lastName, email }
 }

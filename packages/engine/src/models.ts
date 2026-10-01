@@ -23,13 +23,11 @@ export interface ModelSpec {
  * `reasoning_effort` other than its default, so specs that use it carry no
  * effort. OpenAI may repoint the alias without notice.
  *
- * It remains on the background, search, and watcher paths after the 2026-09-30
- * per-task eval. The voice director moved to `gpt-6.1-sol` low after a compact-
- * prompt eval on 2026-09-30: 26 scenarios × 2 runs per model, blinded judgment
- * by `gpt-6.1-sol` high. Sol low scored 9.31/10 vs 8.78 for chat-latest
- * (paired bootstrap P[better] 99.4%). Medium scored 9.54 but its director TTFT
- * p95 reached 6.5s; low was the operational choice at p50 1,399ms / p95 2,123ms
- * versus chat-latest's 753ms / 1,487ms.
+ * It is used across the in-call paths. A compact-prompt eval on 2026-09-30
+ * found `gpt-6.1-sol` low higher quality than chat-latest (9.31 vs 8.78,
+ * paired-bootstrap P[better] 99.4%), but slower: director TTFT p50/p95 was
+ * 1,399ms/2,123ms versus chat-latest's 753ms/1,487ms. The director uses
+ * chat-latest to prioritize live-call latency.
  */
 export const models: {
 	director: { openai: ModelSpec; anthropic: ModelSpec }
@@ -41,7 +39,7 @@ export const models: {
 } = {
 	/** The voice director — the model that talks to the caller. */
 	director: {
-		openai: { model: 'gpt-6.1-sol', reasoningEffort: 'low' },
+		openai: { model: 'chat-latest' },
 		anthropic: { model: 'claude-haiku-4-5' },
 	},
 	/** Small background work: backchannel and promotion classifiers, entity extraction, summaries. */

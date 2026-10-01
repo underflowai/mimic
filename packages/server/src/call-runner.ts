@@ -18,7 +18,7 @@ import { createVoiceAgent } from '@mimic/transport-livekit'
 import { executeToolViaBus, publishCallEvent } from './call-bus.js'
 import { getDb } from './db/index.js'
 import { apiCalls, type ApiAgentRow, type ApiCallRow } from './db/schema.js'
-import { createEventLogStorage } from './event-log-storage.js'
+import { createEventLogStorage, recordingS3ForcePathStyle } from './event-log-storage.js'
 import { buildOrchestratorConfigFromAgent, type AgentConfig } from './goal-compiler.js'
 import { childLogger } from './logger.js'
 import { extractCallResult, type ToolCallRecord, type TranscriptEntry } from './result-extractor.js'
@@ -140,6 +140,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 										bucket: process.env.RECORDING_S3_BUCKET ?? '',
 										region: process.env.RECORDING_S3_REGION ?? 'us-east-1',
 										endpoint: process.env.RECORDING_S3_ENDPOINT ?? '',
+										forcePathStyle: recordingS3ForcePathStyle(),
 									}),
 								},
 							}),

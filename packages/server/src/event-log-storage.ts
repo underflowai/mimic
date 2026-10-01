@@ -35,6 +35,12 @@ export interface EventLogStorageEnv {
 	RECORDING_S3_SECRET?: string
 	RECORDING_S3_REGION?: string
 	RECORDING_S3_ENDPOINT?: string
+	/** `true` for stores that only accept path-style URLs (MinIO, older buckets). Railway Buckets and R2 are virtual-hosted. */
+	RECORDING_S3_FORCE_PATH_STYLE?: string
+}
+
+export function recordingS3ForcePathStyle(env: EventLogStorageEnv = process.env): boolean {
+	return env.RECORDING_S3_FORCE_PATH_STYLE === 'true' || env.RECORDING_S3_FORCE_PATH_STYLE === '1'
 }
 
 /** The subset of `S3Client` used here; injectable for tests. */
@@ -55,11 +61,8 @@ export function createEventLogStorage(
 				? { accessKeyId: env.RECORDING_S3_ACCESS_KEY, secretAccessKey: env.RECORDING_S3_SECRET }
 				: undefined,
 	}
-	if (env.RECORDING_S3_ENDPOINT) {
-		clientConfig.endpoint = env.RECORDING_S3_ENDPOINT
-		// Non-AWS endpoints (R2, MinIO, Tigris) generally want path-style addressing.
-		clientConfig.forcePathStyle = true
-	}
+	if (env.RECORDING_S3_ENDPOINT) clientConfig.endpoint = env.RECORDING_S3_ENDPOINT
+	if (recordingS3ForcePathStyle(env)) clientConfig.forcePathStyle = true
 	const client = createClient(clientConfig)
 
 	return {

@@ -76,13 +76,19 @@ describe('event log storage', () => {
 		assert.deepEqual(await storage.list(), [key])
 	})
 
-	it('uses path-style addressing for custom endpoints and the shared recording credentials', () => {
+	it('uses the shared recording credentials and virtual-hosted URLs by default', () => {
 		const s3 = fakeS3()
 		createEventLogStorage(env, s3.create)
 		const config = s3.configOf()!
 		assert.equal(config.endpoint, 'https://r2.example.com')
-		assert.equal(config.forcePathStyle, true)
+		assert.equal(config.forcePathStyle, undefined)
 		assert.deepEqual(config.credentials, { accessKeyId: 'key', secretAccessKey: 'secret' })
 		assert.equal(config.region, 'us-east-1')
+	})
+
+	it('switches to path-style URLs only when asked', () => {
+		const s3 = fakeS3()
+		createEventLogStorage({ ...env, RECORDING_S3_FORCE_PATH_STYLE: 'true' }, s3.create)
+		assert.equal(s3.configOf()!.forcePathStyle, true)
 	})
 })

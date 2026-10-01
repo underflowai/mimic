@@ -112,6 +112,7 @@ describe('turn control block builder appends shared signals', () => {
 		const block = builder.build('thanks', { interruptContext: null }, { executingTools: ['bookMeeting'] })
 
 		assert.match(block, /Executing tool context \(JSON string\): "bookMeeting"/)
+		assert.match(block, /Do not repeat request details they just supplied or already confirmed/)
 		assert.match(block, /Do not announce the outcome/)
 	})
 

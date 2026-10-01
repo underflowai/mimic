@@ -278,7 +278,7 @@ flowchart TD
 
 The control block is a per-turn `<context>` injection that gives the LLM situational awareness. Strategies (API, intake, forms) build the data-only `<context>` block via `buildTurnControlBlock(ctx)`, then the shared signal layer (`turn-control-block-builder.ts`) appends:
 
-- **Text quality** — the compiled `textQualityBlock` when the agent has one, otherwise the default spoken-cadence steer plus transcript-quality guidance
+- **Text quality** — the compiled `textQualityBlock` when present, otherwise transcript-quality guidance; every agent also receives the shared spoken-cadence steer
 - **Active tool stall guidance** — when tools are executing, tells the model to buy time without confirming
 - **End-call tag** — when `endCallEnabled`, how to hang up with `[end-call]`
 - **Interrupt context** — what the caller heard before interrupting, what was left unsaid

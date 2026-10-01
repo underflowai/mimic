@@ -71,6 +71,12 @@ export interface CallerCompleteInput {
 	transcript: string
 	confidence: number
 	controlBlock: string
+	/**
+	 * The end-of-turn was forced by the silence timeout at low confidence.
+	 * The control block carries a "caller may not be done" hint that the
+	 * eager draft never saw, so the draft must not be reused.
+	 */
+	trailingOff?: boolean
 }
 
 export function selectStrategy(input: CallerCompleteInput, world: WorldSnapshot) {
@@ -86,7 +92,7 @@ export function selectStrategy(input: CallerCompleteInput, world: WorldSnapshot)
 		return { kind: 'discard', reason: 'backchannel_handled' } as const
 	}
 
-	if (world.lastTurnWasInterrupted) {
+	if (world.lastTurnWasInterrupted || input.trailingOff) {
 		return { kind: 'fresh', transcript: input.transcript, controlBlock: input.controlBlock } as const
 	}
 

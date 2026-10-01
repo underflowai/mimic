@@ -342,6 +342,81 @@ describe('silence watchdog', () => {
 		engine.stop()
 	})
 
+	it('a caller hold request stretches the silence window to holdIdleMs', async () => {
+		const holder: { current?: ReturnType<typeof createCallMachineRuntime> } = {}
+		const buildControlBlock = buildControlBlockMock()
+		const engine = createCallMachineRuntime(createDeps({ buildControlBlock, onPlaybackComplete: autoPlayback(holder) }))
+		holder.current = engine
+
+		const openingId = engine.actor.getSnapshot().context.nextTurnId
+		const opening = waitForOutcome(engine, openingId)
+		engine.sendToCallMachine({ type: 'start_first_turn', openingBlock: 'Hi!' })
+		await opening
+
+		const holdTurnId = engine.actor.getSnapshot().context.nextTurnId
+		const holdTurn = waitForOutcome(engine, holdTurnId)
+		engine.sendToCallMachine({
+			type: 'caller_turn_complete',
+			transcript: 'hang on, let me grab my calendar',
+			confidence: 0.95,
+		})
+		await holdTurn
+		assert.equal(engine.actor.getSnapshot().context.holdRequested, true)
+
+		await advanceAndFlush(30_000)
+		assert.equal(silenceCalls(buildControlBlock).length, 0, 'no check-in during the hold budget')
+		await advanceAndFlush(15_000)
+		for (let i = 0; i < 20; i++) await Promise.resolve()
+		assert.equal(silenceCalls(buildControlBlock).length, 1, 'check-in once the hold budget is spent')
+
+		// The caller comes back with an ordinary turn: hold is lifted.
+		const backTurnId = engine.actor.getSnapshot().context.nextTurnId
+		const backTurn = waitForOutcome(engine, backTurnId)
+		engine.sendToCallMachine({ type: 'caller_turn_complete', transcript: 'okay Tuesday works', confidence: 0.95 })
+		await backTurn
+		assert.equal(engine.actor.getSnapshot().context.holdRequested, false)
+		await advanceAndFlush(6_000)
+		assert.equal(silenceCalls(buildControlBlock).length, 2, 'normal 6s window after the hold ends')
+		engine.stop()
+	})
+
+	it('a silence follow-up the director answers with nothing switches to the hold budget', async () => {
+		const holder: { current?: ReturnType<typeof createCallMachineRuntime> } = {}
+		const buildControlBlock = buildControlBlockMock()
+		const streamDraftTokenized = mock.fn((t: string) => ({
+			userTranscript: t,
+			events: (async function* () {
+				// Silence follow-ups (empty transcript) get no spoken text.
+				if (!t) return ''
+				yield { type: 'token' as const, value: 'Hello there.' }
+				return 'Hello there.'
+			})(),
+		}))
+		const deps = createDeps({ buildControlBlock, onPlaybackComplete: autoPlayback(holder) })
+		;(deps.director as unknown as { streamDraftTokenized: unknown }).streamDraftTokenized = streamDraftTokenized
+		const engine = createCallMachineRuntime(deps)
+		holder.current = engine
+
+		const openingId = engine.actor.getSnapshot().context.nextTurnId
+		const opening = waitForOutcome(engine, openingId)
+		engine.sendToCallMachine({ type: 'start_first_turn', openingBlock: 'Hi!' })
+		await opening
+
+		const followUpId = engine.actor.getSnapshot().context.nextTurnId
+		const followUp = waitForOutcome(engine, followUpId)
+		await advanceAndFlush(6_000)
+		const outcome = await followUp
+		assert.equal(outcome.kind, 'discarded')
+		assert.equal(engine.actor.getSnapshot().context.holdRequested, true)
+
+		await advanceAndFlush(6_000)
+		assert.equal(silenceCalls(buildControlBlock).length, 1, 'quiet follow-up buys the hold budget')
+		await advanceAndFlush(39_000)
+		for (let i = 0; i < 20; i++) await Promise.resolve()
+		assert.equal(silenceCalls(buildControlBlock).length, 2)
+		engine.stop()
+	})
+
 	it('does not run silence timer while inTurn is active', async () => {
 		const buildControlBlock = buildControlBlockMock()
 		const engine = createCallMachineRuntime(

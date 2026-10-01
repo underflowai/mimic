@@ -58,4 +58,40 @@ describe('createPipeline', () => {
 			'word timings from the speaker are exposed on the pipeline handle',
 		)
 	})
+
+	it('speaks a latency filler first but reports TTFT from the model token', async () => {
+		const sentTexts: string[] = []
+		const tts = {
+			preSendTextForSynthesis: mock.fn(async (text: string, listener: TtsSynthesisListener) => {
+				sentTexts.push(text)
+				return {
+					pushTextDelta: (delta: string) => sentTexts.push(delta),
+					triggerSynthesisStart: () => listener.onAudioChunk(Buffer.alloc(640)),
+					audioComplete: Promise.resolve(),
+				}
+			}),
+		}
+		let now = 0
+		const clock = { now: () => now }
+		const events = (async function* () {
+			await new Promise((r) => setTimeout(r, 60))
+			now = 500
+			yield { type: 'token' as const, value: 'Three works.' }
+			return 'Three works.'
+		})()
+
+		const pipeline = createPipeline({
+			tts: tts as never,
+			sanitize: (text) => text,
+			sink: createSink(),
+			signal: new AbortController().signal,
+			clock,
+			source: { kind: 'tokens', events, latencyFiller: { delayMs: 10, filler: () => 'Hmm.' } },
+		})
+		const result = await pipeline.completion
+
+		assert.equal(result.agentResponse, 'Hmm. Three works.')
+		assert.equal(result.ttftMs, 500, 'TTFT measures the model, not the filler')
+		assert.ok(sentTexts.join('').startsWith('Hmm.'))
+	})
 })

@@ -33,6 +33,8 @@ export interface ControlBlockPrompts {
 	toolClassificationFailed: string
 	/** Appended while the caller's timezone is an area-code guess the caller hasn't confirmed. */
 	timezoneGuess: string
+	/** Appended when the caller's turn was committed by the silence timeout at low end-of-turn confidence. */
+	trailingOff: string
 }
 
 function text(name: string) {
@@ -59,6 +61,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 		template('interrupt'),
 		text('tool-classification-failed'),
 		text('timezone-guess'),
+		text('trailing-off'),
 	]).then(
 		([
 			turnPriorities,
@@ -72,6 +75,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			interrupt,
 			toolClassificationFailed,
 			timezoneGuess,
+			trailingOff,
 		]) => ({
 			turnPriorities,
 			spokenCadence,
@@ -84,6 +88,7 @@ export function loadControlBlockPrompts(): Promise<ControlBlockPrompts> {
 			interrupt,
 			toolClassificationFailed,
 			timezoneGuess,
+			trailingOff,
 		}),
 	)
 	return cachedPrompts

@@ -13,6 +13,7 @@ import type { Clock } from '../shared/clock.js'
 import type { SoftPauseOutcome, SoftPauseSource, TurnTiming } from '../shared/metrics.js'
 import { commitActorLogic, type CommitActorDeps, type CommitActorOutput } from './actors/commit-actor.js'
 import { playbackWaitActor } from './actors/playback-wait-actor.js'
+import { classifyCallerSpeech } from './caller-speech.js'
 import {
 	runTurnActorLogic,
 	type RunTurnActorDeps,
@@ -70,6 +71,10 @@ export interface TurnActorContext {
 	abort: AbortController | null
 	pausedAt: number
 	softPauseSource: SoftPauseSource
+	/** Latest transcriber text heard during the current soft pause. */
+	pauseTranscript: string
+	/** The transcriber reported a turn start/resume during the current soft pause. */
+	pauseFluxEvidence: boolean
 	vadSpeechStartAt: number
 	firstAudioAt: number | null
 	draftMs: number
@@ -86,8 +91,9 @@ export interface TurnActorContext {
 type TurnActorEvent =
 	| RunTurnActorEvent
 	| { type: 'interrupt'; reason: InterruptReason }
-	| { type: 'caller_turn_start' }
-	| { type: 'caller_turn_resumed' }
+	| { type: 'caller_turn_start'; transcript?: string }
+	| { type: 'caller_turn_resumed'; transcript?: string }
+	| { type: 'caller_update'; transcript: string }
 	| { type: 'playback_confirmed' }
 	| { type: 'vad_speech_start' }
 	| { type: 'vad_speech_end' }
@@ -152,20 +158,40 @@ const turnActorSetup = setup({
 			_,
 			_params: { source: SoftPauseSource; outcome: SoftPauseOutcome; durationMs: number },
 		) => {},
-		onSubstantiveSpeechTimeout: (_, _params: { vadSpeechStartAt: number }) => {},
+		onSubstantiveSpeechTimeout: (_, _params: { vadSpeechStartAt: number; transcript: string }) => {},
 		recordShortResumedBarge: () => {},
+		/** The pause resolved as a backchannel: audio resumes and the caller's words are not a turn. */
+		recordBackchannelResume: (_, _params: { transcript: string; kind: 'backchannel' | 'answer' }) => {},
+		/** VAD stayed active but the transcriber never heard words: resume and treat it as noise. */
+		recordVadOnlyResume: () => {},
+		/** Tell the call machine to drop the eventual end-of-turn for a backchannel. */
+		markBackchannelResumed: () => {},
 		resetPauseState: () => {},
 		flushPausedBuffer: () => {},
 	},
 	delays: {
 		substantiveSpeechMs: () => config.mimic.turnTaking.substantiveSpeechMs,
+		vadOnlyGraceMs: () => config.mimic.turnTaking.vadOnlyGraceMs,
 		yieldWindowMs: () => config.mimic.turnTaking.yieldWindowMs,
 		playbackTimeoutMs: () => config.mimic.timeouts.playbackConfirmMs,
 	},
 	guards: {
 		isCallEnded: ({ event }) => isCallEndedInterrupt(event as TurnActorEvent),
+		hasDraftFinished: ({ context }) => context.draftMs > 0,
+		pauseIsBackchannel: ({ context }) => classifyPause(context) === 'backchannel',
+		pauseIsAnswer: ({ context }) => classifyPause(context) === 'answer',
+		// Words from the transcriber, or a turn start we never got words for
+		// (hosts that don't forward transcripts): the caller wants the floor.
+		pauseIsSpeech: ({ context }) => {
+			const kind = classifyPause(context)
+			return kind === 'speech' || (kind === 'none' && context.pauseFluxEvidence)
+		},
 	},
 })
+
+function classifyPause(context: TurnActorContext) {
+	return classifyCallerSpeech(context.pauseTranscript, { agentDraft: context.draftResponse })
+}
 
 const assignOnAudioStarted = turnActorSetup.assign({
 	agentResponse: ({ event }) => (event.type === 'audio_started' ? event.agentResponse : ''),
@@ -208,19 +234,60 @@ function recordSoftPauseMetrics(outcome: SoftPauseOutcome) {
 function enterSoftPause(source: SoftPauseSource) {
 	return turnActorSetup.enqueueActions(({ enqueue }) => {
 		enqueue('onSuspendAudio')
-		enqueue.assign({ pausedAt: now, softPauseSource: source })
+		enqueue.assign({ pausedAt: now, softPauseSource: source, pauseTranscript: '', pauseFluxEvidence: false })
 	})
 }
 
+function eventTranscript(event: TurnActorEvent) {
+	return 'transcript' in event && typeof event.transcript === 'string' ? event.transcript.trim() : ''
+}
+
+/** Remember what the transcriber heard during this pause; longer text wins over a stale fragment. */
+const notePauseEvidence = turnActorSetup.assign({
+	pauseTranscript: ({ context, event }) => eventTranscript(event as TurnActorEvent) || context.pauseTranscript,
+	pauseFluxEvidence: ({ context, event }) =>
+		context.pauseFluxEvidence || event.type === 'caller_turn_start' || event.type === 'caller_turn_resumed',
+})
+
+const clearPauseState = turnActorSetup.assign({
+	pausedAt: 0,
+	softPauseSource: 'unknown',
+	pauseTranscript: '',
+	pauseFluxEvidence: false,
+	lastVadSpeechEndAt: now,
+})
+
+/** Caller stopped (VAD end) before we had to decide: a short noise or a one-word backchannel. */
 const resumeFromSoftPause = turnActorSetup.enqueueActions(({ enqueue }) => {
 	enqueue('flushPausedBuffer')
 	enqueue(recordSoftPauseMetrics('resumed'))
 	enqueue('recordShortResumedBarge')
-	enqueue.assign({
-		pausedAt: 0,
-		softPauseSource: 'unknown',
-		lastVadSpeechEndAt: now,
-	})
+	enqueue(clearPauseState)
+})
+
+/** The transcriber heard only listening noises: keep talking and drop their eventual end-of-turn. */
+const resumeFromBackchannel = turnActorSetup.enqueueActions(({ context, enqueue }) => {
+	enqueue('flushPausedBuffer')
+	enqueue(recordSoftPauseMetrics('resumed'))
+	enqueue({ type: 'recordBackchannelResume', params: { transcript: context.pauseTranscript, kind: 'backchannel' } })
+	enqueue('markBackchannelResumed')
+	enqueue(clearPauseState)
+})
+
+/** Same words, but the agent had asked a question: keep talking and let the end-of-turn be a real turn. */
+const resumeFromAnswer = turnActorSetup.enqueueActions(({ context, enqueue }) => {
+	enqueue('flushPausedBuffer')
+	enqueue(recordSoftPauseMetrics('resumed'))
+	enqueue({ type: 'recordBackchannelResume', params: { transcript: context.pauseTranscript, kind: 'answer' } })
+	enqueue(clearPauseState)
+})
+
+/** VAD alone, no words after the grace window: treat as noise. */
+const resumeFromVadOnly = turnActorSetup.enqueueActions(({ enqueue }) => {
+	enqueue('flushPausedBuffer')
+	enqueue(recordSoftPauseMetrics('resumed'))
+	enqueue('recordVadOnlyResume')
+	enqueue(clearPauseState)
 })
 
 const assignStreamDoneWhilePaused = turnActorSetup.enqueueActions(({ event, enqueue }) => {
@@ -231,7 +298,10 @@ type TurnEnqueue = Parameters<Parameters<(typeof turnActorSetup)['enqueueActions
 
 function maybeRecordTimeout(enqueue: TurnEnqueue, context: TurnActorContext, config: InterruptConfig) {
 	if (!config.recordSubstantiveTimeout) return
-	enqueue({ type: 'onSubstantiveSpeechTimeout', params: { vadSpeechStartAt: context.vadSpeechStartAt } })
+	enqueue({
+		type: 'onSubstantiveSpeechTimeout',
+		params: { vadSpeechStartAt: context.vadSpeechStartAt, transcript: context.pauseTranscript },
+	})
 }
 
 function maybeRecordSoftPauseExit(enqueue: TurnEnqueue, config: InterruptConfig) {
@@ -306,7 +376,8 @@ function applyInterruptAssign(enqueue: TurnEnqueue, event: TurnActorEvent, confi
 	enqueue.assign({ interruptReason: config.reason ?? interruptReasonFrom(event, 'caller_started_speaking') })
 	if (hasResource(config, 'abort')) enqueue.assign({ abort: null })
 	if (config.clearVad !== false) enqueue.assign({ vadSpeechStartAt: 0 })
-	if (hasResource(config, 'softPause')) enqueue.assign({ pausedAt: 0, softPauseSource: 'unknown' })
+	if (hasResource(config, 'softPause'))
+		enqueue.assign({ pausedAt: 0, softPauseSource: 'unknown', pauseTranscript: '', pauseFluxEvidence: false })
 	if (config.clearDraft) enqueue.assign({ draftResponse: '' })
 }
 
@@ -410,6 +481,8 @@ function buildTurnRuntimeCore() {
 		abort: null,
 		pausedAt: 0,
 		softPauseSource: 'unknown' as SoftPauseSource,
+		pauseTranscript: '',
+		pauseFluxEvidence: false,
 		vadSpeechStartAt: 0,
 	}
 }
@@ -567,26 +640,60 @@ export const turnActorMachine = turnActorSetup.createMachine({
 					on: {
 						first_audio_sent: { actions: assignOnFirstAudioSent },
 						stream_done: { target: '#turnActor.awaitingPlayback', actions: assignOnStreamDone },
-						caller_turn_start: { target: 'softPaused', actions: enterSoftPause('deepgram_turn_start') },
+						caller_turn_start: {
+							target: 'softPaused',
+							actions: [enterSoftPause('deepgram_turn_start'), notePauseEvidence],
+						},
 						interrupt: { target: '#turnActor.done', actions: interruptFromStreaming },
 					},
 				},
+				// Soft pause: audio is held while we work out whether the caller
+				// wants the floor. VAD opened the pause; the transcriber decides
+				// how it ends.
+				//
+				//   probing   wait `substantiveSpeechMs`, collecting transcriber text
+				//   deciding  transient: backchannel → resume (and drop its EOT),
+				//             answer → resume, words → interrupt, no words yet → vadOnly
+				//   vadOnly   VAD still active but no words: give the transcriber
+				//             `vadOnlyGraceMs` more; still nothing → noise, resume
 				softPaused: {
-					after: { substantiveSpeechMs: { target: '#turnActor.done', actions: interruptFromSubstantiveTimeout } },
-					on: {
-						// Flux TurnResumed confirms the caller is still mid-utterance.
-						// Reenter to rearm the substantiveSpeechMs timer — without this
-						// the timer could fire even though Flux just told us the caller
-						// is actively speaking.
-						caller_turn_resumed: { target: 'softPaused', reenter: true },
-						vad_speech_end: [
-							{
-								guard: ({ context }) => context.draftMs > 0,
-								target: '#turnActor.awaitingPlayback',
-								actions: [resumeFromSoftPause],
+					initial: 'probing',
+					states: {
+						probing: {
+							after: { substantiveSpeechMs: { target: 'deciding' } },
+							on: {
+								caller_update: { actions: notePauseEvidence },
+								caller_turn_start: { actions: notePauseEvidence },
+								// Flux TurnResumed confirms the caller is still mid-utterance.
+								// Reenter to rearm the substantiveSpeechMs timer — without this
+								// the timer could fire even though Flux just told us the caller
+								// is actively speaking.
+								caller_turn_resumed: { target: 'probing', reenter: true, actions: notePauseEvidence },
 							},
-							{ target: 'streaming.flowing', actions: resumeFromSoftPause },
-						],
+						},
+						deciding: {
+							always: [
+								{
+									guard: 'pauseIsBackchannel',
+									target: '#turnActor.executing.resuming',
+									actions: resumeFromBackchannel,
+								},
+								{ guard: 'pauseIsAnswer', target: '#turnActor.executing.resuming', actions: resumeFromAnswer },
+								{ guard: 'pauseIsSpeech', target: '#turnActor.done', actions: interruptFromSubstantiveTimeout },
+								{ target: 'vadOnly' },
+							],
+						},
+						vadOnly: {
+							after: { vadOnlyGraceMs: { target: '#turnActor.executing.resuming', actions: resumeFromVadOnly } },
+							on: {
+								caller_update: { target: 'deciding', actions: notePauseEvidence },
+								caller_turn_start: { target: 'deciding', actions: notePauseEvidence },
+								caller_turn_resumed: { target: 'deciding', actions: notePauseEvidence },
+							},
+						},
+					},
+					on: {
+						vad_speech_end: { target: 'resuming', actions: resumeFromSoftPause },
 						stream_done: { actions: assignStreamDoneWhilePaused },
 						stream_empty: {
 							target: '#turnActor.done',
@@ -601,6 +708,14 @@ export const turnActorMachine = turnActorSetup.createMachine({
 						},
 						interrupt: { target: '#turnActor.done', actions: interruptFromSoftPaused },
 					},
+				},
+				// Transient: where a resumed pause lands depends on whether the
+				// pipeline finished while we were paused.
+				resuming: {
+					always: [
+						{ guard: 'hasDraftFinished', target: '#turnActor.awaitingPlayback' },
+						{ target: 'streaming.flowing' },
+					],
 				},
 			},
 			on: {

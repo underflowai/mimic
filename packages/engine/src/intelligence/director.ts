@@ -165,6 +165,9 @@ export function createDirector(cfg: DirectorConfig) {
 			try {
 				for await (const chunk of stream) {
 					if (signal?.aborted) break
+					// The usage chunk arrives last with an empty `choices` array, so
+					// read it before skipping chunks without a choice.
+					if (chunk.usage) lastUsage = chunk.usage
 					const choice = chunk.choices[0]
 					if (!choice) continue
 
@@ -173,8 +176,6 @@ export function createDirector(cfg: DirectorConfig) {
 						fullResponse += token
 						yield { type: 'token' as const, value: token }
 					}
-
-					if (chunk.usage) lastUsage = chunk.usage
 				}
 			} catch (err) {
 				if (signal?.aborted || isAbortLikeError(err)) return ''

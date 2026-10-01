@@ -198,6 +198,158 @@ describe('call-machine runtime: [end-call] tag', () => {
 	})
 })
 
+describe('call-machine runtime: end-of-turn confidence', () => {
+	it('skips eager speculation below the low-confidence floor', async () => {
+		const { deps } = createMockRuntimeDeps()
+		const engine = createCallMachineRuntime(deps)
+		const stream = deps.director.streamDraftTokenized as unknown as ReturnType<typeof mock.fn>
+
+		engine.sendToCallMachine({ type: 'caller_eager_turn', transcript: 'so I was', confidence: 0.31 })
+		await new Promise((r) => setTimeout(r, 10))
+		assert.equal(stream.mock.callCount(), 0, 'no draft for a barely-there eager boundary')
+
+		engine.sendToCallMachine({ type: 'caller_eager_turn', transcript: 'so I was thinking Tuesday', confidence: 0.6 })
+		await new Promise((r) => setTimeout(r, 10))
+		assert.equal(stream.mock.callCount(), 1)
+
+		engine.stop()
+	})
+
+	it('marks a timeout-forced low-confidence final as trailing off in the control block', async () => {
+		const { deps } = createMockRuntimeDeps()
+		const engine = createCallMachineRuntime(deps)
+		const buildControlBlock = deps.buildControlBlock as unknown as ReturnType<typeof mock.fn>
+
+		const { outcomePromise } = startCallerTurnComplete(engine, 'my email is john dot', 0.21)
+		await outcomePromise
+
+		const call = buildControlBlock.mock.calls.find((c) => c.arguments[0] === 'my email is john dot')
+		assert.ok(call)
+		assert.equal((call.arguments[1] as { trailingOff?: boolean }).trailingOff, true)
+
+		const { outcomePromise: confident } = startCallerTurnComplete(engine, 'john dot smith at gmail dot com', 0.9)
+		await confident
+		const confidentCall = buildControlBlock.mock.calls.find((c) => c.arguments[0] === 'john dot smith at gmail dot com')
+		assert.equal((confidentCall!.arguments[1] as { trailingOff?: boolean }).trailingOff, false)
+
+		engine.stop()
+	})
+})
+
+describe('call-machine runtime: careful endpointing', () => {
+	it('raises the EOT bar after the agent asks for an email and restores it after the reply', async () => {
+		const base = createMockRuntimeDeps()
+		const deps: CallMachineRuntimeDeps = {
+			...base.deps,
+			director: {
+				...base.deps.director,
+				streamDraftTokenized: mock.fn((transcript: string) => ({
+					userTranscript: transcript,
+					events: (async function* () {
+						const text = transcript.startsWith('book')
+							? "Sure. What's the best email address for the confirmation?"
+							: 'Got it, thanks.'
+						yield { type: 'token' as const, value: text }
+						return text
+					})(),
+				})),
+			} as CallMachineRuntimeDeps['director'],
+		}
+		const configure = deps.configureTranscriber as unknown as ReturnType<typeof mock.fn>
+		const engine = createCallMachineRuntime(deps)
+
+		const first = startCallerTurnComplete(engine, 'book me in for tuesday', 0.9)
+		await first.outcomePromise
+		assert.equal(configure.mock.callCount(), 1)
+		const careful = configure.mock.calls[0]!.arguments[0] as { eotThreshold: number; eotTimeoutMs: number }
+		assert.ok(careful.eotThreshold > 0.7)
+		assert.ok(careful.eotTimeoutMs > 3000)
+
+		const second = startCallerTurnComplete(engine, 'john dot smith at gmail dot com', 0.9)
+		await second.outcomePromise
+		assert.equal(configure.mock.callCount(), 2, 'defaults restored once the caller turn arrives')
+		const restored = configure.mock.calls[1]!.arguments[0] as { eotThreshold: number; eotTimeoutMs: number }
+		assert.ok(restored.eotThreshold < careful.eotThreshold)
+
+		const third = startCallerTurnComplete(engine, 'thanks', 0.9)
+		await third.outcomePromise
+		assert.equal(configure.mock.callCount(), 2, 'ordinary agent lines leave endpointing alone')
+
+		engine.stop()
+	})
+})
+
+describe('call-machine runtime: latency filler', () => {
+	it('speaks a filler when the first token is late and keeps the model text', async () => {
+		const base = createMockRuntimeDeps()
+		const recordLatencyFiller = mock.fn()
+		const deps: CallMachineRuntimeDeps = {
+			...base.deps,
+			metrics: { ...base.deps.metrics, recordLatencyFiller } as unknown as CallMachineRuntimeDeps['metrics'],
+			director: {
+				...base.deps.director,
+				streamDraftTokenized: mock.fn((transcript: string) => ({
+					userTranscript: transcript,
+					events: (async function* () {
+						await new Promise((r) => setTimeout(r, 80))
+						yield { type: 'token' as const, value: 'Three works.' }
+						return 'Three works.'
+					})(),
+				})),
+			} as CallMachineRuntimeDeps['director'],
+			latencyFillerMs: 20,
+		}
+		const engine = createCallMachineRuntime(deps)
+
+		const { outcomePromise } = startCallerTurnComplete(engine, 'what about three', 0.9)
+		const outcome = await outcomePromise
+
+		assert.equal(outcome.kind, 'committed')
+		if (outcome.kind === 'committed') {
+			assert.ok(
+				/^(Hmm\.|Let me see\.|One sec\.) Three works\.$/.test(outcome.turn.agentResponse),
+				outcome.turn.agentResponse,
+			)
+		}
+		assert.equal(recordLatencyFiller.mock.callCount(), 1)
+
+		engine.stop()
+	})
+
+	it('never fills agent-initiated turns', async () => {
+		const base = createMockRuntimeDeps()
+		const recordLatencyFiller = mock.fn()
+		const deps: CallMachineRuntimeDeps = {
+			...base.deps,
+			metrics: { ...base.deps.metrics, recordLatencyFiller } as unknown as CallMachineRuntimeDeps['metrics'],
+			director: {
+				...base.deps.director,
+				streamDraftTokenized: mock.fn((transcript: string) => ({
+					userTranscript: transcript,
+					events: (async function* () {
+						await new Promise((r) => setTimeout(r, 80))
+						yield { type: 'token' as const, value: 'Hi, this is Mimic.' }
+						return 'Hi, this is Mimic.'
+					})(),
+				})),
+			} as CallMachineRuntimeDeps['director'],
+			latencyFillerMs: 20,
+		}
+		const engine = createCallMachineRuntime(deps)
+
+		const turnId = engine.actor.getSnapshot().context.nextTurnId
+		const outcomePromise = waitForTurnOutcome(engine, turnId)
+		engine.sendToCallMachine({ type: 'start_first_turn', openingBlock: 'opening' })
+		const outcome = await outcomePromise
+
+		assert.equal(outcome.kind, 'committed')
+		if (outcome.kind === 'committed') assert.equal(outcome.turn.agentResponse, 'Hi, this is Mimic.')
+		assert.equal(recordLatencyFiller.mock.callCount(), 0)
+
+		engine.stop()
+	})
+})
+
 describe('call-machine runtime: empty response safety net', () => {
 	it('emits a non-committed outcome when the pipeline sends no audio', async () => {
 		// `emitAudio: false` makes the fake TTS speaker push zero PCM

@@ -26,10 +26,13 @@ import { Writable } from 'node:stream'
 import type OpenAI from 'openai'
 import { createActor, enqueueActions, fromCallback, fromPromise } from 'xstate'
 
+import { config } from '#engine/config.js'
 import { createLogger } from '#engine/logger.js'
 import * as telemetry from '#engine/telemetry.js'
 
 import type { FluxConfigureOptions } from '../audio/deepgram-transcriber.js'
+import { shouldUseCarefulEndpointing } from '../audio/endpointing-policy.js'
+import { createLatencyFillerPicker } from '../audio/streams/latency-filler.js'
 import { createPipeline } from '../audio/streams/pipeline.js'
 import type { AudioSink, AudioTransport } from '../audio/streams/types.js'
 import type { TtsSpeaker } from '../audio/tts-speaker.js'
@@ -96,6 +99,7 @@ export interface CallMachineRuntimeDeps {
 			silenceFollowUp?: boolean
 			silenceClosing?: boolean
 			silenceFollowUpCount?: number
+			trailingOff?: boolean
 			toolResult?: { topic: string; result: string } | null
 			toolResults?: Array<{ topic: string; result: string }>
 			hasActiveTools?: boolean
@@ -115,6 +119,8 @@ export interface CallMachineRuntimeDeps {
 	endCallEnabled: boolean
 	/** The engine wants the host to hang up (silence watchdog exhausted, or the director asked). */
 	onHangupRequested: (source: HangupSource) => void
+	/** Override for `config.mimic.turnTaking.latencyFillerMs` (0 disables). Mostly for tests. */
+	latencyFillerMs?: number
 }
 
 export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
@@ -143,11 +149,22 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 			.catch(() => {})
 	}
 
-	function clearActiveTurn(turnId: number, options: { destroySink?: boolean } = {}) {
+	/**
+	 * Clear by identity: a turn restarted under the same turnId (racing
+	 * promotion) registers a new handle, and the superseded pipeline's
+	 * async teardown must not wipe it.
+	 */
+	function clearActiveTurn(handle: ActiveTurnHandle) {
+		if (activeTurn !== handle) return
+		activeTurn = null
+	}
+
+	/** Clear whichever handle belongs to `turnId` once its outcome is final. */
+	function releaseActiveTurn(turnId: number) {
 		const handle = activeTurn
 		if (handle?.turnId !== turnId) return
 		activeTurn = null
-		if (options.destroySink && !handle.sink.destroyed) handle.sink.destroy()
+		if (!handle.sink.destroyed) handle.sink.destroy()
 	}
 
 	function getPlaybackSnapshot(): PlaybackSnapshot {
@@ -323,6 +340,9 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	// Deps bundles passed to TurnActor via CallMachine input
 	// ------------------------------------------------------------------
 
+	const latencyFillerMs = deps.latencyFillerMs ?? config.mimic.turnTaking.latencyFillerMs
+	const pickLatencyFiller = createLatencyFillerPicker()
+
 	const runTurnDeps: RunTurnActorDeps = {
 		director: {
 			streamDraftTokenized: (transcript: string, controlBlock: string, signal?: AbortSignal) =>
@@ -333,6 +353,17 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 		sanitize: deps.sanitize,
 		registerActiveTurn,
 		clearActiveTurn,
+		latencyFiller:
+			latencyFillerMs > 0
+				? {
+						delayMs: latencyFillerMs,
+						pick: pickLatencyFiller,
+						onInjected: (filler) => {
+							log.info({ filler, delayMs: latencyFillerMs }, 'first token late, speaking filler')
+							deps.metrics.recordLatencyFiller()
+						},
+					}
+				: undefined,
 	}
 
 	const commitDeps: CommitActorDeps = {
@@ -349,6 +380,35 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	// generation unnecessarily.
 	let lastEagerNormalized: string | null = null
 	let lastFinalNormalized: string | null = null
+
+	/** What the agent last said, for judging whether a short caller reply answers a question. */
+	let lastAgentResponse = ''
+
+	// ------------------------------------------------------------------
+	// Careful endpointing: after the agent asks for a value the caller reads
+	// out in pieces (email, phone, spelling), raise the end-of-turn bar for
+	// exactly one caller turn so "john dot" is not committed as complete.
+	// ------------------------------------------------------------------
+
+	let carefulEndpointing = false
+
+	function useCarefulEndpointing() {
+		if (carefulEndpointing) return
+		carefulEndpointing = true
+		const eotThreshold = config.mimic.flux.carefulEotThreshold
+		const eotTimeoutMs = config.mimic.flux.carefulEotTimeoutMs
+		log.info({ eotThreshold, eotTimeoutMs }, 'agent asked for a spelled-out value, using careful endpointing')
+		deps.configureTranscriber({ eotThreshold, eotTimeoutMs })
+	}
+
+	function restoreDefaultEndpointing() {
+		if (!carefulEndpointing) return
+		carefulEndpointing = false
+		deps.configureTranscriber({
+			eotThreshold: config.mimic.flux.eotThreshold,
+			eotTimeoutMs: config.mimic.flux.eotTimeoutMs,
+		})
+	}
 
 	function normalizeEagerTranscript(transcript: string) {
 		return transcript
@@ -535,7 +595,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 				deps.metrics.recordSoftPause(event)
 			},
 			onSubstantiveSpeechTimeout: (_, params) => {
-				log.info('substantive speech timer fired, interrupting')
+				log.info({ callerTranscript: params.transcript }, 'caller kept talking through soft pause, interrupting')
 				if (params.vadSpeechStartAt > 0) {
 					telemetry.metrics.distribution('mimic.interrupt.classification_ms', clock.now() - params.vadSpeechStartAt, {
 						unit: 'millisecond',
@@ -546,6 +606,24 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 				log.info('VAD speech ended during soft-pause, resuming (caller stopped)')
 				deps.metrics.recordBarge({ outcome: 'short_resumed', wordCount: 0, elapsedMs: 0 })
 			},
+			recordBackchannelResume: (_, params) => {
+				log.info(
+					{ ...activeTurnLogFields(), callerTranscript: params.transcript, kind: params.kind },
+					params.kind === 'answer'
+						? 'caller answered mid-sentence, resuming (turn will be handled at end-of-turn)'
+						: 'caller backchanneled, resuming',
+				)
+				deps.metrics.recordBarge({
+					outcome: 'backchannel_resumed',
+					wordCount: params.transcript.split(/\s+/).filter(Boolean).length,
+					elapsedMs: activeTurn?.tracker.snapshot().sentMs ?? 0,
+				})
+			},
+			recordVadOnlyResume: () => {
+				log.info(activeTurnLogFields(), 'VAD active but transcriber heard no words, resuming (noise)')
+				deps.metrics.recordBarge({ outcome: 'timeout', wordCount: 0, elapsedMs: 0 })
+			},
+			markBackchannelResumed: () => actor.send({ type: 'backchannel_resumed' }),
 			resetPauseState: () => {
 				// Pipeline/pause-gate are per-turn; nothing to reset here.
 			},
@@ -572,6 +650,12 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 			},
 			triggerEagerTurn: enqueueActions(({ enqueue }, params: unknown) => {
 				const p = params as { transcript: string; confidence: number }
+				// A barely-there eager boundary almost never survives to the final
+				// transcript; don't spend a draft on it.
+				if (p.confidence < config.mimic.flux.lowConfidenceEot) {
+					log.info({ confidence: p.confidence, transcript: p.transcript }, 'skipping eager turn: low confidence')
+					return
+				}
 				if (isDuplicateEagerTranscript(p.transcript)) return
 				lastFinalNormalized = null
 				const turnId = allocateTurnId()
@@ -588,10 +672,20 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 				const p = params as { transcript: string; confidence: number }
 				if (isDuplicateFinalTranscript(p.transcript)) return
 				lastEagerNormalized = null
+				restoreDefaultEndpointing()
 				const turnActorSnap = getTurnActorSnapshot(actor.getSnapshot())
-				const agentLastResponse = turnActorSnap?.context?.draftResponse ?? ''
+				const agentLastResponse = turnActorSnap?.context?.draftResponse || lastAgentResponse
+				// Flux only commits below the EOT threshold when its silence timeout
+				// fires; at very low confidence that means the caller trailed off.
+				const trailingOff = p.confidence < config.mimic.flux.lowConfidenceEot
+				if (trailingOff) {
+					log.info(
+						{ confidence: p.confidence, transcript: p.transcript },
+						'low-confidence end of turn: caller may not be done',
+					)
+				}
 				const sCtx = getToolState()
-				const controlBlock = deps.buildControlBlock(p.transcript, sCtx)
+				const controlBlock = deps.buildControlBlock(p.transcript, { ...sCtx, trailingOff })
 				enqueue.sendTo('tool-pipeline', {
 					type: 'DETECT_INTENT',
 					transcript: p.transcript,
@@ -604,6 +698,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 					confidence: p.confidence,
 					controlBlock,
 					agentLastResponse,
+					trailingOff,
 				})
 			}),
 			markEagerTurnResumed: enqueueActions(({ enqueue }) => {
@@ -654,6 +749,7 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 						generationStartedAt: clock.now(),
 					}),
 					pendingSilenceClosing: () => p.silenceClosing === true,
+					pendingSilenceFollowUp: true,
 					nextTurnId: () => context.nextTurnId + 1,
 				})
 				enqueue.raise({ type: 'reset_idle' })
@@ -690,7 +786,13 @@ export function createCallMachineRuntime(deps: CallMachineRuntimeDeps) {
 	}).start()
 
 	actor.on('turn_outcome', ({ outcome }) => {
-		clearActiveTurn(outcome.turnId, { destroySink: true })
+		releaseActiveTurn(outcome.turnId)
+		if (outcome.kind === 'committed') {
+			lastAgentResponse = outcome.turn.agentResponse
+			if (shouldUseCarefulEndpointing(outcome.turn.agentResponse)) useCarefulEndpointing()
+		} else if (outcome.kind === 'interrupted') {
+			lastAgentResponse = outcome.interruptContext.heardPortion || outcome.interruptContext.fullDraft
+		}
 	})
 
 	// ------------------------------------------------------------------

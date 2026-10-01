@@ -181,6 +181,21 @@ describe('createTurnControlBlockBuilder', () => {
 		assert.doesNotMatch(unknown.build('hi', { interruptContext: null }), /area code/)
 	})
 
+	it('appends the trailing-off hint only for low-confidence finals with words', async () => {
+		const builder = await createTurnControlBlockBuilder({
+			getUserFirstName: () => 'Ola',
+			getRecipient: () => undefined,
+			getUserTimezone: () => undefined,
+			buildTurnControlBlock: () => '',
+		})
+		assert.match(
+			builder.build('my email is john dot', { interruptContext: null }, { trailingOff: true }),
+			/mid-thought/,
+		)
+		assert.doesNotMatch(builder.build('my email is john dot', { interruptContext: null }), /mid-thought/)
+		assert.doesNotMatch(builder.build('', { interruptContext: null }, { trailingOff: true }), /mid-thought/)
+	})
+
 	it('appends the end-call tag guidance only when enabled', async () => {
 		const deps = {
 			getUserFirstName: () => 'Ola',

@@ -21,6 +21,7 @@ import type { DirectorStreamEvent, EagerAudioSink } from '../../shared/streaming
 import { extractTtsControlTags } from '../tts-sanitizer.js'
 import type { TtsSpeaker } from '../tts-speaker.js'
 import { createFrameAlignTransform } from './frame-align.js'
+import { withLatencyFiller } from './latency-filler.js'
 import { createPauseGate, type PauseGate } from './pause-gate.js'
 import { createPlaybackTracker, type PlaybackTracker } from './playback-tracker.js'
 import { createSentenceChunkerTransform } from './sentence-chunker.js'
@@ -32,6 +33,8 @@ export type PipelineSource =
 	| {
 			kind: 'tokens'
 			events: AsyncGenerator<DirectorStreamEvent, string>
+			/** Speak a short filler if the model's first token is late. */
+			latencyFiller?: { delayMs: number; filler: () => string; onInjected?: (filler: string) => void }
 	  }
 	| {
 			kind: 'presynth'
@@ -106,9 +109,17 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 	let ttsHandle: ReturnType<typeof createTtsSynthesisTransform> | null = null
 	let wordTimeline: () => readonly WordTiming[]
 
+	let modelFirstTokenAt: (() => number | null) | null = null
+
 	switch (deps.source.kind) {
 		case 'tokens': {
-			const token = createTokenReadable(deps.source.events, deps.signal)
+			let events = deps.source.events
+			if (deps.source.latencyFiller) {
+				const filler = withLatencyFiller(events, { ...deps.source.latencyFiller, signal: deps.signal, clock })
+				events = filler.events
+				modelFirstTokenAt = filler.modelFirstTokenAt
+			}
+			const token = createTokenReadable(events, deps.signal)
 			source = token.stream
 			token.finalResponse.then(
 				(value) => {
@@ -176,7 +187,9 @@ export function createPipeline(deps: PipelineDeps): PipelineHandle {
 		if (ttsHandle) {
 			ttsSendAt = ttsHandle.ttsSendAt()
 			ttsFirstByteAt = ttsHandle.ttsFirstByteAt()
-			firstTokenAt = ttsHandle.firstTokenAt()
+			// With a latency filler the TTS stage's first delta is the filler;
+			// report the model's own first token so TTFT stays meaningful.
+			firstTokenAt = modelFirstTokenAt ? modelFirstTokenAt() : ttsHandle.firstTokenAt()
 		}
 
 		const resolvedAgentResponse = await agentResponsePromise

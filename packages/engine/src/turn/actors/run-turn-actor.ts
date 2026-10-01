@@ -25,6 +25,7 @@ import { fromCallback } from 'xstate'
 
 import { createLogger } from '#engine/logger.js'
 
+import type { LatencyFillerOptions } from '../../audio/streams/latency-filler.js'
 import type { PauseGate } from '../../audio/streams/pause-gate.js'
 import { createPipeline, type PipelineResult, type PipelineSource } from '../../audio/streams/pipeline.js'
 import type { PlaybackTracker } from '../../audio/streams/playback-tracker.js'
@@ -68,8 +69,18 @@ export interface RunTurnActorDeps {
 	sanitize: (text: string) => string
 	/** Called once the pipeline's sink + tracker are ready. */
 	registerActiveTurn: (handle: ActiveTurnHandle) => void
-	/** Called when the pipeline tears down (normal or aborted). */
-	clearActiveTurn: (turnId: number) => void
+	/**
+	 * Called when the pipeline tears down (normal or aborted). Receives the
+	 * exact handle this pipeline registered: a turn can be restarted under
+	 * the same turnId (racing promotion), so clearing by id alone would let
+	 * the superseded pipeline's teardown wipe its replacement's handle.
+	 */
+	clearActiveTurn: (handle: ActiveTurnHandle) => void
+	/**
+	 * Optional filler spoken on `fresh` turns when the model's first token is
+	 * late. `undefined` disables the filler.
+	 */
+	latencyFiller?: LatencyFillerOptions
 }
 
 export interface RunTurnActorInput {
@@ -115,8 +126,20 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 				const block = controlBlock || openingBlock
 				const effectiveTranscript = transcript || (strategy.kind === 'first_turn' ? '[call connected]' : '')
 				const streamResult = deps.director.streamDraftTokenized(effectiveTranscript, block, generationAbort.signal)
+				// Only mask latency when the caller just spoke and is waiting on us.
+				// Openings and agent-initiated turns (silence follow-ups, tool
+				// nudges) have no one waiting for the first word.
+				const filler = deps.latencyFiller
+				const latencyFiller =
+					filler && strategy.kind === 'fresh' && transcript.trim() && filler.delayMs > 0
+						? {
+								delayMs: filler.delayMs,
+								filler: () => filler.pick({ transcript }),
+								onInjected: filler.onInjected,
+							}
+						: undefined
 				return {
-					source: { kind: 'tokens', events: streamResult.events },
+					source: { kind: 'tokens', events: streamResult.events, latencyFiller },
 					userTranscript: transcript,
 					initialResponse: '',
 				}
@@ -146,13 +169,14 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 		onFirstAudio: (at) => sendBack({ type: 'first_audio_sent', at }),
 	})
 
-	deps.registerActiveTurn({
+	const activeHandle: ActiveTurnHandle = {
 		turnId,
 		sink,
 		tracker: handle.tracker,
 		pauseGate: handle.pauseGate,
 		wordTimeline: handle.wordTimeline,
-	})
+	}
+	deps.registerActiveTurn(activeHandle)
 
 	// Emit `audio_started` the moment the agent response text is known.
 	// For cached / presynth sources that is immediate; for token sources
@@ -210,19 +234,24 @@ export const runTurnActorLogic = fromCallback<RunTurnActorEvent, RunTurnActorInp
 		})
 		.finally(() => {
 			if (!pipelineResult?.audioSent) {
-				deps.clearActiveTurn(turnId)
+				deps.clearActiveTurn(activeHandle)
 				if (!sink.destroyed) sink.destroy()
 			}
 		})
 
 	return () => {
 		canceled = true
+		// Stopped before the pipeline finished: this happens when the turn is
+		// interrupted (generation already aborted) or when the call machine
+		// restarts the turn with a promoted eager draft. In the latter case
+		// nobody else aborts the superseded LLM stream, so do it here.
+		if (!pipelineResult && !generationAbort.signal.aborted) generationAbort.abort()
 		if (!pipelineResult?.audioSent) {
 			if (!sink.destroyed) {
 				sink.clearQueue()
 				sink.destroy()
 			}
-			deps.clearActiveTurn(turnId)
+			deps.clearActiveTurn(activeHandle)
 		}
 	}
 })

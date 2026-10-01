@@ -156,6 +156,19 @@ describe('selectStrategy — no eager / idle eager', () => {
 	})
 })
 
+describe('selectStrategy — trailing off', () => {
+	it('a low-confidence final bypasses a matching eager draft so the hint reaches the model', () => {
+		const result = selectStrategy({ ...input, trailingOff: true }, makeWorld({ eagerSnapshot: makeEagerReady() }))
+		assert.equal(result.kind, 'fresh')
+		if (result.kind === 'fresh') assert.equal(result.racingPromotion, undefined)
+	})
+
+	it('still defers to soft pause and closing', () => {
+		assert.equal(selectStrategy({ ...input, trailingOff: true }, makeWorld({ inSoftPause: true })).kind, 'defer')
+		assert.equal(selectStrategy({ ...input, trailingOff: true }, makeWorld({ isClosing: true })).kind, 'discard')
+	})
+})
+
 describe('selectStrategy — transcript propagation', () => {
 	it('presynthesized carries transcript', () => {
 		const result = selectStrategy(input, makeWorld({ eagerSnapshot: makeEagerReady() }))

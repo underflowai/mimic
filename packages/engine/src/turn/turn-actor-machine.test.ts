@@ -213,6 +213,15 @@ function createTestMachine(pipeline: ReturnType<typeof createControllablePipelin
 			recordShortResumedBarge: () => {
 				actionCalls.push('recordShortResumedBarge')
 			},
+			recordBackchannelResume: (_, params) => {
+				actionCalls.push(`recordBackchannelResume:${params.kind}:${params.transcript}`)
+			},
+			recordVadOnlyResume: () => {
+				actionCalls.push('recordVadOnlyResume')
+			},
+			markBackchannelResumed: () => {
+				actionCalls.push('markBackchannelResumed')
+			},
 			resetPauseState: () => {
 				actionCalls.push('resetPauseState')
 			},
@@ -222,6 +231,7 @@ function createTestMachine(pipeline: ReturnType<typeof createControllablePipelin
 		},
 		delays: {
 			substantiveSpeechMs: 20,
+			vadOnlyGraceMs: 30,
 			yieldWindowMs: 10,
 		},
 	})
@@ -407,6 +417,94 @@ describe('TurnActor machine', () => {
 			}
 			assert.ok(actionCalls.includes('onSubstantiveSpeechTimeout'))
 			assert.ok(actionCalls.includes('recordSoftPauseMetrics'))
+		})
+	})
+
+	describe('soft pause decides from what the transcriber heard', () => {
+		async function pauseWhileStreaming(agentResponse = 'Let me walk you through the options we have.') {
+			const pipeline = createControllablePipeline()
+			const started = startActor(pipeline)
+			await pipeline.ready
+			pipeline.sendBack({ type: 'audio_started', agentResponse })
+			await waitFor(started.actor, (s) => matchesState(s, 'executing.streaming'), waitOpts)
+			return started
+		}
+
+		it('resumes on a backchannel and flags its end-of-turn for discard', async () => {
+			const { actor, actionCalls } = await pauseWhileStreaming()
+
+			actor.send({ type: 'caller_turn_start', transcript: 'Mm-hmm.' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.softPaused.probing'), waitOpts)
+
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+			assert.ok(actionCalls.includes('flushPausedBuffer'))
+			assert.ok(actionCalls.includes('recordBackchannelResume:backchannel:Mm-hmm.'))
+			assert.ok(actionCalls.includes('markBackchannelResumed'))
+			assert.ok(!actionCalls.includes('onSubstantiveSpeechTimeout'))
+			assert.equal(actor.getSnapshot().context.pauseTranscript, '')
+		})
+
+		it('resumes on a short answer to the agent question without flagging a discard', async () => {
+			const { actor, actionCalls } = await pauseWhileStreaming('Does Tuesday at three work for you?')
+
+			actor.send({ type: 'caller_turn_start', transcript: 'yeah' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+			assert.ok(actionCalls.includes('recordBackchannelResume:answer:yeah'))
+			assert.ok(!actionCalls.includes('markBackchannelResumed'))
+		})
+
+		it('interrupts when interim transcripts show real words', async () => {
+			const { actor, actionCalls } = await pauseWhileStreaming()
+
+			actor.send({ type: 'vad_speech_start' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.softPaused.probing'), waitOpts)
+			actor.send({ type: 'caller_update', transcript: 'yeah' })
+			actor.send({ type: 'caller_update', transcript: 'yeah but actually wait' })
+
+			const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
+			const output = final.output as TurnOutcome
+			assert.equal(output.kind, 'interrupted')
+			if (output.kind === 'interrupted') assert.equal(output.reason, 'caller_substantive_speech')
+			assert.ok(actionCalls.includes('onSubstantiveSpeechTimeout'))
+		})
+
+		it('waits for the transcriber on VAD alone, then treats silence as noise', async () => {
+			const { actor, actionCalls } = await pauseWhileStreaming()
+
+			actor.send({ type: 'vad_speech_start' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.softPaused.vadOnly'), waitOpts)
+			assert.ok(!actionCalls.includes('onSubstantiveSpeechTimeout'))
+
+			await waitFor(actor, (s) => matchesState(s, 'executing.streaming.flowing'), waitOpts)
+			assert.ok(actionCalls.includes('recordVadOnlyResume'))
+			assert.ok(actionCalls.includes('flushPausedBuffer'))
+			assert.equal(actor.getSnapshot().status, 'active')
+		})
+
+		it('interrupts immediately when words arrive during the VAD-only grace window', async () => {
+			const { actor } = await pauseWhileStreaming()
+
+			actor.send({ type: 'vad_speech_start' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.softPaused.vadOnly'), waitOpts)
+			actor.send({ type: 'caller_turn_start', transcript: 'Hold on, I have a question' })
+
+			const final = await waitFor(actor, (s) => s.status === 'done', waitOpts)
+			assert.equal((final.output as TurnOutcome).kind, 'interrupted')
+		})
+
+		it('resumes to awaitingPlayback when the stream finished during the pause', async () => {
+			const { actor, actionCalls } = await pauseWhileStreaming()
+
+			actor.send({ type: 'caller_turn_start', transcript: 'right' })
+			await waitFor(actor, (s) => matchesState(s, 'executing.softPaused.probing'), waitOpts)
+
+			// Stream completes while paused; the backchannel decision should land in awaitingPlayback.
+			actor.send({ type: 'stream_done', result: defaultStreamResult() })
+			assert.ok(matchesState(actor.getSnapshot(), 'executing.softPaused'))
+
+			await waitFor(actor, (s) => matchesState(s, 'awaitingPlayback'), waitOpts)
+			assert.ok(actionCalls.includes('recordBackchannelResume:backchannel:right'))
+			assert.ok(actionCalls.includes('onPlaybackComplete'))
 		})
 	})
 

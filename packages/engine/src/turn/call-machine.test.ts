@@ -114,6 +114,9 @@ function createInterruptibleTurnActorMachine(options?: { initialSubstate?: 'gene
 function createDispatchContext(overrides?: Partial<Record<string, unknown>>) {
 	return {
 		backchannelResumedPending: false,
+		backchannelGraceUntil: 0,
+		holdRequested: false,
+		pendingSilenceFollowUp: false,
 		lastTurnWasInterrupted: false,
 		lastVadSpeechEndAt: 0,
 		lastTurnCompleteAt: 0,
@@ -155,12 +158,36 @@ describe('dispatchTurnComplete priority handling', () => {
 			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'closing', commitUserOnly: 'keep me' },
 		},
 		{
-			name: 'backchannel resumed emits discarded',
+			name: 'backchannel resumed emits discarded for a backchannel-only transcript',
+			mode: 'idle',
+			context: { backchannelResumedPending: true },
+			event: createTurnCompleteEvent({ transcript: 'Mm-hmm, right.' }),
+			turnActorSnapshot: null,
+			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'backchannel_handled' },
+		},
+		{
+			name: 'backchannel grace window still drops a late backchannel end-of-turn',
+			mode: 'idle',
+			context: { backchannelGraceUntil: 1_000 },
+			event: createTurnCompleteEvent({ transcript: 'okay' }),
+			turnActorSnapshot: null,
+			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'backchannel_handled' },
+		},
+		{
+			name: 'backchannel resumed but the caller answered a question starts a turn',
+			mode: 'idle',
+			context: { backchannelResumedPending: true },
+			event: createTurnCompleteEvent({ transcript: 'yeah', agentLastResponse: 'Does Tuesday work?' }),
+			turnActorSnapshot: null,
+			expected: { kind: 'start' },
+		},
+		{
+			name: 'backchannel resumed but the caller said real words starts a turn',
 			mode: 'idle',
 			context: { backchannelResumedPending: true },
 			event: createTurnCompleteEvent(),
 			turnActorSnapshot: null,
-			expected: { kind: 'emit', outcomeKind: 'discarded', reason: 'backchannel_handled' },
+			expected: { kind: 'start' },
 		},
 		{
 			name: 'soft paused active turn emits deferred',
@@ -183,7 +210,7 @@ describe('dispatchTurnComplete priority handling', () => {
 			} as any)
 
 			assert.equal(result.kind, testCase.expected.kind)
-			if (result.kind !== 'emit') return
+			if (result.kind !== 'emit' || testCase.expected.kind !== 'emit') return
 			assert.equal(result.outcome.kind, testCase.expected.outcomeKind)
 			assert.equal((result.outcome as { reason: string }).reason, testCase.expected.reason)
 			assert.equal((result as any).commitUserOnly, (testCase.expected as any).commitUserOnly)

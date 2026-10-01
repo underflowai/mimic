@@ -11,7 +11,14 @@
 
 import * as telemetry from '#engine/telemetry.js'
 
-export type BargeOutcome = 'interrupted' | 'short_resumed' | 'timeout'
+/**
+ * How caller speech during an agent turn resolved.
+ *   interrupted         the caller took the floor
+ *   short_resumed       VAD ended before we had to decide
+ *   backchannel_resumed the transcriber heard only listening noises (or a reply to our question)
+ *   timeout             VAD stayed active but no words ever arrived; treated as noise
+ */
+export type BargeOutcome = 'interrupted' | 'short_resumed' | 'backchannel_resumed' | 'timeout'
 
 export interface BargeEvent {
 	outcome: BargeOutcome
@@ -82,6 +89,8 @@ export interface CallMetrics {
 	readonly softPauseEvents: readonly SoftPauseEvent[]
 	readonly turnOutcomes: readonly TurnOutcomeMetric[]
 	readonly discardedTurns: number
+	/** Fresh turns where the model was slow enough that a filler was spoken first. */
+	readonly latencyFillers: number
 }
 
 export interface SeriesSummary {
@@ -113,6 +122,7 @@ export type CallLatencySummary = Record<TurnTimingField, SeriesSummary> & {
 	barges: number
 	softPauses: number
 	discarded: number
+	latencyFillers: number
 }
 
 /** Values of one timing field across turns, skipping turns where it was not measured. */
@@ -147,6 +157,7 @@ export function createCallMetrics() {
 	const softPauseEvents: SoftPauseEvent[] = []
 	const turnOutcomes: TurnOutcomeMetric[] = []
 	let discardedTurns = 0
+	let latencyFillers = 0
 
 	return {
 		get turnTimings(): readonly TurnTiming[] {
@@ -215,6 +226,11 @@ export function createCallMetrics() {
 			telemetry.metrics.count('mimic.turn.discarded')
 		},
 
+		recordLatencyFiller() {
+			latencyFillers++
+			telemetry.metrics.count('mimic.turn.latency_filler')
+		},
+
 		snapshot(): CallMetrics {
 			return {
 				turnTimings: [...turnTimings],
@@ -223,6 +239,7 @@ export function createCallMetrics() {
 				softPauseEvents: [...softPauseEvents],
 				turnOutcomes: [...turnOutcomes],
 				discardedTurns,
+				latencyFillers,
 			}
 		},
 
@@ -236,6 +253,7 @@ export function createCallMetrics() {
 				barges: bargeEvents.length,
 				softPauses: softPauseEvents.length,
 				discarded: discardedTurns,
+				latencyFillers,
 			}
 		},
 	}

@@ -122,9 +122,11 @@ stateDiagram-v2
     interrupted --> idle: reset_idle / caller_turn_resumed / turn_complete / Flux events
 ```
 
-**idle** — waiting for the caller to finish speaking. Manages eager speculation and tool intent detection. Runs a silence watchdog (6s idle delay) that escalates through up to 3 follow-up prompts, then a closing turn, then hangup. Reenter on `caller_turn_start`, `caller_update`, `caller_eager_turn` to rearm the watchdog. Empty/whitespace-only updates are filtered by `isMeaningfulCallerUpdate`.
+**idle** — waiting for the caller to finish speaking. Manages eager speculation and tool intent detection. Runs a silence watchdog (6s idle delay) that escalates through up to 3 follow-up prompts, then a closing turn, then hangup. Reenter on `caller_turn_start`, `caller_update`, `caller_eager_turn` to rearm the watchdog. Empty/whitespace-only updates are filtered by `isMeaningfulCallerUpdate`. When the caller asked us to wait (`isHoldRequest` on their transcript, or a silence follow-up the director answered with nothing) the window stretches to `holdIdleMs` (45s) until their next real turn.
 
-**inTurn** — a TurnActor is active. Forwards interrupt/playback/VAD events. On completion, emits `turn_outcome` and optionally delivers tool follow-ups from persistent tool state. Handles `promotion_resolved` for mid-turn eager swap — if fresh generation hasn't sent audio yet and no tools are inflight, the turn actor restarts with presynthesized audio.
+**inTurn** — a TurnActor is active. Forwards interrupt/playback/VAD events and interim transcripts (`caller_update`) so a soft pause can tell a backchannel from a barge-in. On completion, emits `turn_outcome` and optionally delivers tool follow-ups from persistent tool state. Handles `promotion_resolved` for mid-turn eager swap — if fresh generation hasn't sent audio yet and no tools are inflight, the turn actor restarts with presynthesized audio under the same turnId; the superseded pipeline aborts its LLM stream and clears only its own `ActiveTurnHandle` (identity, not turnId), so the promoted turn stays steerable.
+
+**End-of-turn confidence.** Flux commits a turn below `eotThreshold` only when its silence timeout fires. Finals under `lowConfidenceEot` (0.35) are treated as trailing off: the control block gets the `trailing-off` fragment and `selectStrategy` skips eager reuse so the hint reaches the model. Eager boundaries under the same floor are not speculated on. After the agent asks for a value that is read out in pieces (email, phone, spelling — `shouldUseCarefulEndpointing`), the runtime raises Flux's thresholds for exactly one caller turn (`carefulEotThreshold` / `carefulEotTimeoutMs`) and restores them when that turn arrives.
 
 **interrupted** — transient state after an interrupted turn. Mirrors idle-state Flux handlers (`caller_turn_start`, `caller_update`, `caller_eager_turn`, `caller_turn_complete`) so end-of-turn signals aren't dropped after a substantive-speech interrupt.
 
@@ -137,10 +139,17 @@ stateDiagram-v2
         [*] --> generating
         generating --> streaming: audio_started
         streaming --> softPaused: caller_turn_start / VAD yield timer
-        softPaused --> streaming: vad_speech_end (resume)
-        softPaused --> [*]: substantive speech timer (interrupt)
+        state softPaused {
+            [*] --> probing
+            probing --> deciding: substantiveSpeechMs
+            deciding --> vadOnly: no words yet
+            vadOnly --> deciding: caller_update / caller_turn_start
+        }
+        softPaused --> resuming: vad_speech_end / backchannel / answer / vadOnlyGraceMs (noise)
+        softPaused --> [*]: words from the transcriber (interrupt)
+        resuming --> streaming
     }
-    executing --> awaitingPlayback: stream_done
+    executing --> awaitingPlayback: stream_done (also from resuming)
     executing --> done: stream_empty / stream_error / interrupt
     awaitingPlayback --> committing: playback_settled
     awaitingPlayback --> done: interrupt
@@ -148,18 +157,22 @@ stateDiagram-v2
     done --> [*]
 ```
 
+**Soft pause decisions.** VAD opens the pause (audio is held, not cleared); the transcriber ends it. `probing` collects interim text for `substantiveSpeechMs`, then `deciding` classifies it with `classifyCallerSpeech`: listening noises ("mm-hmm", "right", "okay") resume and raise `backchannel_resumed` on the call machine so their eventual end-of-turn is dropped (`backchannel_handled`, with a 4s grace after the turn ends for Flux's slow commit); the same words after a question the agent just asked are an _answer_ — resume, and let the end-of-turn be a real turn; any other words interrupt. With VAD alone and no words, `vadOnly` gives Flux `vadOnlyGraceMs` more; still nothing means noise, and the agent resumes.
+
+**Latency filler.** On `fresh` turns that answer a caller, the token source is wrapped by `withLatencyFiller`: if the model's first token is later than `latencyFillerMs` (1s), a short neutral filler ("Hmm.", "Let me see." for questions; "Mm-hmm." for statements) is spoken first. `ttftMs` still measures the model's own first token. Fillers count as sent audio, so a racing eager promotion that lands after one does not restart the turn.
+
 ## Interrupt Model
 
 Interrupts stop the agent mid-speech when the caller starts talking, the call ends, or the caller speaks substantially during a soft-pause. The system is layered: CallMachine decides _when_ to interrupt, TurnActor decides _how_ to clean up, and the outcome feeds back into the next turn.
 
 ### Interrupt sources
 
-| Source                                                              | InterruptReason             | Trigger                                         |
-| ------------------------------------------------------------------- | --------------------------- | ----------------------------------------------- |
-| New caller turn arrives while agent is speaking                     | `new_turn_started`          | `caller_turn_complete` during `inTurn`          |
-| Call disconnects                                                    | `call_ended`                | Shutdown coordinator                            |
-| Caller speaks for longer than substantiveSpeechMs during soft-pause | `caller_substantive_speech` | Timer in TurnActor `softPaused`                 |
-| VAD yield timer fires during awaitingPlayback                       | `caller_started_speaking`   | Timer in TurnActor `awaitingPlayback.vadActive` |
+| Source                                                            | InterruptReason             | Trigger                                         |
+| ----------------------------------------------------------------- | --------------------------- | ----------------------------------------------- |
+| New caller turn arrives while agent is speaking                   | `new_turn_started`          | `caller_turn_complete` during `inTurn`          |
+| Call disconnects                                                  | `call_ended`                | Shutdown coordinator                            |
+| Transcriber reports words during a soft-pause (not a backchannel) | `caller_substantive_speech` | `deciding` in TurnActor `softPaused`            |
+| VAD yield timer fires during awaitingPlayback                     | `caller_started_speaking`   | Timer in TurnActor `awaitingPlayback.vadActive` |
 
 ### Flow
 
@@ -283,6 +296,7 @@ The control block is a per-turn `<context>` injection that gives the LLM situati
 - **End-call tag** — when `endCallEnabled`, how to hang up with `[end-call]`
 - **Interrupt context** — what the caller heard before interrupting, what was left unsaid
 - **Silence instruction** — when triggered by the silence watchdog, a check-in prompt that escalates to a closing goodbye
+- **Trailing off** — when Flux committed the turn on silence at low confidence, a hint that the caller may not be done
 
 The wording of every fragment lives in `prompts/control-block/*.md` (Handlebars for the parametrised ones); `control-block-utils.ts` only picks fragments and fills in runtime values. `createTurnControlBlockBuilder` loads them once per process and builds synchronously per turn.
 
@@ -349,6 +363,7 @@ mimic/
     call-machine-selectors.ts     — snapshot predicates
     turn-actor.ts                 — per-turn lifecycle (generate → stream → commit)
     strategy.ts                   — pure strategy selection
+    caller-speech.ts              — backchannel / answer / speech classifier + hold-request detector
     types.ts                      — TurnOutcome, InterruptReason, CommittedTurn
     actors/
       run-turn-actor.ts           — generation + streaming pipeline (fromCallback)
@@ -357,6 +372,7 @@ mimic/
 
   audio/                          — speech and synthesis
     deepgram-transcriber.ts       — Deepgram Flux WebSocket + caller-turn events
+    endpointing-policy.ts         — when an agent line warrants stricter end-of-turn detection
     tts-session.ts                — Cartesia TTS WebSocket session lifecycle (connect, context creation, reconnect)
     tts-speaker.ts                — text → PCM synthesis via Cartesia Sonic
     tts-sanitizer.ts              — LLM text cleanup, speech tag repair/validation, [end-call] extraction
@@ -369,6 +385,7 @@ mimic/
     streams/
       pipeline.ts                 — per-turn pipeline builder
       sources.ts                  — token / presynth Readables
+      latency-filler.ts           — speaks a short filler when the model's first token is late
       sentence-chunker.ts         — tokens → sentence boundary events
       tts-synthesis.ts            — per-sentence TTS Transform
       frame-align.ts              — PCM rechunker + fade

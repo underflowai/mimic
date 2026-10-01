@@ -19,6 +19,7 @@ import { config } from '#engine/config.js'
 import { eagerMachine, type EagerMachineActor } from '../intelligence/eager-machine.js'
 import { toolSupervisor, type ToolSupervisorActor } from '../intelligence/tools/supervisor-machine.js'
 import { monotonicClock, type Clock } from '../shared/clock.js'
+import { isBackchannelOnly, isHoldRequest } from './caller-speech.js'
 import { selectStrategy, type EagerStateValue, type TurnStrategy } from './strategy.js'
 import {
 	turnActorMachine,
@@ -50,6 +51,13 @@ export type { InterruptReason } from './types.js'
 
 const { silenceIdleMs, maxSilenceFollowUps } = config.mimic.turnTaking
 
+/**
+ * After a turn in which the caller backchanneled, their "mm-hmm" may still
+ * be waiting on Flux's silence timeout; drop a backchannel-only end-of-turn
+ * that lands within this window so the agent doesn't answer it.
+ */
+const backchannelGraceMs = 4_000
+
 export interface PendingStrategy {
 	strategy: TurnActorExecutionStrategy
 	turnId: number
@@ -62,10 +70,18 @@ interface PendingTurnComplete {
 	confidence: number
 	controlBlock: string
 	agentLastResponse: string
+	trailingOff: boolean
 }
 
 export interface CallMachineContext {
+	/** The active turn resumed through a backchannel; its end-of-turn should not become a turn. */
 	backchannelResumedPending: boolean
+	/** Clock time until which a backchannel-only end-of-turn is still dropped after the turn ended. */
+	backchannelGraceUntil: number
+	/** The caller asked us to wait; the silence watchdog stretches to `holdIdleMs`. */
+	holdRequested: boolean
+	/** The pending or active turn is a silence follow-up (used to detect "the director chose to stay quiet"). */
+	pendingSilenceFollowUp: boolean
 	callerActive: boolean
 	lastTurnWasInterrupted: boolean
 	lastVadSpeechEndAt: number
@@ -96,13 +112,15 @@ type TurnCompleteEvent = {
 	confidence: number
 	controlBlock: string
 	agentLastResponse: string
+	/** The transcriber committed this turn on silence at low confidence; skip eager reuse. */
+	trailingOff?: boolean
 }
 
 type CallEvent =
 	| TurnCompleteEvent
 	| { type: 'start_first_turn'; openingBlock: string }
 	| { type: 'interrupt'; reason: InterruptReason }
-	| { type: 'caller_turn_start' }
+	| { type: 'caller_turn_start'; transcript?: string }
 	| { type: 'caller_update'; transcript: string; confidence: number }
 	| { type: 'caller_eager_turn'; transcript: string; confidence: number }
 	| { type: 'caller_turn_complete'; transcript: string; confidence: number }
@@ -125,6 +143,7 @@ type CallEvent =
 	| { type: 'reset_idle' }
 	| { type: 'restart_turn_actor' }
 	| { type: 'cancel_eager_from_turn' }
+	| { type: 'backchannel_resumed' }
 	| { type: 'tool_intent_resolved'; turnId: number; needsTool: boolean }
 	| { type: 'tool_awaiting_args'; turnId: number; taskId: number; toolName: string; missingArgs: string[] }
 
@@ -184,7 +203,8 @@ const callMachineSetup = setup({
 		commitToolResultToDirector: (_, _params: { toolName: string; result: string }) => {},
 	},
 	delays: {
-		silenceIdleMs,
+		// A caller who asked us to wait gets a much longer silence budget.
+		silenceIdleMs: ({ context }) => (context.holdRequested ? config.mimic.turnTaking.holdIdleMs : silenceIdleMs),
 	},
 	guards: {
 		isInterruptedOutcome: ({ event }) => extractDoneOutcome(event).kind === 'interrupted',
@@ -271,7 +291,19 @@ function buildPendingTurnComplete(event: TurnCompleteEvent): PendingTurnComplete
 		confidence: event.confidence,
 		controlBlock: event.controlBlock,
 		agentLastResponse: event.agentLastResponse,
+		trailingOff: event.trailingOff === true,
 	}
+}
+
+/**
+ * The caller's end-of-turn is just the backchannel we already talked through
+ * ("mm-hmm", "right"): either the active turn resumed on it, or the turn
+ * ended moments ago and Flux's silence timeout only now committed it.
+ */
+function isHandledBackchannel(context: CallMachineContext, event: TurnCompleteEvent) {
+	const withinGrace = context.backchannelResumedPending || context.clock.now() < context.backchannelGraceUntil
+	if (!withinGrace) return false
+	return isBackchannelOnly(event.transcript, { agentDraft: event.agentLastResponse })
 }
 
 type CallEnqueue = Parameters<Parameters<(typeof callMachineSetup)['enqueueActions']>[0]>[0]['enqueue']
@@ -321,12 +353,13 @@ function buildWorldSnapshot(
 	context: CallMachineContext,
 	snapshot: { children: Record<string, unknown> },
 	inSoftPause: boolean,
+	event: TurnCompleteEvent,
 ) {
 	const eager = buildEagerSnapshot(getEagerActor(snapshot))
 	return {
 		isClosing: context.isClosing,
 		inSoftPause,
-		backchannelResumedPending: context.backchannelResumedPending,
+		backchannelResumedPending: isHandledBackchannel(context, event),
 		lastTurnWasInterrupted: context.lastTurnWasInterrupted,
 		eagerSnapshot: eager,
 	}
@@ -358,20 +391,22 @@ function terminalOutcomeFromPriority(
 	context: CallMachineContext,
 	turnId: number,
 	turnActorSnapshot: TurnActorSnapshot | null,
+	event: TurnCompleteEvent,
 ) {
 	if (context.isClosing) return { kind: 'discarded', turnId, reason: 'closing' } as const
-	if (context.backchannelResumedPending) return { kind: 'discarded', turnId, reason: 'backchannel_handled' } as const
+	if (isHandledBackchannel(context, event)) return { kind: 'discarded', turnId, reason: 'backchannel_handled' } as const
 	if (isTurnActorSoftPaused(turnActorSnapshot)) return { kind: 'deferred', turnId, reason: 'soft_paused' } as const
 	return null
 }
 
 function dispatchIdleTurnComplete(params: IdleDispatchParams, turnId: number) {
-	const world = buildWorldSnapshot(params.context, params.snapshot, false)
+	const world = buildWorldSnapshot(params.context, params.snapshot, false, params.event)
 	const strategy = selectStrategy(
 		{
 			transcript: params.event.transcript,
 			confidence: params.event.confidence,
 			controlBlock: params.event.controlBlock,
+			trailingOff: params.event.trailingOff === true,
 		},
 		world,
 	)
@@ -388,7 +423,7 @@ function dispatchIdleTurnComplete(params: IdleDispatchParams, turnId: number) {
 
 function dispatchTurnComplete(params: DispatchParams) {
 	const turnId = params.context.nextTurnId
-	const terminal = terminalOutcomeFromPriority(params.context, turnId, params.turnActorSnapshot)
+	const terminal = terminalOutcomeFromPriority(params.context, turnId, params.turnActorSnapshot, params.event)
 	if (terminal) {
 		const interruptActive =
 			params.mode === 'inTurn' && terminal.kind === 'discarded' && terminal.reason === 'closing'
@@ -437,9 +472,15 @@ function applyStartDispatch(enqueue: CallEnqueue, dispatch: Extract<DispatchResu
 		callerVadEndAt: ({ context }: { context: CallMachineContext }) => context.lastVadSpeechEndAt,
 	})
 	enqueue.assign({ nextTurnId: ({ context }: { context: CallMachineContext }) => context.nextTurnId + 1 })
-	enqueue.assign({ pendingSilenceClosing: false })
+	enqueue.assign({ pendingSilenceClosing: false, pendingSilenceFollowUp: false })
 	enqueue.assign({ pendingStrategy: () => dispatch.pending })
 	enqueue.assign({ silenceFollowUpCount: 0 })
+	// A real caller turn consumes any lingering backchannel grace and sets the
+	// hold flag from what they said ("hang on, let me grab my calendar").
+	enqueue.assign({
+		backchannelGraceUntil: 0,
+		holdRequested: isHoldRequest(dispatch.pending.userTranscript),
+	})
 	enqueue.raise({ type: 'reset_idle' })
 }
 
@@ -452,11 +493,20 @@ function applyInterruptDispatch(enqueue: CallEnqueue, dispatch: Extract<Dispatch
 	enqueue.sendTo('turnActor', { type: 'interrupt', reason: 'new_turn_started' })
 }
 
-function updateAfterTurnDone(outcome: TurnOutcome) {
+function updateAfterTurnDone(context: CallMachineContext, outcome: TurnOutcome) {
+	// A silence follow-up the director answered with nothing means it judged
+	// the caller asked us to wait; give them the hold budget.
+	const stayedQuietOnFollowUp =
+		context.pendingSilenceFollowUp && outcome.kind === 'discarded' && outcome.reason === 'empty_response'
 	return {
 		pendingStrategy: null,
 		pendingSilenceClosing: false,
+		pendingSilenceFollowUp: false,
 		backchannelResumedPending: false,
+		backchannelGraceUntil: context.backchannelResumedPending
+			? context.clock.now() + backchannelGraceMs
+			: context.backchannelGraceUntil,
+		holdRequested: context.holdRequested || stayedQuietOnFollowUp,
 		lastTurnWasInterrupted: outcome.kind === 'interrupted',
 	}
 }
@@ -469,7 +519,7 @@ function handleTurnDone(enqueue: CallEnqueue, context: CallMachineContext, raw: 
 	if (context.pendingSilenceClosing && raw.kind === 'committed') {
 		enqueue({ type: 'requestCallHangup', params: { source: 'silence' } })
 	}
-	enqueue.assign(updateAfterTurnDone(raw))
+	enqueue.assign(updateAfterTurnDone(context, raw))
 }
 
 function raisePendingTurnComplete(enqueue: CallEnqueue, pending: PendingTurnComplete) {
@@ -479,6 +529,7 @@ function raisePendingTurnComplete(enqueue: CallEnqueue, pending: PendingTurnComp
 		confidence: pending.confidence,
 		controlBlock: pending.controlBlock,
 		agentLastResponse: pending.agentLastResponse,
+		trailingOff: pending.trailingOff,
 	})
 }
 
@@ -575,6 +626,9 @@ export const callMachine = callMachineSetup.createMachine({
 	exit: [stopChild('eager-pipeline'), stopChild('tool-pipeline')],
 	context: ({ input }): CallMachineContext => ({
 		backchannelResumedPending: false,
+		backchannelGraceUntil: 0,
+		holdRequested: false,
+		pendingSilenceFollowUp: false,
 		callerActive: false,
 		lastTurnWasInterrupted: false,
 		lastVadSpeechEndAt: 0,
@@ -595,6 +649,7 @@ export const callMachine = callMachineSetup.createMachine({
 		allocate_turn_id: { actions: callMachineSetup.assign({ nextTurnId: ({ context }) => context.nextTurnId + 1 }) },
 		close: { actions: ['cancelEager', callMachineSetup.assign({ isClosing: true })] },
 		cancel_eager_from_turn: { actions: 'cancelEager' },
+		backchannel_resumed: { actions: callMachineSetup.assign({ backchannelResumedPending: true }) },
 		eager_promotion_metrics: {
 			actions: {
 				type: 'onEagerPromotionMetrics',
@@ -819,14 +874,31 @@ export const callMachine = callMachineSetup.createMachine({
 				caller_turn_start: {
 					actions: [
 						callMachineSetup.assign({ callerActive: true }),
-						sendTo('turnActor', { type: 'caller_turn_start' }),
+						sendTo('turnActor', ({ event }) => ({
+							type: 'caller_turn_start',
+							transcript: event.type === 'caller_turn_start' ? event.transcript : undefined,
+						})),
+					],
+				},
+				// Interim transcripts let a soft pause tell "mm-hmm" from "wait".
+				caller_update: {
+					guard: 'isMeaningfulCallerUpdate',
+					actions: [
+						callMachineSetup.assign({ callerActive: true }),
+						sendTo('turnActor', ({ event }) => ({
+							type: 'caller_update',
+							transcript: event.type === 'caller_update' ? event.transcript : '',
+						})),
 					],
 				},
 				caller_turn_resumed: {
 					actions: [
 						'markEagerTurnResumed',
 						callMachineSetup.assign({ callerActive: true }),
-						sendTo('turnActor', { type: 'caller_turn_resumed' }),
+						sendTo('turnActor', ({ event }) => ({
+							type: 'caller_turn_resumed',
+							transcript: event.type === 'caller_turn_resumed' ? event.transcript : undefined,
+						})),
 					],
 				},
 				playback_confirmed: { actions: sendTo('turnActor', { type: 'playback_confirmed' }) },

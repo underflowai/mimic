@@ -235,6 +235,69 @@ describe('eager-only speculation flow', () => {
 		engine.stop()
 	})
 
+	it('racing promotion restart aborts the superseded fresh generation and keeps the live turn handle', async () => {
+		const eagerGate = deferred<void>()
+		const freshSignals: AbortSignal[] = []
+		const h = createEagerOnlyDeps({ validateResult: true })
+		const transport = h.deps.getAudioTransport() as ReturnType<typeof createFakeAudioTransport>
+
+		// First call is the eager draft (held until we release it); the second
+		// is the racing fresh generation, which never produces a token.
+		let calls = 0
+		h.deps.director.streamDraftTokenized = mock.fn((transcript: string, _block: string, signal?: AbortSignal) => {
+			calls++
+			if (calls === 1) {
+				return {
+					userTranscript: transcript,
+					events: (async function* () {
+						await eagerGate.promise
+						yield { type: 'token' as const, value: 'eager response' }
+						return 'eager response'
+					})(),
+				}
+			}
+			if (signal) freshSignals.push(signal)
+			return {
+				userTranscript: transcript,
+				events: (async function* () {
+					await new Promise<void>((resolve) => {
+						if (signal?.aborted) return resolve()
+						signal?.addEventListener('abort', () => resolve(), { once: true })
+					})
+					return ''
+				})(),
+			}
+		}) as unknown as CallMachineRuntimeDeps['director']['streamDraftTokenized']
+
+		const engine = createCallMachineRuntime({ ...h.deps, latencyFillerMs: 0 })
+
+		engine.sendToCallMachine({ type: 'caller_eager_turn', transcript: 'yeah that sounds good', confidence: 0.9 })
+		await waitForCondition(() => getEagerState(engine)?.value === 'eagerGenerating', 500)
+
+		const turnId = engine.actor.getSnapshot().context.nextTurnId
+		const outcomePromise = waitForOutcome(engine, turnId)
+		engine.sendToCallMachine({ type: 'caller_turn_complete', transcript: 'yeah that sounds good', confidence: 0.95 })
+		await waitForCondition(() => freshSignals.length === 1, 500)
+		assert.equal(transport.sinks.length, 1, 'fresh turn opened a sink')
+
+		// Eager finishes → validates → promotes → the turn restarts with presynth audio.
+		eagerGate.resolve()
+		await waitForCondition(() => transport.sinks.length === 2, 1000)
+		await waitForCondition(() => freshSignals[0]!.aborted, 500)
+		assert.ok(transport.sinks[0]!.destroyed, 'superseded fresh sink is torn down')
+
+		// With the handle intact the promoted turn confirms playout and commits
+		// promptly instead of waiting out the playback timeout.
+		const startedAt = Date.now()
+		const outcome = await outcomePromise
+		assert.equal(outcome.kind, 'committed')
+		if (outcome.kind === 'committed') assert.equal(outcome.turn.agentResponse, 'eager response')
+		assert.ok(Date.now() - startedAt < 2000, 'commit should not wait for the playback timeout')
+		assert.ok(transport.sinks[1]!.waitForPlayoutCount >= 1, 'playout confirmation used the promoted sink')
+
+		engine.stop()
+	})
+
 	it('caller_update still does not start speculative generation', async () => {
 		const h = createEagerOnlyDeps()
 		const engine = createCallMachineRuntime(h.deps)

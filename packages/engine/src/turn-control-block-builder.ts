@@ -28,12 +28,16 @@ export interface TurnControlBlockContext {
 	silenceFollowUp?: boolean
 	silenceClosing?: boolean
 	silenceFollowUpCount?: number | null
+	/** The transcriber committed this turn on silence at low confidence; the caller may not be done. */
+	trailingOff?: boolean
 }
 
 export interface TurnControlBlockBuildOptions {
 	silenceFollowUp?: boolean
 	silenceClosing?: boolean
 	silenceFollowUpCount?: number
+	/** End-of-turn came from the silence timeout at low confidence, not a confident finish. */
+	trailingOff?: boolean
 	/** A single tool result to highlight first in the prompt. */
 	toolResult?: { topic: string; result: string } | null
 	toolResults?: Array<{ topic: string; result: string }>
@@ -124,6 +128,7 @@ export async function createTurnControlBlockBuilder(deps: TurnControlBlockBuilde
 			silenceFollowUp: opts?.silenceFollowUp === true,
 			silenceClosing: opts?.silenceClosing === true,
 			silenceFollowUpCount: typeof opts?.silenceFollowUpCount === 'number' ? opts.silenceFollowUpCount : null,
+			trailingOff: opts?.trailingOff === true,
 		}
 
 		const strategyBlock = deps.buildTurnControlBlock(ctx)
@@ -133,6 +138,7 @@ export async function createTurnControlBlockBuilder(deps: TurnControlBlockBuilde
 
 		const silenceInstruction = buildSilenceInstruction(prompts, opts)
 		if (silenceInstruction) signalParts.push(silenceInstruction)
+		if (ctx.trailingOff && transcript.trim()) signalParts.push(prompts.trailingOff)
 		// Apply these to both compiler-generated and persona blocks, after situational nudges.
 		signalParts.push(prompts.turnPriorities)
 

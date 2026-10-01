@@ -64,6 +64,26 @@ export const config = {
 			get eotTimeoutMs() {
 				return getNumberEnv('MIMIC_FLUX_EOT_TIMEOUT_MS', 3000, { min: 500, max: 60_000, integer: true })
 			},
+			/**
+			 * Stricter endpointing used for one caller turn after the agent asks for
+			 * a value that is read out in pieces (email, phone, spelling). Flux
+			 * otherwise commits "john dot" as a complete turn.
+			 */
+			get carefulEotThreshold() {
+				return getNumberEnv('MIMIC_FLUX_CAREFUL_EOT_THRESHOLD', 0.85, { min: 0.5, max: 0.9 })
+			},
+			get carefulEotTimeoutMs() {
+				return getNumberEnv('MIMIC_FLUX_CAREFUL_EOT_TIMEOUT_MS', 5000, { min: 500, max: 60_000, integer: true })
+			},
+			/**
+			 * Below this end-of-turn confidence a caller turn is treated as
+			 * trailing off rather than finished: no eager speculation is started
+			 * for it, and a timeout-forced final gets a "the caller may not be
+			 * done" hint in the control block instead of reusing an eager draft.
+			 */
+			get lowConfidenceEot() {
+				return getNumberEnv('MIMIC_LOW_CONFIDENCE_EOT', 0.35, { min: 0, max: 0.9 })
+			},
 			/** Caller audio is batched into chunks of about this length before sending. */
 			audioChunkTargetMs: 80,
 			reconnect: {
@@ -82,8 +102,29 @@ export const config = {
 			get yieldWindowMs() {
 				return getNumberEnv('MIMIC_YIELD_WINDOW_MS', 80, { min: 0, max: 2000, integer: true })
 			},
+			/**
+			 * Extra time a soft pause waits for the transcriber to confirm speech
+			 * when `substantiveSpeechMs` elapses on VAD alone. Noise and breaths
+			 * trip VAD without ever producing words; this keeps them from
+			 * interrupting the agent while still yielding to a caller whose words
+			 * Flux is slow to report.
+			 */
+			get vadOnlyGraceMs() {
+				return getNumberEnv('MIMIC_VAD_ONLY_GRACE_MS', 500, { min: 0, max: 5000, integer: true })
+			},
+			/**
+			 * Speak a short filler ("Hmm.", "Let me see.") on a fresh turn when the
+			 * model's first token has not arrived by this deadline. 0 disables it.
+			 */
+			get latencyFillerMs() {
+				return getNumberEnv('MIMIC_LATENCY_FILLER_MS', 1000, { min: 0, max: 10_000, integer: true })
+			},
 			/** Caller silence before the agent prompts with a follow-up. */
 			silenceIdleMs: 6_000,
+			/** Silence allowed while the caller asked us to hold ("one sec, let me grab my calendar"). */
+			get holdIdleMs() {
+				return getNumberEnv('MIMIC_HOLD_IDLE_MS', 45_000, { min: 1000, max: 300_000, integer: true })
+			},
 			/** Follow-up prompts before the agent closes the call. */
 			maxSilenceFollowUps: 3,
 		},

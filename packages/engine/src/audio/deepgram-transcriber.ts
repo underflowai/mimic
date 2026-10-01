@@ -436,9 +436,13 @@ export function createDeepgramTranscriber(opts?: DeepgramTranscriberConfig) {
 	}
 
 	function configure(options: FluxConfigureOptions) {
-		lifecycle.latestConfigureOptions = options
+		// Merge rather than replace: keyterms and endpointing thresholds are
+		// configured by different parts of the engine, and the latest-wins
+		// queue plus reconnect replay would otherwise drop whichever came first.
+		const merged: FluxConfigureOptions = { ...(lifecycle.latestConfigureOptions ?? {}), ...options }
+		lifecycle.latestConfigureOptions = merged
 		if (!socket || socket.readyState !== WebSocket.OPEN) return
-		enqueueConfigureLatest(options)
+		enqueueConfigureLatest(merged)
 	}
 
 	function sendAudio(audioBytes: Buffer) {

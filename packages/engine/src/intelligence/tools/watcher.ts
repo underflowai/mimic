@@ -425,7 +425,7 @@ export async function watchForToolAction(client: OpenAI, input: ToolWatcherInput
 			{
 				model: watcher.model,
 				max_output_tokens: watcher.maxOutputTokens,
-				reasoning: { effort: watcher.reasoningEffort },
+				...(watcher.reasoningEffort ? { reasoning: { effort: watcher.reasoningEffort } } : {}),
 				instructions: systemPrompt,
 				input: userParts.join('\n'),
 				text: { format: { type: 'json_schema', ...responseSchema.json_schema } },

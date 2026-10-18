@@ -36,7 +36,41 @@ export type WebSocketConstructor = {
 export type Voice = 'female' | 'male'
 
 /**
- * A caller-owned system prompt for the voice agent. See {@link CallOptions.persona}.
+ * Who the agent is and what it is trying to do. Written once, reused for
+ * every call. Get one from {@link Mimic.compile} or write it yourself, then
+ * pass it as {@link CallOptions.prompt}. It is used verbatim and never
+ * recompiled; per-call `data`, `extract`, and `recipient` are appended to it
+ * at runtime.
+ */
+export interface Prompt {
+	/** What the agent is trying to accomplish, in a sentence or two. Judges whether a call succeeded. */
+	goal: string
+	/** The agent's system prompt. Used verbatim; max 48,000 characters. */
+	systemPrompt: string
+	/** Per-turn speaking guidance. {@link Mimic.compile} fills this in; optional for hand-written prompts. */
+	turnControlBlock?: string | null
+	/** Name the agent goes by on the call. Defaults to the voice's name (Aurora / Arlo). */
+	agentName?: string
+}
+
+/** Options for {@link Mimic.compile}: the job, not any one call. */
+export interface CompileOptions {
+	/** What the agent should accomplish. */
+	goal: string
+	/** Background the agent can rely on. See {@link CallOptions.context}. */
+	context?: string
+	/** Tools the agent will have. Only their names, descriptions, and parameters are used here. */
+	tools?: Record<string, ToolInput>
+	/** Voice the prompt is written for. Defaults to `'female'`. */
+	voice?: Voice
+	/** Whether the agent should proactively disclose it is AI. Defaults to `true`. */
+	aiDisclosure?: boolean
+	/** `'phone'` (default) or `'web'`. Web prompts avoid phone language. */
+	channel?: CallChannel
+}
+
+/**
+ * @deprecated Use {@link Prompt} with {@link CallOptions.prompt}. Still accepted.
  */
 export interface Persona {
 	/** Full system prompt for the voice agent. Used verbatim; max 48,000 characters. */
@@ -98,11 +132,24 @@ export interface ToolSchema {
 
 // ── Call options ───────────────────────────────────────────────────────
 
+/** How the other person joins the call. */
+export type CallChannel = 'phone' | 'web'
+
 /**
- * Options for making a voice call via {@link Mimic.call}.
- *
- * @typeParam T - Shape of the structured data to extract from the call.
- *   Inferred from the `extract` Zod schema. Defaults to `{}`.
+ * What a browser needs to join a web call. Pass both to `livekit-client`:
+ * `await room.connect(url, token)`.
+ */
+export interface WebJoin {
+	/** LiveKit server URL. */
+	url: string
+	/** Join token scoped to this call's room. Valid for one hour. */
+	token: string
+}
+
+/**
+ * Options for making a voice call via {@link Mimic.call}. Pass either a
+ * `goal` (Mimic compiles a prompt from it and caches the result) or a
+ * `prompt` you own (used verbatim, never recompiled).
  *
  * @example
  * ```typescript
@@ -121,21 +168,22 @@ export interface ToolSchema {
  * // result.data.notes → string | null
  * ```
  */
-/** How the other person joins the call. */
-export type CallChannel = 'phone' | 'web'
+export type CallOptions = CallOptionsBase &
+	(
+		| {
+				/** What the agent should accomplish. Compiled into a prompt once per distinct goal, then cached. */
+				goal: string
+				prompt?: undefined
+		  }
+		| {
+				/** A prompt you own, from {@link Mimic.compile} or hand-written. Used verbatim. */
+				prompt: Prompt
+				goal?: undefined
+		  }
+	)
 
-/**
- * What a browser needs to join a web call. Pass both to `livekit-client`:
- * `await room.connect(url, token)`.
- */
-export interface WebJoin {
-	/** LiveKit server URL. */
-	url: string
-	/** Join token scoped to this call's room. Valid for one hour. */
-	token: string
-}
-
-export interface CallOptions {
+/** Everything about a call other than how the agent is defined. */
+export interface CallOptionsBase {
 	/**
 	 * `'phone'` (default) dials `to`. `'web'` places nobody: the API returns a
 	 * {@link WebJoin} on `call.web` and the person joins from a browser.
@@ -143,8 +191,6 @@ export interface CallOptions {
 	channel?: CallChannel
 	/** Phone number to call (E.164 format, e.g. `'+15551234567'`). Required for phone calls. */
 	to?: string
-	/** What the agent should accomplish on the call. */
-	goal: string
 	/** Tools the agent can use. Keys are tool names. */
 	tools?: Record<string, ToolInput>
 	/** Voice persona. Defaults to `'female'`. */
@@ -169,12 +215,9 @@ export interface CallOptions {
 	 */
 	context?: string
 	/**
-	 * Structured data the agent should confirm or collect on the call.
-	 * These become fields the agent walks through in conversation.
-	 *
-	 * Only the shape (field names, which fields are supplied, valid options)
-	 * affects the compiled prompt; the values are injected per call. Calling
-	 * fifty people with the same fields and different values compiles once.
+	 * Facts for this call: what the agent should confirm, use, or collect.
+	 * Appended to the prompt at runtime, so they never cause a recompile;
+	 * fifty calls with fifty different values share one prompt.
 	 *
 	 * @example
 	 * ```typescript
@@ -196,21 +239,8 @@ export interface CallOptions {
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
 	/**
-	 * Persona mode: supply the voice agent's system prompt directly and skip
-	 * goal compilation. For callers that already maintain their own identity
-	 * (e.g. a personal agent phoning its own user), compilation would only
-	 * dilute the persona and add latency. `goal` is still required — the
-	 * result extractor uses it as its rubric. `context`, `data`, and
-	 * `recipient` are stored but not woven into the prompt; put anything the
-	 * agent must know in `systemPrompt`.
-	 *
-	 * @example
-	 * ```typescript
-	 * persona: {
-	 *   systemPrompt: 'You are Ripple, Ola's assistant. ...',
-	 *   agentName: 'Ripple',
-	 * }
-	 * ```
+	 * @deprecated Pass a {@link Prompt} as `prompt` instead; `goal` moves inside
+	 * it. `persona` with a top-level `goal` is still accepted and behaves the same.
 	 */
 	persona?: Persona
 	/**
@@ -219,10 +249,11 @@ export interface CallOptions {
 	 */
 	webhook?: string
 	/**
-	 * What to extract from the call. Pass a Zod object schema — types
+	 * What you want back from the call. Pass a Zod object schema — types
 	 * describe known values in `result.data`. Every field can also be null
 	 * when the call did not establish a value, even if the input schema is nonnullable.
-	 * Use `.describe()` on each field to tell the agent what to extract.
+	 * Use `.describe()` on each field so the agent knows what to find out.
+	 * Shown to the agent at runtime; changing it never recompiles the prompt.
 	 *
 	 * @example
 	 * ```typescript

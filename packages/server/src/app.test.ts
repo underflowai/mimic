@@ -63,6 +63,30 @@ describe('POST /calls channel validation', () => {
 		}
 	})
 
+	it('requires a goal, from the body or from an owned prompt', async () => {
+		let res = await postCall({ to: '+15551234567' })
+		assert.equal(res.status, 400)
+		assert.match(res.body.error ?? '', /goal is required/)
+
+		res = await postCall({ to: '+15551234567', prompt: { systemPrompt: 'You are Casey.' } })
+		assert.equal(res.status, 400)
+		assert.match(res.body.error ?? '', /prompt\.goal \(or goal\) is required/)
+
+		res = await postCall({ to: '+15551234567', prompt: { goal: 'Say hi', systemPrompt: '  ' } })
+		assert.equal(res.status, 400)
+		assert.match(res.body.error ?? '', /prompt\.systemPrompt must not be empty/)
+	})
+
+	it('accepts an owned prompt, and the older persona spelling, as far as the database', async () => {
+		for (const body of [
+			{ to: '+15551234567', prompt: { goal: 'Say hi', systemPrompt: 'You are Casey.', turnControlBlock: 'Be brief.' } },
+			{ to: '+15551234567', goal: 'Say hi', persona: { systemPrompt: 'You are Casey.', agentName: 'Casey' } },
+		]) {
+			const res = await postCall(body)
+			assert.notEqual(res.status, 400, JSON.stringify(body))
+		}
+	})
+
 	it('does not require a number for web calls', async () => {
 		// Validation passes; the handler then reaches the database, which this
 		// environment does not have. Anything other than the `to` 400 proves the point.

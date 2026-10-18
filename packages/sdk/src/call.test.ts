@@ -198,6 +198,80 @@ describe('Mimic.call', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Owning the prompt
+// ---------------------------------------------------------------------------
+
+describe('Prompts', () => {
+	const prompt = {
+		goal: 'Confirm the appointment',
+		systemPrompt: 'You are Casey, calling for Greenwood Medical.',
+		turnControlBlock: 'Answer directly.',
+		agentName: 'Casey',
+	}
+
+	it('compile() posts the job and returns the prompt without storing anything', async () => {
+		let compileBody: Record<string, unknown> | null = null
+		const fetchImpl: typeof fetch = async (input, init) => {
+			if (String(input).endsWith('/api/v1/prompts/compile') && init?.method === 'POST') {
+				compileBody = JSON.parse(String(init.body)) as Record<string, unknown>
+				return jsonResponse(prompt)
+			}
+			return jsonResponse({ error: 'not found' }, 404)
+		}
+		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchImpl })
+		const checkCalendar = tool({
+			description: 'Check slots',
+			parameters: z.object({ date: z.string().describe('Date to check') }),
+			run: async () => 'ok',
+		})
+
+		const result = await mimic.compile({
+			goal: 'Confirm the appointment',
+			context: 'Greenwood',
+			tools: { checkCalendar },
+		})
+		assert.deepEqual(result, prompt)
+
+		const sent = compileBody as Record<string, unknown> | null
+		assert.ok(sent)
+		assert.equal(sent.goal, 'Confirm the appointment')
+		assert.equal(sent.context, 'Greenwood')
+		const tools = sent.tools as Array<{ name: string; description: string }>
+		assert.equal(tools[0]?.name, 'checkCalendar')
+		assert.equal(tools[0]?.description, 'Check slots')
+	})
+
+	it('a call made with a prompt sends it verbatim and no goal', async () => {
+		let createBody: Record<string, unknown> | null = null
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = String(input)
+			if (url.endsWith('/api/v1/calls') && init?.method === 'POST') {
+				createBody = JSON.parse(String(init.body)) as Record<string, unknown>
+				return jsonResponse({ id: 'call_1', status: 'pending' }, 201)
+			}
+			if (url.includes('/api/v1/calls/call_1')) return jsonResponse(completedCall)
+			return jsonResponse({ error: 'not found' }, 404)
+		}
+		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchImpl, WebSocket: null })
+		const call = mimic.call({
+			to: '+15551234567',
+			prompt,
+			data: { appointmentTime: '2pm' },
+			extract: z.object({ confirmed: z.boolean().describe('whether confirmed') }),
+			pollIntervalMs: 1,
+		})
+		await call.result
+
+		const sent = createBody as Record<string, unknown> | null
+		assert.ok(sent)
+		assert.deepEqual(sent.prompt, prompt)
+		assert.equal('goal' in sent && sent.goal !== undefined, false)
+		assert.deepEqual(sent.data, { appointmentTime: '2pm' })
+		assert.deepEqual(sent.extract, { confirmed: { type: 'boolean', description: 'whether confirmed' } })
+	})
+})
+
+// ---------------------------------------------------------------------------
 // Web calls
 // ---------------------------------------------------------------------------
 

@@ -38,7 +38,6 @@ const compiled = await compileGoal({
 	voice: 'female',
 	context,
 	tools: [],
-	results: {},
 	aiDisclosure: false,
 })
 

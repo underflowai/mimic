@@ -112,10 +112,13 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		}
 
 		const agentConfig = agentRowToConfig(agent)
+		// Calls created before `api_calls.results` existed carry their fields on the agent row.
+		const results = (call.results ?? agent.results) as Record<string, unknown>
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(
 			agentConfig,
 			call.callContext as Record<string, string> | undefined,
 			call.callData as Record<string, unknown> | null,
+			results,
 		)
 
 		let orchestratorRef: Awaited<ReturnType<typeof createCallOrchestrator>> | null = null
@@ -227,7 +230,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 				const extraction = await extractCallResult(openai, {
 					goal: agent.goal,
 					transcript: extractionTranscript,
-					results: agent.results as Record<string, unknown>,
+					results,
 					toolCalls: toolCallRecords,
 				})
 

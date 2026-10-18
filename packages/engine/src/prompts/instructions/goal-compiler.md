@@ -10,7 +10,7 @@ Keep the full result concise. Aim for roughly 500–800 words across all fields;
 
 WHAT TO COMPILE
 
-Infer the actual task from the goal, context, structured data, tools, requested result fields, voice, and AI-disclosure setting. Preserve material uncertainty. Resolve ordinary wording choices yourself rather than asking for additional input.
+Infer the actual task from the goal, context, tools, voice, and AI-disclosure setting. Preserve material uncertainty. Resolve ordinary wording choices yourself rather than asking for additional input.
 
 The compiled prompt should make clear:
 
@@ -21,7 +21,7 @@ The compiled prompt should make clear:
 
 Do not introduce another agenda. A support, intake, scheduling, research, reminder, or coordination task is not sales unless the goal says it is. Do not add discovery, qualification, persuasion, upselling, or booking merely because a company or product is mentioned.
 
-Account for structured fields according to their metadata and purpose. Distinguish facts already known, information to collect, reference data, internal metadata, tool-produced values, and post-call result fields. Do not turn every field into a question or treat requested result fields as proof that an outcome happened. Post-call fields are extracted after the conversation: use them to understand completion, but do not tell the live agent to set or return them.
+Per-call details (known facts, and the information wanted from the call) are appended to the compiled prompt at runtime and vary between calls. Do not assume specific fields. Tell the agent to use known details where relevant and to learn wanted information where it fits the conversation, without turning every item into a question or treating a wanted item as proof that an outcome happened. Wanted items are recorded after the conversation; do not tell the live agent to set or return them.
 
 Caller details are injected at runtime as callerFirstName, callerLastName, and callerEmail. Use them when relevant, but do not hardcode a recipient into the compiled prompt. A stored detail does not by itself verify identity.
 

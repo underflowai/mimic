@@ -85,6 +85,30 @@ describe('buildOrchestratorConfigFromAgent', () => {
 		assert.equal(orchestratorConfig.persona?.firstName, 'Arlo')
 	})
 
+	it('appends the per-call extract fields to the system prompt without touching the compiled text', () => {
+		const typed = buildOrchestratorConfigFromAgent(agent(), undefined, null, {
+			confirmed: { type: 'boolean', description: 'whether the appointment was confirmed' },
+			notes: { type: 'string', description: 'anything to pass along', optional: true },
+		})
+		assert.match(typed.orchestratorConfig.systemPrompt, /^You are Casey\./)
+		assert.match(typed.orchestratorConfig.systemPrompt, /To find out on this call, where it comes up naturally/)
+		assert.match(
+			typed.orchestratorConfig.systemPrompt,
+			/- confirmed \(boolean\): whether the appointment was confirmed/,
+		)
+		assert.match(typed.orchestratorConfig.systemPrompt, /- notes \(string, optional\): anything to pass along/)
+
+		// The plain `{ field: description }` form still works.
+		const plain = buildOrchestratorConfigFromAgent(agent(), undefined, null, { mood: 'how they sounded' })
+		assert.match(plain.orchestratorConfig.systemPrompt, /- mood: how they sounded/)
+
+		// Nothing wanted, nothing appended.
+		assert.equal(
+			buildOrchestratorConfigFromAgent(agent(), undefined, null, {}).orchestratorConfig.systemPrompt,
+			'You are Casey.',
+		)
+	})
+
 	it('injects the per-call data values into the system prompt, so the shared compiled prompt can refer to them by name', () => {
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent(), undefined, {
 			appointmentTime: 'Tuesday 3 PM',
@@ -94,7 +118,7 @@ describe('buildOrchestratorConfigFromAgent', () => {
 		})
 		const prompt = orchestratorConfig.systemPrompt
 		assert.match(prompt, /^You are Casey\./)
-		assert.match(prompt, /<data>[\s\S]*appointmentTime: Tuesday 3 PM[\s\S]*<\/data>/)
+		assert.match(prompt, /Details for this call:\n<data>[\s\S]*appointmentTime: Tuesday 3 PM[\s\S]*<\/data>/)
 		assert.match(prompt, /provider: Dr\. Patel/)
 		assert.match(prompt, /preference: MISSING \(valid options: morning, afternoon\)/)
 		assert.match(prompt, /1\. date: May 2/)
@@ -136,7 +160,7 @@ describe('buildOrchestratorConfigFromAgent', () => {
 })
 
 describe('compileGoal', () => {
-	it('preserves names and field metadata while supplying runtime capabilities', async () => {
+	it('compiles the job, not the call: data and extract fields never reach the compiler', async () => {
 		const compiled = {
 			compiledPrompt: 'You are Al. The caller is Alex in Albany. Contact Al at Al@example.com.',
 			speechTags: 'Speak concisely.',
@@ -152,21 +176,6 @@ describe('compileGoal', () => {
 			voice: 'male',
 			context: {},
 			tools: [],
-			results: { booked: 'Whether a booking was confirmed.' },
-			data: {
-				appointmentTime: 'Tuesday 3 PM',
-				notes: null,
-				preference: {
-					value: 'morning',
-					validOptions: ['morning', 'afternoon'],
-					required: false,
-					optional: true,
-					nullable: true,
-					condition: 'Collect only when rescheduling',
-					source: 'caller',
-				},
-				visits: [{ date: 'May 2', reason: 'cleaning' }],
-			},
 		}
 		const result = await compileGoal(input, client)
 		assert.match(result.systemPrompt, /The caller is Alex in Albany\. Contact Al at Al@example\.com\./)
@@ -184,21 +193,11 @@ describe('compileGoal', () => {
 		const userInput = request.messages.find((message) => message.role === 'user')!.content
 		assert.match(userInput, /webSearch \(read\)/)
 		assert.match(userInput, /only break and spell SSML tags pass through/)
-		assert.match(userInput, /"required":false,"optional":true,"nullable":true/)
-		assert.match(userInput, /Collect only when rescheduling/)
-		assert.match(userInput, /"source":"caller"/)
-		assert.match(userInput, /Requested post-call result fields \(desired extraction, not evidence/)
 
-		// The compiler sees which fields exist and which are supplied, never the
-		// values: one compiled prompt serves every call with this data shape.
-		assert.match(userInput, /appointmentTime: provided \(text\)/)
-		assert.match(userInput, /notes: missing/)
-		assert.match(userInput, /preference: provided \(valid options: morning, afternoon; metadata: /)
-		assert.match(
-			userInput,
-			/visits: list of items, each with:\n {2}date: provided \(text\)\n {2}reason: provided \(text\)/,
-		)
-		assert.doesNotMatch(userInput, /Tuesday 3 PM|May 2|cleaning/)
-		assert.match(userInput, /supplied per call at runtime in a <data> block/)
+		// Per-call details are a runtime concern. The compiler is told they exist
+		// and vary, and sees no fields, so one compiled prompt serves every call.
+		assert.match(userInput, /appended to the compiled prompt at runtime and differ between calls/)
+		assert.doesNotMatch(userInput, /Structured data fields|Requested post-call result fields/)
+		assert.doesNotMatch(compilerInstructions, /structured data|requested result fields/i)
 	})
 })

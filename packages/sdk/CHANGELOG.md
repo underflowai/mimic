@@ -4,11 +4,29 @@
 
 Added
 
+- `mimic.compile(options)` writes the agent's prompt from a goal (plus
+  `context`, `tools`, `voice`, `aiDisclosure`, `channel`) and returns it as a
+  `Prompt` (`{ goal, systemPrompt, turnControlBlock, agentName }`). Nothing is
+  stored; keep and edit the prompt as you like.
+- `CallOptions.prompt`: pass a `Prompt` instead of `goal`. The prompt is used
+  verbatim and never recompiled. `CallOptions` now requires exactly one of
+  `goal` or `prompt`. New exports: `Prompt`, `CompileOptions`, `CallOptionsBase`.
 - Web calls. Pass `channel: 'web'` with no `to` and the person joins from a
   browser instead of being dialed. `call.web` resolves with `{ url, token }`
   (a one-hour LiveKit token scoped to the call's room) as soon as the call is
   created, or `null` for phone calls. `to` is now optional in `CallOptions`
   and required only for phone calls; `ApiCall` gains `channel`.
+
+Changed
+
+- `data` and `extract` no longer shape the compiled prompt. They are appended
+  to it at runtime, so changing the fields you confirm or ask for never
+  triggers a recompile. Compiled prompts recompile once to pick this up.
+
+Deprecated
+
+- `persona`. Use `prompt` (with `goal` inside it). `persona` plus a top-level
+  `goal` is still accepted and behaves the same.
 
 Removed
 

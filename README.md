@@ -29,7 +29,7 @@ Your code → Mimic API → LiveKit SIP → Phone call
                        → Cartesia Sonic (speak)
 ```
 
-The SDK sends a goal to the API server. The server compiles it into a voice agent prompt, dials the phone number via SIP, runs a real-time voice engine, and returns structured results when the call ends. Tool functions execute locally in your process — your secrets never leave your machine.
+Three things: the **engine** runs the conversation; the **prompt** says who the agent is and what it is trying to do; a **call** is one conversation (a number or a browser, a name, some facts, what you want back). The SDK sends a goal and the server compiles a prompt from it, or you bring a prompt of your own. The server dials the number via SIP, runs a real-time voice engine, and returns structured results when the call ends. Tool functions execute locally in your process — your secrets never leave your machine.
 
 ## Quick start
 
@@ -161,12 +161,36 @@ call failed if nobody arrives. Everything else (tools, `extract`, events,
 `result`) works the same as a phone call. Full page in
 [`examples/web-call.ts`](examples/web-call.ts).
 
+## Owning the prompt
+
+`mimic.call({ goal })` compiles a prompt for you and caches it. When you want
+to see that prompt, edit it, or keep it under version control, make it a
+separate step:
+
+```typescript
+const prompt = await mimic.compile({
+	goal: 'Confirm the appointment and note anything the office should know',
+	context: 'You work at Greenwood Medical. 24-hour cancellation notice.',
+	tools: { checkCalendar },
+})
+// { goal, systemPrompt, turnControlBlock, agentName } — yours to keep and edit
+
+const call = mimic.call({ to: '+15551234567', prompt, data: { appointmentTime: '2pm' } })
+```
+
+Nothing is stored by `compile()`; the prompt is used verbatim on every call
+you pass it to. Either way, `data`, `extract`, and `recipient` belong to the
+call: they are shown to the agent at runtime and never trigger a recompile.
+
 ## Options reference
 
 ```typescript
 mimic.call({
-  // Required
-  goal: 'What the agent should do',
+  // The agent: one of
+  goal: 'What the agent should do',   // compiled into a prompt once, then cached
+  prompt,                             // from mimic.compile() or hand-written; used verbatim
+
+  // Who to call
   to: '+15551234567',           // E.164 phone number; omit for web calls
   channel: 'phone',             // 'phone' (default) or 'web' (browser joins via call.web)
 
@@ -187,9 +211,6 @@ mimic.call({
   voice: 'female',              // 'female' (Aurora) or 'male' (Arlo)
   aiDisclosure: true,           // Identify the agent as AI; recording notice is separate
   ambience: true,               // Office background noise
-
-  // Persona mode — use your own system prompt, skip goal compilation
-  persona: { systemPrompt: '...', agentName: 'Ripple' },
 
   // Completion webhook (call.completed)
   webhook: 'https://example.com/mimic/completed',

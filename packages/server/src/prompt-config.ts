@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { describeDataShape } from './call-data.js'
 import type { CallChannel } from './db/schema.js'
 import type { GoalToolDefinition } from './goal-compiler.js'
 
@@ -7,7 +6,8 @@ import type { GoalToolDefinition } from './goal-compiler.js'
 // v3: recipient removed from the compiler input (runtime-injected instead).
 // v4: compact caller-facing compiler; runtime owns situational cadence.
 // v5: data values masked from the compiler (shape only); runtime injects them per call.
-export const compilerRevision = 'voice-prompts-v5'
+// v6: data and extract fields removed from the compiler entirely; both are per-call and appended at runtime.
+export const compilerRevision = 'voice-prompts-v6'
 
 export interface ApiToolInput {
 	name: string
@@ -40,13 +40,18 @@ function stableStringify(value: unknown): string {
 	return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`
 }
 
+/** A caller-owned prompt, used verbatim instead of compiling the goal. */
+export interface OwnedPrompt {
+	systemPrompt: string
+	turnControlBlock?: string
+	agentName?: string
+}
+
 /**
- * Everything that shapes the compiled prompt. The recipient is deliberately
- * absent: the compiled prompt is recipient-agnostic and the runtime injects
- * caller details into every turn's context block, so one goal compiles once
- * no matter how many people it is used to call. Likewise only the *shape* of
- * `data` is part of the key (see `describeDataShape`); the values are stored
- * per call and injected at runtime.
+ * Everything that shapes the agent: the job, not the call. Recipient,
+ * per-call `data`, and the `extract` fields are deliberately absent; all
+ * three are stored on the call and appended to the prompt at runtime, so one
+ * agent serves every call made with it however those vary.
  */
 export interface PromptConfig {
 	goal: string
@@ -54,12 +59,11 @@ export interface PromptConfig {
 	/** Omitted or `phone` leaves the hash unchanged; `web` compiles its own agent. */
 	channel?: CallChannel
 	context?: string
-	data?: Record<string, unknown>
 	tools: unknown[]
-	results: unknown
 	aiDisclosure?: boolean
 	ambience?: boolean
-	persona?: { systemPrompt: string; agentName?: string }
+	/** When set, nothing is compiled: the agent is this prompt, keyed by its text. */
+	prompt?: OwnedPrompt
 	webhook?: string
 }
 
@@ -69,13 +73,11 @@ export function hashPromptConfig(apiKeyId: string, config: PromptConfig, revisio
 		goal: config.goal,
 		voice: config.voice,
 		context: config.context ?? '',
-		dataShape: describeDataShape(config.data),
 		tools: config.tools,
-		results: config.results,
 		aiDisclosure: config.aiDisclosure,
 		ambience: config.ambience,
 		...(config.channel === 'web' && { channel: config.channel }),
-		...(config.persona ? { persona: config.persona } : { compilerRevision: revision }),
+		...(config.prompt ? { prompt: config.prompt } : { compilerRevision: revision }),
 		...(config.webhook && { webhook: config.webhook }),
 	})
 	return createHash('sha256').update(payload).digest('hex')

@@ -1,7 +1,16 @@
 import { ApiError } from './errors.js'
 import { ZodObject, type ZodType } from 'zod'
 
-import type { ApiCall, CallChannel, CreateCallResponse, MimicOptions, Persona, ToolSchema, Voice } from './types.js'
+import type {
+	ApiCall,
+	CallChannel,
+	CreateCallResponse,
+	MimicOptions,
+	Persona,
+	Prompt,
+	ToolSchema,
+	Voice,
+} from './types.js'
 
 function serializeExtractSchema(
 	schema?: ZodObject<Record<string, ZodType>>,
@@ -76,8 +85,23 @@ export class MimicClient {
 		return JSON.stringify({ type: 'auth', token: this.apiKey })
 	}
 
-	async createCall(params: {
+	async compilePrompt(params: {
 		goal: string
+		context?: string
+		tools?: ToolSchema[]
+		voice?: Voice
+		aiDisclosure?: boolean
+		channel?: CallChannel
+	}): Promise<Prompt> {
+		return this.request<Prompt>('/api/v1/prompts/compile', {
+			method: 'POST',
+			body: JSON.stringify(params),
+		})
+	}
+
+	async createCall(params: {
+		goal?: string
+		prompt?: Prompt
 		channel?: CallChannel
 		to?: string
 		voice?: Voice
@@ -99,6 +123,7 @@ export class MimicClient {
 				channel: params.channel,
 				to: params.to,
 				goal: params.goal,
+				prompt: params.prompt,
 				voice: params.voice ?? 'female',
 				userTimezone: params.userTimezone,
 				context: params.context,

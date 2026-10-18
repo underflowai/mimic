@@ -2,7 +2,8 @@ import { MimicCall } from './call.js'
 import { MimicClient } from './client.js'
 import { MimicError } from './errors.js'
 import type { McpConnectionOptions } from './mcp.js'
-import type { CallOptions, MimicOptions, ToolInput } from './types.js'
+import { introspectTools } from './tools.js'
+import type { CallOptions, CompileOptions, MimicOptions, Prompt, ToolInput } from './types.js'
 
 /**
  * The Mimic client. Create one with your API key, then make calls.
@@ -69,6 +70,50 @@ export class Mimic {
 	}
 
 	/**
+	 * Write the agent's prompt from a goal, once. Nothing is stored: keep the
+	 * returned {@link Prompt} (in your repo, your database, wherever), edit it
+	 * if you like, and pass it to {@link Mimic.call} as `prompt`. Calls made
+	 * with it never recompile, whatever `data`, `extract`, or `recipient` they carry.
+	 *
+	 * @example
+	 * ```typescript
+	 * const prompt = await mimic.compile({
+	 *   goal: 'Confirm the appointment and note anything the office should know',
+	 *   context: 'Greenwood Medical. 24-hour cancellation notice.',
+	 *   tools: { checkCalendar },
+	 * })
+	 * // prompt.systemPrompt, prompt.turnControlBlock, prompt.agentName
+	 *
+	 * mimic.call({ to: '+15551234567', prompt, data: { appointmentTime: '2pm' } })
+	 * ```
+	 */
+	async compile(options: CompileOptions): Promise<Prompt> {
+		return this.client.compilePrompt({
+			goal: options.goal,
+			context: options.context,
+			tools: options.tools ? introspectTools(options.tools) : undefined,
+			voice: options.voice,
+			aiDisclosure: options.aiDisclosure,
+			channel: options.channel,
+		})
+	}
+
+	/**
+	 * Connect to an MCP server and discover its tools. Returns a tools
+	 * record that can be passed directly to `.call()`.
+	 *
+	 * @example
+	 * ```typescript
+	 * const tools = await mimic.mcp('http://localhost:3000/mcp')
+	 * mimic.call({ to: '...', goal: '...', tools })
+	 * ```
+	 */
+	async mcp(url: string, options?: McpConnectionOptions): Promise<Record<string, ToolInput>> {
+		const { connectMcp } = await import('./mcp.js')
+		return connectMcp(url, options)
+	}
+
+	/**
 	 * Make a voice call. Returns a {@link MimicCall} that streams events
 	 * and resolves with a typed result.
 	 *
@@ -78,7 +123,7 @@ export class Mimic {
 	 * ```typescript
 	 * const call = mimic.call<{ confirmed: boolean }>({
 	 *   to: '+15551234567',
-	 *   goal: 'Confirm the appointment',
+	 *   goal: 'Confirm the appointment', // or `prompt` from mimic.compile()
 	 *   tools: { checkCalendar },
 	 *   extract: z.object({
 	 *     confirmed: z.boolean().describe('whether confirmed'),
@@ -95,21 +140,6 @@ export class Mimic {
 	 * const result = await call.result
 	 * ```
 	 */
-	/**
-	 * Connect to an MCP server and discover its tools. Returns a tools
-	 * record that can be passed directly to `.call()`.
-	 *
-	 * @example
-	 * ```typescript
-	 * const tools = await mimic.mcp('http://localhost:3000/mcp')
-	 * mimic.call({ to: '...', goal: '...', tools })
-	 * ```
-	 */
-	async mcp(url: string, options?: McpConnectionOptions): Promise<Record<string, ToolInput>> {
-		const { connectMcp } = await import('./mcp.js')
-		return connectMcp(url, options)
-	}
-
 	call<T extends Record<string, unknown> = Record<string, unknown>>(options: CallOptions): MimicCall<T> {
 		return new MimicCall<T>({
 			client: this.client,
@@ -131,13 +161,16 @@ export type {
 	CallEvent,
 	CallEventMap,
 	CallOptions,
+	CallOptionsBase,
 	CallResult,
+	CompileOptions,
 	DoneEvent,
 	ErrorEvent,
 	ExtractedData,
 	MimicOptions,
 	MimicTool,
 	Persona,
+	Prompt,
 	SpeechEvent,
 	ToolCallEvent,
 	ToolErrorEvent,

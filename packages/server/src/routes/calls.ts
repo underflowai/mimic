@@ -44,7 +44,14 @@ calls.post('/', async (c) => {
 		channel?: CallChannel
 		/** E.164 phone number. Required for phone calls; ignored for web calls. */
 		to?: string
-		goal: string
+		/** What the agent is trying to do. Compiled into a prompt (and cached) unless `prompt` is supplied. */
+		goal?: string
+		/**
+		 * A prompt the caller owns, from `POST /prompts/compile` or hand-written.
+		 * Used verbatim, never recompiled. `goal` here is the extractor's rubric
+		 * and falls back to the top-level `goal`.
+		 */
+		prompt?: { goal?: string; systemPrompt: string; turnControlBlock?: string | null; agentName?: string }
 		voice?: 'female' | 'male'
 		userTimezone?: string
 		context?: string
@@ -56,13 +63,7 @@ calls.post('/', async (c) => {
 		extract?: Record<string, unknown>
 		ambience?: boolean
 		idempotencyKey?: string
-		/**
-		 * Self-call mode: supply the voice agent's system prompt directly and
-		 * skip goal compilation entirely. For callers that maintain their own
-		 * persona (e.g. a personal agent phoning its own user), compilation
-		 * would only dilute the identity and add latency. `goal` is still
-		 * required — the result extractor uses it as its rubric.
-		 */
+		/** @deprecated Older spelling of `prompt` without `goal`/`turnControlBlock`. Still accepted. */
 		persona?: { systemPrompt: string; agentName?: string }
 		/** Optional completion webhook (event: call.completed) for this agent config. */
 		webhook?: string
@@ -91,6 +92,28 @@ calls.post('/', async (c) => {
 		return c.json({ error: error instanceof Error ? error.message : 'Invalid tool or timezone configuration' }, 400)
 	}
 
+	// A caller-owned prompt is used as-is. `persona` is the older spelling.
+	const owned = body.prompt ?? (body.persona ? { ...body.persona, goal: undefined, turnControlBlock: null } : null)
+	const goal = (owned?.goal ?? body.goal)?.trim() ?? ''
+	if (!goal) return c.json({ error: owned ? 'prompt.goal (or goal) is required' : 'goal is required' }, 400)
+
+	const ownedPrompt = owned
+		? {
+				systemPrompt: owned.systemPrompt?.trim() ?? '',
+				turnControlBlock: owned.turnControlBlock?.trim() || undefined,
+				agentName: owned.agentName?.trim() || undefined,
+			}
+		: null
+	if (ownedPrompt && !ownedPrompt.systemPrompt) {
+		return c.json({ error: 'prompt.systemPrompt must not be empty' }, 400)
+	}
+	if (ownedPrompt && ownedPrompt.systemPrompt.length > 48_000) {
+		return c.json({ error: 'prompt.systemPrompt exceeds 48000 characters' }, 400)
+	}
+	if (body.webhook && !/^https?:\/\//.test(body.webhook)) {
+		return c.json({ error: 'webhook must be an http(s) URL' }, 400)
+	}
+
 	const db = getDb()
 
 	if (body.idempotencyKey) {
@@ -102,37 +125,23 @@ calls.post('/', async (c) => {
 		if (existing) return c.json(await createdBody(existing, body.recipient?.firstName))
 	}
 
-	if (!body.goal?.trim()) return c.json({ error: 'goal is required' }, 400)
-
-	const personaPrompt = body.persona?.systemPrompt?.trim() ?? ''
-	if (body.persona && !personaPrompt) {
-		return c.json({ error: 'persona.systemPrompt must not be empty' }, 400)
-	}
-	if (personaPrompt.length > 48_000) {
-		return c.json({ error: 'persona.systemPrompt exceeds 48000 characters' }, 400)
-	}
-	if (body.webhook && !/^https?:\/\//.test(body.webhook)) {
-		return c.json({ error: 'webhook must be an http(s) URL' }, 400)
-	}
-
 	const voice = body.voice ?? 'female'
+	const defaultAgentName = voice === 'male' ? 'Arlo' : 'Aurora'
+	// What the caller wants back. Belongs to the call: it is shown to the agent
+	// at runtime and read by the extractor afterward, and never recompiles anything.
 	const results = body.results ?? body.extract ?? {}
 	// Office ambience is for the phone; a browser session defaults to a clean mix.
 	const ambience = channel === 'web' ? (body.ambience ?? false) : body.ambience
 
 	const configHash = hashPromptConfig(apiKey.id, {
-		goal: body.goal,
+		goal,
 		voice,
 		channel,
 		context: body.context,
-		data: body.data,
 		tools,
-		results,
 		aiDisclosure: body.aiDisclosure,
 		ambience,
-		...(personaPrompt && {
-			persona: { systemPrompt: personaPrompt, agentName: body.persona?.agentName },
-		}),
+		...(ownedPrompt && { prompt: ownedPrompt }),
 		...(body.webhook && { webhook: body.webhook }),
 	})
 
@@ -155,22 +164,21 @@ calls.post('/', async (c) => {
 
 	if (cached) {
 		agentId = cached.id
-	} else if (personaPrompt) {
-		// Persona mode: the caller owns the prompt. Store it as-is, ready
-		// to dial — no compilation, no [AGENT_NAME] templating.
+	} else if (ownedPrompt) {
+		// The caller owns the prompt. Store it as-is, ready to dial.
 		const [inserted] = await db
 			.insert(apiAgents)
 			.values({
 				apiKeyId: apiKey.id,
-				name: body.goal.slice(0, 80) || 'persona agent',
-				goal: body.goal,
+				name: goal.slice(0, 80),
+				goal,
 				voice,
 				context: body.context ?? '',
 				tools,
-				results,
 				configHash,
-				systemPrompt: personaPrompt,
-				agentName: body.persona?.agentName?.trim() || (voice === 'male' ? 'Arlo' : 'Aurora'),
+				systemPrompt: ownedPrompt.systemPrompt,
+				turnControlBlock: ownedPrompt.turnControlBlock ?? null,
+				agentName: ownedPrompt.agentName ?? defaultAgentName,
 				ambience: ambience ?? true,
 				webhook: body.webhook ?? null,
 			})
@@ -182,15 +190,14 @@ calls.post('/', async (c) => {
 			.insert(apiAgents)
 			.values({
 				apiKeyId: apiKey.id,
-				name: body.goal.slice(0, 80) || 'voice agent',
-				goal: body.goal,
+				name: goal.slice(0, 80),
+				goal,
 				voice,
 				context: body.context ?? '',
 				tools,
-				results,
 				configHash,
 				systemPrompt: '',
-				agentName: voice === 'male' ? 'Arlo' : 'Aurora',
+				agentName: defaultAgentName,
 				ambience: ambience ?? true,
 				webhook: body.webhook ?? null,
 			})
@@ -242,6 +249,7 @@ calls.post('/', async (c) => {
 				toPhone,
 				callContext,
 				callData,
+				results,
 				idempotencyKey: body.idempotencyKey,
 			})
 			.onConflictDoNothing({ target: [apiCalls.apiKeyId, apiCalls.idempotencyKey] })
@@ -269,6 +277,7 @@ calls.post('/', async (c) => {
 				toPhone,
 				callContext,
 				callData,
+				results,
 				idempotencyKey: null,
 			})
 			.returning()
@@ -284,13 +293,11 @@ calls.post('/', async (c) => {
 		try {
 			if (needsCompilation) {
 				const compiled = await compileGoal({
-					goal: body.goal,
+					goal,
 					voice,
 					channel,
 					context: body.context ?? '',
-					data: body.data,
 					tools,
-					results,
 					aiDisclosure: body.aiDisclosure,
 				})
 

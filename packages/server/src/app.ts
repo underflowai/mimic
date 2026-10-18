@@ -7,6 +7,7 @@ import { childLogger } from './logger.js'
 import { authMiddleware } from './middleware/auth.js'
 import { rateLimitMiddleware } from './middleware/rate-limit.js'
 import { calls } from './routes/calls.js'
+import { prompts } from './routes/prompts.js'
 
 const app = new Hono()
 
@@ -19,6 +20,7 @@ const api = new Hono()
 api.use('*', authMiddleware)
 api.use('*', rateLimitMiddleware)
 api.route('/calls', calls)
+api.route('/prompts', prompts)
 
 app.route('/api/v1', api)
 

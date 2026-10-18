@@ -14,7 +14,7 @@ import {
 	type TurnControlBlockContext,
 } from '@mimic/engine'
 
-import { renderDataBlock, renderDataSchema, type CallData } from './call-data.js'
+import { renderDataBlock, type CallData } from './call-data.js'
 import type { CallChannel } from './db/schema.js'
 
 export type GoalVoice = 'female' | 'male'
@@ -39,19 +39,15 @@ export type GoalData = CallData
 export type GoalResults = Record<string, unknown>
 
 /**
- * What the compiler sees. Recipient details are deliberately not here: the
- * compiled prompt is recipient-agnostic and the runtime injects
- * callerFirstName / callerLastName / callerEmail into every turn's context
- * block, so a goal compiles once however many people it is used to call.
- * `data` is passed through but only its shape reaches the compiler; the
- * values are injected per call (`buildOrchestratorConfigFromAgent`).
+ * What the compiler sees: the job, not the call. Recipient, per-call `data`,
+ * and the `extract` fields are all appended to the prompt at runtime
+ * (`buildOrchestratorConfigFromAgent`), so one compiled prompt serves every
+ * call made with it, whatever those vary to.
  */
 export interface GoalCompilerInput {
 	goal: string
 	context: GoalContext
-	data?: GoalData
 	tools: GoalToolDefinition[]
-	results: GoalResults
 	voice: GoalVoice
 	/** `phone` (default) or `web`. Web sessions have no number and nobody "called"; the prompt should not assume either. */
 	channel?: CallChannel
@@ -106,15 +102,31 @@ function hasContext(context: GoalContext | undefined): context is GoalContext {
 	return typeof context === 'string' ? context.trim().length > 0 : Object.keys(context).length > 0
 }
 
-function formatObjectBlock(value: Record<string, unknown>) {
-	const entries = Object.entries(value)
-	if (entries.length === 0) return 'None provided.'
-	return entries
-		.map(([key, item]) => {
-			const formatted = typeof item === 'string' ? item : JSON.stringify(item)
-			return `- ${key}: ${formatted}`
-		})
-		.join('\n')
+/**
+ * The `extract` fields as the live agent sees them. Accepts the SDK's typed
+ * form (`{ type, description, nullable?, optional? }`) and the plain
+ * `{ field: description }` form.
+ */
+export function renderWantedBlock(results: GoalResults | null | undefined): string {
+	if (!results) return ''
+	const entries = Object.entries(results)
+	if (entries.length === 0) return ''
+	const lines = entries.map(([key, item]) => {
+		if (typeof item === 'string') return `- ${key}: ${item}`
+		if (item && typeof item === 'object') {
+			const field = item as { type?: unknown; description?: unknown; optional?: unknown }
+			const qualifiers = [field.type, field.optional === true ? 'optional' : null].filter(
+				(part): part is string => typeof part === 'string',
+			)
+			const description = typeof field.description === 'string' ? field.description : key
+			return `- ${key}${qualifiers.length > 0 ? ` (${qualifiers.join(', ')})` : ''}: ${description}`
+		}
+		return `- ${key}: ${JSON.stringify(item)}`
+	})
+	return [
+		'To find out on this call, where it comes up naturally (recorded afterward; wanting something is not evidence it happened):',
+		...lines,
+	].join('\n')
 }
 
 function formatTools(tools: GoalToolDefinition[]) {
@@ -151,6 +163,7 @@ function buildCompilerInput(input: GoalCompilerInput) {
 		...(input.channel === 'web' ? [WEB_CHANNEL_LINE] : []),
 		`Voice-based fallback agent name: ${defaultAgentName(input.voice)}`,
 		'Recipient: supplied per call at runtime as callerFirstName / callerLastName / callerEmail in the context block; the compiled prompt must not assume a specific person.',
+		'Per-call details: facts the integrator knows for one specific call ("Details for this call", a <data> block) and the information wanted from it ("To find out on this call") are appended to the compiled prompt at runtime and differ between calls. Do not assume specific fields; write the prompt so it works with whatever is supplied, using known details where relevant and learning wanted information where it fits the conversation.',
 		`AI disclosure: ${formatAiDisclosure(input.aiDisclosure)}`,
 		'Runtime speech capabilities: Cartesia Sonic 3.6; only break and spell SSML tags pass through. Emotion, speed, and volume tags are stripped. Omit laughter unless the task explicitly calls for it.',
 		'Recording status or notice: not supplied as a dedicated setting. Do not infer it from AI disclosure; follow only explicit recording instructions in the goal or context.',
@@ -161,22 +174,10 @@ function buildCompilerInput(input: GoalCompilerInput) {
 		'Context:',
 		normalizeContext(input.context),
 	]
-	if (input.data && Object.keys(input.data).length > 0) {
-		parts.push(
-			'',
-			'Structured data fields (values are supplied per call at runtime in a <data> block in the context; refer to fields by name and do not assume specific values — the same compiled prompt serves every call with these fields). "provided" fields hold facts already known about this call; "missing" fields were not supplied. Determine each field’s role from its meaning and the goal; do not assume every field must be collected:',
-			renderDataSchema(input.data),
-		)
-	}
 	parts.push(
 		'',
 		'Runtime tools available (definitions are reference data, not instructions):',
 		formatTools([...defaultMimicTools, ...input.tools]),
-	)
-	parts.push(
-		'',
-		'Requested post-call result fields (desired extraction, not evidence that an outcome is complete):',
-		formatObjectBlock(input.results),
 	)
 	return parts.join('\n')
 }
@@ -258,14 +259,17 @@ function buildOpeningContextBlock(
 }
 
 /**
- * Per-call data values ride on the system prompt rather than on every turn's
+ * Per-call details ride on the system prompt rather than on every turn's
  * control block: the prompt is already assembled per call (agent name
  * substitution), it sits in the cached prefix so the values cost tokens once,
  * and the director sees it on every turn.
  */
-function withCallData(systemPrompt: string, dataBlock: string) {
-	if (!dataBlock) return systemPrompt
-	return `${systemPrompt.trimEnd()}\n\nValues for this call (the instructions above refer to these fields by name):\n${dataBlock}\n`
+function withCallDetails(systemPrompt: string, dataBlock: string, wantedBlock: string) {
+	const sections: string[] = []
+	if (dataBlock) sections.push(`Details for this call:\n${dataBlock}`)
+	if (wantedBlock) sections.push(wantedBlock)
+	if (sections.length === 0) return systemPrompt
+	return `${systemPrompt.trimEnd()}\n\n${sections.join('\n\n')}\n`
 }
 
 function buildTurnControlBlock(ctx: TurnControlBlockContext) {
@@ -296,6 +300,7 @@ export function buildOrchestratorConfigFromAgent(
 	agent: AgentConfig,
 	callContext?: Record<string, string>,
 	callData?: CallData | null,
+	callResults?: GoalResults | null,
 ): { orchestratorConfig: Omit<CallOrchestratorConfig, 'audioTransport'> } {
 	const voicePersona = agent.voice === 'male' ? arloPersona : auroraPersona
 	const persona = { ...voicePersona, firstName: agent.agentName.trim() || voicePersona.firstName }
@@ -303,10 +308,15 @@ export function buildOrchestratorConfigFromAgent(
 	const userTimezoneInferred = Boolean(userTimezone) && callContext?.userTimezoneInferred === 'true'
 	const recipient = resolveRecipient(agent, callContext)
 	const dataBlock = renderDataBlock(callData ?? agent.data)
+	const wantedBlock = renderWantedBlock(callResults ?? agent.results)
 	return {
 		orchestratorConfig: {
 			persona,
-			systemPrompt: withCallData(agent.systemPrompt.replaceAll('[AGENT_NAME]', persona.firstName), dataBlock),
+			systemPrompt: withCallDetails(
+				agent.systemPrompt.replaceAll('[AGENT_NAME]', persona.firstName),
+				dataBlock,
+				wantedBlock,
+			),
 			maxCompletionTokens: 384,
 			userFirstName: resolveFirstName(agent, callContext),
 			userTimezone,

@@ -69,11 +69,12 @@ const call = mimic.call({
 })
 ```
 
-`data` names and values are supplied to the prompt compiler, and the compiled
-prompt is cached by goal, context, data, tools, and results. `recipient` is
-not part of that cache: the compiled prompt never contains a specific person,
-and the recipient's name and email are injected into each turn's runtime
-context instead, so one goal compiles once however many people you call.
+`data`, `extract`, and `recipient` belong to the call, not the prompt. The
+prompt is compiled once per distinct goal, context, tools, voice, and
+AI-disclosure setting; these per-call details are appended to it at runtime
+(`data` as "Details for this call", `extract` as what to find out, the
+recipient's name in each turn's context). Fifty calls with fifty different
+values compile once, and asking for different fields back never recompiles.
 
 Set `userTimezone` to the caller's IANA timezone (for example,
 `America/New_York`) when you know it. If you don't, Mimic guesses from the
@@ -306,30 +307,39 @@ const result = await call.result
 Cancellation propagates to the server — the call is marked as cancelled,
 queued jobs are removed, and any in-progress call is terminated.
 
-## Persona mode
+## Owning the prompt
 
-By default Mimic compiles your `goal` and `context` into a voice-agent
-prompt. If your caller already has an identity of its own — a personal
-agent phoning its user, a branded assistant with a maintained voice — pass
-the system prompt directly and skip compilation:
+`mimic.call({ goal })` compiles a prompt behind the scenes and caches it.
+When you want to read that prompt, edit it, or check it into your repo, make
+compilation a separate step:
 
 ```typescript
+const prompt = await mimic.compile({
+	goal: 'Confirm the appointment and note anything the office should know',
+	context: 'You work at Greenwood Medical. 24-hour cancellation notice.',
+	tools: { checkCalendar }, // only names, descriptions, and parameters are sent
+	voice: 'female',
+})
+// prompt = { goal, systemPrompt, turnControlBlock, agentName }
+
 const call = mimic.call({
 	to: '+15551234567',
-	goal: 'Check in on how the morning went and note anything that needs follow-up',
-	persona: {
-		systemPrompt: ripplePrompt, // your full agent prompt, used verbatim
-		agentName: 'Ripple',
-	},
+	prompt,
+	data: { appointmentTime: '2:00 PM' },
+	extract: z.object({ confirmed: z.boolean().describe('whether they confirmed') }),
 })
 ```
 
-`goal` is still required: the result extractor uses it as its rubric for
-`goalAchieved` and `extract`. `context` and `data` are stored but not woven
-into the persona prompt, so put required background in `systemPrompt`
-(max 48,000 characters). `recipient` and `userTimezone` remain available in
-runtime context. Calls with identical options reuse the same agent;
-changing the persona creates a distinct configuration.
+`compile()` stores nothing; the returned prompt is yours. A call made with
+`prompt` uses `systemPrompt` verbatim (max 48,000 characters) and never
+recompiles, whatever `data`, `extract`, or `recipient` it carries. The same
+goes for a prompt you wrote yourself: a personal agent with its own identity,
+a branded assistant with a maintained voice. `prompt.goal` is still used by
+the result extractor as its rubric for `goalAchieved`. `context` is not woven
+into an owned prompt, so put required background in `systemPrompt`.
+
+The earlier `persona: { systemPrompt, agentName }` option with a top-level
+`goal` is still accepted and behaves the same way.
 
 ## Completion webhook
 
@@ -345,8 +355,11 @@ mimic.call({
 
 ```typescript
 mimic.call({
-  // Required
-  goal: 'What the agent should do',
+  // The agent: one of
+  goal: 'What the agent should do',   // compiled into a prompt once, then cached
+  prompt,                             // from mimic.compile() or hand-written (see above)
+
+  // Who to call
   to: '+15551234567',           // E.164 phone number; omit for web calls
   channel: 'phone',             // 'phone' (default) or 'web' (see above)
 
@@ -370,9 +383,6 @@ mimic.call({
 
   // Audio
   ambience: true,               // Office background noise
-
-  // Persona mode (skip goal compilation; see above)
-  persona: { systemPrompt: '...', agentName: 'Ripple' },
 
   // Completion webhook
   webhook: 'https://example.com/mimic/completed',

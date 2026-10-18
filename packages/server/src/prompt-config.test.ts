@@ -8,11 +8,11 @@ import {
 	type PromptConfig,
 } from './prompt-config.js'
 
-const config: PromptConfig = { goal: 'Confirm a time', voice: 'female', tools: [], results: {} }
+const config: PromptConfig = { goal: 'Confirm a time', voice: 'female', tools: [] }
 
 describe('prompt configuration', () => {
-	it('uses the shape-only data compiler revision', () => {
-		assert.equal(compilerRevision, 'voice-prompts-v5')
+	it('uses the compiler revision that keeps data and extract fields out of the prompt', () => {
+		assert.equal(compilerRevision, 'voice-prompts-v6')
 	})
 
 	it('preserves declared kinds and parameter types; an undeclared kind is a read, as before kind existed', () => {
@@ -47,46 +47,44 @@ describe('prompt configuration', () => {
 		assert.notEqual(hashPromptConfig('one', config), hashPromptConfig('two', config))
 	})
 
-	it('keeps caller-authored persona cache independent of compiler revisions', () => {
-		const personaConfig = { ...config, persona: { systemPrompt: 'Answer briefly.' } }
-		assert.equal(hashPromptConfig('key', personaConfig, 'old'), hashPromptConfig('key', personaConfig, 'new'))
+	it('keys a caller-owned prompt by its text, independent of compiler revisions', () => {
+		const owned = { ...config, prompt: { systemPrompt: 'Answer briefly.' } }
+		assert.equal(hashPromptConfig('key', owned, 'old'), hashPromptConfig('key', owned, 'new'))
+		assert.notEqual(
+			hashPromptConfig('key', owned),
+			hashPromptConfig('key', { ...config, prompt: { systemPrompt: 'Answer briefly.', turnControlBlock: 'Be warm.' } }),
+		)
+		assert.notEqual(hashPromptConfig('key', owned), hashPromptConfig('key', config))
 	})
 
 	it('ignores object key order when hashing the same input', () => {
+		const tools = (order: 'ab' | 'ba') =>
+			order === 'ab' ? [{ name: 'x', description: 'd', kind: 'read' }] : [{ kind: 'read', description: 'd', name: 'x' }]
 		assert.equal(
-			hashPromptConfig('key', { ...config, data: { a: 1, b: 2 } }),
-			hashPromptConfig('key', { ...config, data: { b: 2, a: 1 } }),
+			hashPromptConfig('key', { ...config, tools: tools('ab') }),
+			hashPromptConfig('key', { ...config, tools: tools('ba') }),
 		)
 	})
 
-	it('compiles once per data shape: values are runtime context, not part of the cache key', () => {
-		const tuesday = { ...config, data: { appointmentTime: 'Tuesday 3 PM', provider: 'Dr. Patel' } }
-		const thursday = { ...config, data: { appointmentTime: 'Thursday 9 AM', provider: 'Dr. Lee' } }
-		assert.equal(hashPromptConfig('key', tuesday), hashPromptConfig('key', thursday))
-
-		// A different set of fields, or a field flipping between supplied and
-		// missing, changes what the agent has to do and recompiles.
-		assert.notEqual(hashPromptConfig('key', tuesday), hashPromptConfig('key', { ...config, data: { provider: 'x' } }))
-		assert.notEqual(
-			hashPromptConfig('key', tuesday),
-			hashPromptConfig('key', { ...config, data: { appointmentTime: null, provider: 'Dr. Lee' } }),
-		)
-		assert.notEqual(hashPromptConfig('key', tuesday), hashPromptConfig('key', config))
+	it('belongs to the call, not the agent: data and extract fields never enter the key', () => {
+		// The type no longer admits them; this pins the behaviour if they are ever passed anyway.
+		const withCallThings = { ...config, data: { appointmentTime: 'Tuesday 3 PM' }, results: { confirmed: 'bool' } }
+		assert.equal(hashPromptConfig('key', withCallThings as PromptConfig), hashPromptConfig('key', config))
 	})
 
-	it('keeps valid options and field metadata in the key, but not the constrained value', () => {
-		const field = (value: string | null) => ({
-			...config,
-			data: { preference: { value, validOptions: ['morning', 'afternoon'], condition: 'Only when rescheduling' } },
-		})
-		assert.equal(hashPromptConfig('key', field('morning')), hashPromptConfig('key', field('afternoon')))
-		assert.notEqual(hashPromptConfig('key', field('morning')), hashPromptConfig('key', field(null)))
-		assert.notEqual(
-			hashPromptConfig('key', field('morning')),
-			hashPromptConfig('key', {
-				...config,
-				data: { preference: { value: 'morning', validOptions: ['morning', 'evening'] } },
-			}),
-		)
+	it('recompiles for what actually changes the job: goal, context, tools, voice, disclosure', () => {
+		for (const change of [
+			{ goal: 'Cancel a time' },
+			{ context: 'Office closes at 5.' },
+			{ tools: [{ name: 'book', description: 'Book it', kind: 'write', parameters: {} }] },
+			{ voice: 'male' },
+			{ aiDisclosure: false },
+		] as Partial<PromptConfig>[]) {
+			assert.notEqual(
+				hashPromptConfig('key', { ...config, ...change }),
+				hashPromptConfig('key', config),
+				JSON.stringify(change),
+			)
+		}
 	})
 })

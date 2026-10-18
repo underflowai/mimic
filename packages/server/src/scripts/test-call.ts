@@ -32,20 +32,17 @@ const compiled = await compileGoal({
 	voice: 'female',
 	context: {},
 	tools: [],
-	results: {},
 })
 
-const { orchestratorConfig } = buildOrchestratorConfigFromAgent(
-	{
-		...compiled,
-		goal: 'Say hello and have a brief friendly conversation',
-		voice: 'female',
-		context: {},
-		tools: [],
-		results: {},
-		aiDisclosure: true,
-	},
-)
+const { orchestratorConfig } = buildOrchestratorConfigFromAgent({
+	...compiled,
+	goal: 'Say hello and have a brief friendly conversation',
+	voice: 'female',
+	context: {},
+	tools: [],
+	results: {},
+	aiDisclosure: true,
+})
 
 console.log(`Dialing ${phone}...`)
 const dialer = createSipDialer({

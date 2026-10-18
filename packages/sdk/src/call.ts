@@ -211,6 +211,7 @@ export class MimicCall<
 
 			const { call } = await this.client.createCall({
 				goal: this.options.goal,
+				prompt: this.options.prompt,
 				channel: this.options.channel,
 				to: this.options.to,
 				voice: this.options.voice,

@@ -73,6 +73,10 @@ Fixed
   `call_status` enum there never received `cancelled`.
 - Server: a call that fails during startup (a web call nobody joined) no longer
   races its own end-of-session path, and its room is deleted.
+- Server: a call whose job never ran, or whose worker died mid-call, used to
+  stay `pending` or `in_progress` forever. It is now failed within a few
+  minutes (`The call never started` / `The call ended without a result`),
+  its room is deleted, and the stream and webhook report it.
 
 Removed
 

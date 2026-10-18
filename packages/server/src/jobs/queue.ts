@@ -6,7 +6,7 @@
  * - `calls` — long-running voice calls (concurrency limited)
  */
 
-import { Queue, Worker, type Job, type WorkerOptions } from 'bullmq'
+import { Queue, Worker, type Job, type JobState, type WorkerOptions } from 'bullmq'
 import { Redis } from 'ioredis'
 
 function getRedisConnection() {
@@ -48,17 +48,13 @@ export function startCallWorker(
 	processor: (job: Job<CallJobData>) => Promise<void>,
 	options?: Partial<WorkerOptions>,
 ): Worker<CallJobData> {
-	const worker = new Worker<CallJobData>(
-		'mimic-calls',
-		processor,
-		{
-			connection: connection() as never,
-			concurrency: options?.concurrency ?? 4,
-			lockDuration: 600_000,
-			stalledInterval: 60_000,
-			...options,
-		},
-	)
+	const worker = new Worker<CallJobData>('mimic-calls', processor, {
+		connection: connection() as never,
+		concurrency: options?.concurrency ?? 4,
+		lockDuration: 600_000,
+		stalledInterval: 60_000,
+		...options,
+	})
 
 	worker.on('failed', (job, err) => {
 		console.error(`[worker] Call job ${job?.id} failed:`, err.message)
@@ -82,6 +78,12 @@ export async function cancelQueuedCall(callId: string) {
 	if (job) {
 		await job.remove()
 	}
+}
+
+/** The queue's view of a call's job; 'unknown' when it has none (never enqueued, or pruned). */
+export async function getCallJobState(callId: string): Promise<JobState | 'unknown'> {
+	const job = await getQueue().getJob(callId)
+	return job ? job.getState() : 'unknown'
 }
 
 export async function shutdownQueue() {

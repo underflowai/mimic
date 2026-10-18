@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm'
 import { app } from './app.js'
 import { shutdownCallBus } from './call-bus.js'
 import { runCall } from './call-runner.js'
+import { startCallSweeper } from './call-sweeper.js'
 import { getDb } from './db/index.js'
 import { runMigrations } from './db/migrate.js'
 import { apiAgents, apiCalls } from './db/schema.js'
@@ -60,12 +61,14 @@ const worker = inProcessWorkerEnabled
 		)
 	: null
 
+const stopSweeper = worker ? startCallSweeper() : null
 if (worker) {
 	logger.info({ concurrency: workerConcurrency }, 'in-process call worker enabled')
 }
 
 const shutdown = async (signal: string) => {
 	logger.info({ signal }, 'shutting down server')
+	stopSweeper?.()
 	await worker?.close().catch((err) => logger.error({ err }, 'failed to close worker'))
 	await shutdownCallBus().catch(() => {})
 	server.close(() => process.exit(0))

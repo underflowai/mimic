@@ -14,6 +14,7 @@ import { Worker } from 'bullmq'
 import { Redis } from 'ioredis'
 
 import { shutdownCallBus } from './call-bus.js'
+import { startCallSweeper } from './call-sweeper.js'
 import { logger } from './logger.js'
 import { getDb } from './db/index.js'
 import { runMigrations } from './db/migrate.js'
@@ -72,6 +73,8 @@ async function start() {
 		logger.error({ err: err.message }, 'worker error')
 	})
 
+	const stopSweeper = startCallSweeper()
+
 	const healthPort = Number(process.env.HEALTH_PORT) || 3001
 	const healthServer = createServer((req, res) => {
 		if (req.url === '/health') {
@@ -88,11 +91,8 @@ async function start() {
 
 	const shutdown = async (signal: string) => {
 		logger.info({ signal }, 'shutting down gracefully')
-		await Promise.allSettled([
-			worker.close(),
-			shutdownCallBus(),
-			new Promise((resolve) => healthServer.close(resolve)),
-		])
+		stopSweeper()
+		await Promise.allSettled([worker.close(), shutdownCallBus(), new Promise((resolve) => healthServer.close(resolve))])
 		process.exit(0)
 	}
 

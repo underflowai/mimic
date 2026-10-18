@@ -1,8 +1,9 @@
 /**
  * Background call runner.
  *
- * Dials a phone number via SIP, spawns a voice agent in the LiveKit room,
- * waits for the call to end, extracts results, and updates the DB.
+ * Places the far end in a LiveKit room (SIP dial for phone calls; the browser
+ * joins itself for web calls), spawns a voice agent in that room, waits for
+ * the call to end, extracts results, and updates the DB.
  * Streams events to any connected WebSocket subscribers via the Redis call bus.
  */
 
@@ -23,7 +24,11 @@ import { buildOrchestratorConfigFromAgent, type AgentConfig } from './goal-compi
 import { childLogger } from './logger.js'
 import { extractCallResult, type ToolCallRecord, type TranscriptEntry } from './result-extractor.js'
 import { createSipDialer } from './sip.js'
+import { callRoomName } from './web-join.js'
 import { deliverWebhook } from './webhook.js'
+
+/** How long a web call waits for the browser before failing with "no one joined". */
+const WEB_CALLER_JOIN_TIMEOUT_MS = 2 * 60_000
 
 function agentRowToConfig(row: ApiAgentRow): AgentConfig {
 	return {
@@ -82,22 +87,29 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		await updateCall(callId, { status: 'in_progress' })
 		publishCallEvent(callId, { type: 'call_status', status: 'in_progress' })
 
-		const dialer = createSipDialer({
-			livekitUrl: config.livekit.url,
-			livekitApiKey: config.livekit.apiKey,
-			livekitApiSecret: config.livekit.apiSecret,
-			outboundTrunkId: config.livekit.sip.outboundTrunkId,
-		})
+		const roomName = callRoomName(callId)
+		const isWebCall = call.channel === 'web'
 
-		const roomName = `mimic-call-${callId}`
-		await dialer.dial({
-			phoneNumber: call.toPhone,
-			roomName,
-			participantIdentity: `caller-${callId}`,
-			participantName: call.toPhone,
-		})
-
-		childLogger({ callId, roomName }).info('SIP dial successful')
+		if (isWebCall) {
+			// The browser joins the room with the token issued at create time; the
+			// voice agent waits for it (bounded by callerJoinTimeoutMs below).
+			childLogger({ callId, roomName }).info('web call: waiting for the browser participant')
+		} else {
+			if (!call.toPhone) throw new Error('Phone call has no number to dial')
+			const dialer = createSipDialer({
+				livekitUrl: config.livekit.url,
+				livekitApiKey: config.livekit.apiKey,
+				livekitApiSecret: config.livekit.apiSecret,
+				outboundTrunkId: config.livekit.sip.outboundTrunkId,
+			})
+			await dialer.dial({
+				phoneNumber: call.toPhone,
+				roomName,
+				participantIdentity: `caller-${callId}`,
+				participantName: call.toPhone,
+			})
+			childLogger({ callId, roomName }).info('SIP dial successful')
+		}
 
 		const agentConfig = agentRowToConfig(agent)
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(
@@ -122,6 +134,9 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 			livekitApiKey: config.livekit.apiKey,
 			livekitApiSecret: config.livekit.apiSecret,
 			ambience: { enabled: ambienceEnabled },
+			// SIP only returns once the call is answered, so the phone leg is already
+			// in the room. A browser may never show up; give it a bounded wait.
+			callerJoinTimeoutMs: isWebCall ? WEB_CALLER_JOIN_TIMEOUT_MS : undefined,
 			async onReady() {
 				if (!recordingEnabled) return
 				try {

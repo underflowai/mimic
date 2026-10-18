@@ -7,20 +7,43 @@ import { config } from '@mimic/engine'
 import { publishCallEvent } from '../call-bus.js'
 import { inferCallerTimezone } from '../caller-timezone.js'
 import { getDb } from '../db/index.js'
-import { apiAgents, apiCalls, type ApiCallRow } from '../db/schema.js'
+import { apiAgents, apiCalls, CALL_CHANNELS, type ApiCallRow, type CallChannel } from '../db/schema.js'
 import { compileGoal } from '../goal-compiler.js'
 import { hashPromptConfig, normalizeCallTools, type ApiToolInput } from '../prompt-config.js'
 import { cancelQueuedCall, enqueueCall } from '../jobs/queue.js'
 import { childLogger } from '../logger.js'
 import { MAX_CONCURRENT_CALLS } from '../middleware/rate-limit.js'
 import { isUuid } from '../uuid.js'
+import { createWebJoin } from '../web-join.js'
 
 const calls = new Hono()
+
+/**
+ * The body of a 201 (or an idempotent replay). Web calls that can still be
+ * joined carry the browser's credentials; the caller's server hands those to
+ * its page. Replays re-mint so a retried create is still usable.
+ */
+async function createdBody(call: Pick<ApiCallRow, 'id' | 'status' | 'channel'>, participantName?: string) {
+	const joinable = call.status === 'pending' || call.status === 'in_progress'
+	if (call.channel !== 'web' || !joinable) return { id: call.id, status: call.status }
+	const web = await createWebJoin({
+		callId: call.id,
+		name: participantName,
+		livekit: { url: config.livekit.url, apiKey: config.livekit.apiKey, apiSecret: config.livekit.apiSecret },
+	})
+	return { id: call.id, status: call.status, web }
+}
 
 calls.post('/', async (c) => {
 	const apiKey = c.get('apiKey')
 	let body: {
-		to: string
+		/**
+		 * `phone` (default) dials `to` over SIP. `web` skips dialing and returns
+		 * a LiveKit join token so a browser can connect to the call's room.
+		 */
+		channel?: CallChannel
+		/** E.164 phone number. Required for phone calls; ignored for web calls. */
+		to?: string
 		goal: string
 		voice?: 'female' | 'male'
 		userTimezone?: string
@@ -50,7 +73,12 @@ calls.post('/', async (c) => {
 		return c.json({ error: 'Invalid JSON body' }, 400)
 	}
 
-	if (!body.to?.trim()) return c.json({ error: 'to (phone number) is required' }, 400)
+	const channel: CallChannel = body.channel ?? 'phone'
+	if (!CALL_CHANNELS.includes(channel)) {
+		return c.json({ error: `channel must be one of: ${CALL_CHANNELS.join(', ')}` }, 400)
+	}
+	const toPhone = channel === 'phone' ? (body.to?.trim() ?? '') : null
+	if (channel === 'phone' && !toPhone) return c.json({ error: 'to (phone number) is required' }, 400)
 
 	let tools: ReturnType<typeof normalizeCallTools>
 	try {
@@ -71,7 +99,7 @@ calls.post('/', async (c) => {
 			.from(apiCalls)
 			.where(and(eq(apiCalls.apiKeyId, apiKey.id), eq(apiCalls.idempotencyKey, body.idempotencyKey)))
 			.limit(1)
-		if (existing) return c.json({ id: existing.id, status: existing.status })
+		if (existing) return c.json(await createdBody(existing, body.recipient?.firstName))
 	}
 
 	if (!body.goal?.trim()) return c.json({ error: 'goal is required' }, 400)
@@ -89,16 +117,19 @@ calls.post('/', async (c) => {
 
 	const voice = body.voice ?? 'female'
 	const results = body.results ?? body.extract ?? {}
+	// Office ambience is for the phone; a browser session defaults to a clean mix.
+	const ambience = channel === 'web' ? (body.ambience ?? false) : body.ambience
 
 	const configHash = hashPromptConfig(apiKey.id, {
 		goal: body.goal,
 		voice,
+		channel,
 		context: body.context,
 		data: body.data,
 		tools,
 		results,
 		aiDisclosure: body.aiDisclosure,
-		ambience: body.ambience,
+		ambience,
 		...(personaPrompt && {
 			persona: { systemPrompt: personaPrompt, agentName: body.persona?.agentName },
 		}),
@@ -140,7 +171,7 @@ calls.post('/', async (c) => {
 				configHash,
 				systemPrompt: personaPrompt,
 				agentName: body.persona?.agentName?.trim() || (voice === 'male' ? 'Arlo' : 'Aurora'),
-				ambience: body.ambience ?? true,
+				ambience: ambience ?? true,
 				webhook: body.webhook ?? null,
 			})
 			.returning()
@@ -160,7 +191,7 @@ calls.post('/', async (c) => {
 				configHash,
 				systemPrompt: '',
 				agentName: voice === 'male' ? 'Arlo' : 'Aurora',
-				ambience: body.ambience ?? true,
+				ambience: ambience ?? true,
 				webhook: body.webhook ?? null,
 			})
 			.returning()
@@ -171,10 +202,11 @@ calls.post('/', async (c) => {
 	const callContext: Record<string, string> = {}
 	if (body.userTimezone) {
 		callContext.userTimezone = body.userTimezone
-	} else {
+	} else if (toPhone) {
 		// No zone supplied: guess from the area code. The engine labels the guess
 		// unconfirmed and the agent checks it with the caller before relying on it.
-		const guess = inferCallerTimezone(body.to)
+		// A web call has no number to guess from; the agent asks if it matters.
+		const guess = inferCallerTimezone(toPhone)
 		if (guess) {
 			callContext.userTimezone = guess
 			callContext.userTimezoneInferred = 'true'
@@ -206,7 +238,8 @@ calls.post('/', async (c) => {
 			.values({
 				apiKeyId: apiKey.id,
 				agentId,
-				toPhone: body.to,
+				channel,
+				toPhone,
 				callContext,
 				callData,
 				idempotencyKey: body.idempotencyKey,
@@ -224,7 +257,7 @@ calls.post('/', async (c) => {
 			if (!existing) {
 				return c.json({ error: 'Failed to create idempotent call' }, 500)
 			}
-			return c.json({ id: existing.id, status: existing.status }, 200)
+			return c.json(await createdBody(existing, body.recipient?.firstName), 200)
 		}
 	} else {
 		const [inserted] = await db
@@ -232,7 +265,8 @@ calls.post('/', async (c) => {
 			.values({
 				apiKeyId: apiKey.id,
 				agentId,
-				toPhone: body.to,
+				channel,
+				toPhone,
 				callContext,
 				callData,
 				idempotencyKey: null,
@@ -252,6 +286,7 @@ calls.post('/', async (c) => {
 				const compiled = await compileGoal({
 					goal: body.goal,
 					voice,
+					channel,
 					context: body.context ?? '',
 					data: body.data,
 					tools,
@@ -282,7 +317,7 @@ calls.post('/', async (c) => {
 		}
 	})()
 
-	return c.json({ id: call.id, status: call.status }, 201)
+	return c.json(await createdBody(call, body.recipient?.firstName), 201)
 })
 
 calls.get('/:id', async (c) => {
@@ -302,6 +337,7 @@ calls.get('/:id', async (c) => {
 	return c.json({
 		id: call.id,
 		status: call.status,
+		channel: call.channel,
 		transcript: call.transcript,
 		result: call.result,
 		goalAchieved: call.goalAchieved,

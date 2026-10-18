@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Added
+
+- Web calls. Pass `channel: 'web'` with no `to` and the person joins from a
+  browser instead of being dialed. `call.web` resolves with `{ url, token }`
+  (a one-hour LiveKit token scoped to the call's room) as soon as the call is
+  created, or `null` for phone calls. `to` is now optional in `CallOptions`
+  and required only for phone calls; `ApiCall` gains `channel`.
+
 Removed
 
 - API keys starting with `sk_` are no longer accepted. Every key the server

@@ -121,9 +121,28 @@ export interface ToolSchema {
  * // result.data.notes → string | null
  * ```
  */
+/** How the other person joins the call. */
+export type CallChannel = 'phone' | 'web'
+
+/**
+ * What a browser needs to join a web call. Pass both to `livekit-client`:
+ * `await room.connect(url, token)`.
+ */
+export interface WebJoin {
+	/** LiveKit server URL. */
+	url: string
+	/** Join token scoped to this call's room. Valid for one hour. */
+	token: string
+}
+
 export interface CallOptions {
-	/** Phone number to call (E.164 format, e.g. `'+15551234567'`). */
-	to: string
+	/**
+	 * `'phone'` (default) dials `to`. `'web'` places nobody: the API returns a
+	 * {@link WebJoin} on `call.web` and the person joins from a browser.
+	 */
+	channel?: CallChannel
+	/** Phone number to call (E.164 format, e.g. `'+15551234567'`). Required for phone calls. */
+	to?: string
 	/** What the agent should accomplish on the call. */
 	goal: string
 	/** Tools the agent can use. Keys are tool names. */
@@ -343,6 +362,7 @@ export type CallResult<T extends Record<string, unknown> = Record<string, unknow
 export interface ApiCall {
 	id: string
 	status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+	channel: CallChannel
 	transcript: TranscriptEntry[] | null
 	result: Record<string, unknown> | null
 	goalAchieved: boolean | null
@@ -355,6 +375,8 @@ export interface ApiCall {
 export interface CreateCallResponse {
 	id: string
 	status: ApiCall['status']
+	/** Present for web calls that can still be joined. */
+	web?: WebJoin
 }
 
 /** @internal */

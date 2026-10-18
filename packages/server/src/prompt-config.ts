@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describeDataShape } from './call-data.js'
+import type { CallChannel } from './db/schema.js'
 import type { GoalToolDefinition } from './goal-compiler.js'
 
 // Bump when compiler instructions or the compiler's runtime input contract changes.
@@ -50,6 +51,8 @@ function stableStringify(value: unknown): string {
 export interface PromptConfig {
 	goal: string
 	voice: string
+	/** Omitted or `phone` leaves the hash unchanged; `web` compiles its own agent. */
+	channel?: CallChannel
 	context?: string
 	data?: Record<string, unknown>
 	tools: unknown[]
@@ -71,6 +74,7 @@ export function hashPromptConfig(apiKeyId: string, config: PromptConfig, revisio
 		results: config.results,
 		aiDisclosure: config.aiDisclosure,
 		ambience: config.ambience,
+		...(config.channel === 'web' && { channel: config.channel }),
 		...(config.persona ? { persona: config.persona } : { compilerRevision: revision }),
 		...(config.webhook && { webhook: config.webhook }),
 	})

@@ -18,7 +18,7 @@ const result = await call.result
 console.log(result.status) // 'completed' or 'failed'
 ```
 
-Give it a phone number and a goal. Mimic handles the rest — dialing, conversation, interruptions, and structured results.
+Give it a phone number and a goal. Mimic handles the rest — dialing, conversation, interruptions, and structured results. The same agent can also take [web calls](#web-calls) from a browser.
 
 ## How it works
 
@@ -141,13 +141,34 @@ for await (const event of call) { ... }
 const result = await call.result
 ```
 
+## Web calls
+
+The same agent can talk to someone in a browser instead of over the phone.
+Pass `channel: 'web'` and no number; the call resolves `call.web` with a
+LiveKit URL and a one-hour join token scoped to that call's room.
+
+```typescript
+const call = mimic.call({ channel: 'web', goal: 'Welcome the visitor and answer questions about pricing' })
+const { url, token } = (await call.web)!
+// Send url + token to the browser. There, with livekit-client:
+//   const room = new Room(); await room.connect(url, token)
+//   await room.localParticipant.setMicrophoneEnabled(true)
+const result = await call.result // resolves when the visitor leaves
+```
+
+The agent waits up to two minutes for the visitor to join, then marks the
+call failed if nobody arrives. Everything else (tools, `extract`, events,
+`result`) works the same as a phone call. Full page in
+[`examples/web-call.ts`](examples/web-call.ts).
+
 ## Options reference
 
 ```typescript
 mimic.call({
   // Required
-  to: '+15551234567',           // E.164 phone number
   goal: 'What the agent should do',
+  to: '+15551234567',           // E.164 phone number; omit for web calls
+  channel: 'phone',             // 'phone' (default) or 'web' (browser joins via call.web)
 
   // Knowledge
   context: 'Background info...',

@@ -198,6 +198,66 @@ describe('Mimic.call', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Web calls
+// ---------------------------------------------------------------------------
+
+describe('Web calls', () => {
+	const join = { url: 'wss://lk.example.com', token: 'jwt' }
+
+	function webFetch(onCreate: (body: Record<string, unknown>) => void): typeof fetch {
+		return async (input, init) => {
+			const url = String(input)
+			if (url.endsWith('/api/v1/calls') && init?.method === 'POST') {
+				onCreate(JSON.parse(String(init.body)) as Record<string, unknown>)
+				return jsonResponse({ id: 'call_1', status: 'pending', web: join }, 201)
+			}
+			if (url.includes('/api/v1/calls/call_1')) return jsonResponse({ ...completedCall, channel: 'web' })
+			return jsonResponse({ error: 'not found' }, 404)
+		}
+	}
+
+	it('sends the channel without a number and exposes the join details on .web', async () => {
+		let createBody: Record<string, unknown> | null = null
+		const mimic = new Mimic({
+			apiKey: 'mk_test',
+			baseUrl: 'http://localhost:3000',
+			fetch: webFetch((body) => (createBody = body)),
+			WebSocket: null,
+		})
+		const call = mimic.call({ channel: 'web', goal: 'Welcome the visitor', pollIntervalMs: 1 })
+
+		assert.deepEqual(await call.web, join)
+		const sent = createBody as Record<string, unknown> | null
+		assert.ok(sent)
+		assert.equal(sent.channel, 'web')
+		assert.equal('to' in sent, false)
+
+		const result = await call.result
+		assert.equal(result.status, 'completed')
+	})
+
+	it('resolves .web with null for phone calls', async () => {
+		const mimic = new Mimic({
+			apiKey: 'mk_test',
+			baseUrl: 'http://localhost:3000',
+			fetch: defaultFetch(),
+			WebSocket: null,
+		})
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello', pollIntervalMs: 1 })
+		assert.equal(await call.web, null)
+		await call.result
+	})
+
+	it('rejects .web when the call cannot be created', async () => {
+		const fetchImpl: typeof fetch = async () => jsonResponse({ error: 'channel must be one of: phone, web' }, 400)
+		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchImpl, WebSocket: null })
+		const call = mimic.call({ channel: 'web', goal: 'Welcome the visitor' })
+		await assert.rejects(call.web, /channel must be one of/)
+		await assert.rejects(call.result, /channel must be one of/)
+	})
+})
+
+// ---------------------------------------------------------------------------
 // Streaming events
 // ---------------------------------------------------------------------------
 

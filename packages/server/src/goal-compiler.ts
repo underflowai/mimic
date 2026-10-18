@@ -15,6 +15,7 @@ import {
 } from '@mimic/engine'
 
 import { renderDataBlock, renderDataSchema, type CallData } from './call-data.js'
+import type { CallChannel } from './db/schema.js'
 
 export type GoalVoice = 'female' | 'male'
 
@@ -52,6 +53,8 @@ export interface GoalCompilerInput {
 	tools: GoalToolDefinition[]
 	results: GoalResults
 	voice: GoalVoice
+	/** `phone` (default) or `web`. Web sessions have no number and nobody "called"; the prompt should not assume either. */
+	channel?: CallChannel
 	aiDisclosure?: boolean
 }
 
@@ -134,9 +137,18 @@ function formatAiDisclosure(aiDisclosure: boolean | undefined) {
 	return 'unspecified — default to a brief automated-assistant introduction'
 }
 
+/**
+ * Phone is the compiler's default framing, so phone inputs stay byte-identical
+ * (the prompt-config hash does not include the channel for them). Web gets an
+ * explicit line because the instructions otherwise describe a phone agent.
+ */
+const WEB_CHANNEL_LINE =
+	'Channel: web — the person joins from a browser in a voice session. There is no phone number, nobody dialed or picked up, and the session ends when either side leaves. Do not refer to calling, phones, or hanging up.'
+
 function buildCompilerInput(input: GoalCompilerInput) {
 	const parts = [
 		`Voice: ${input.voice}`,
+		...(input.channel === 'web' ? [WEB_CHANNEL_LINE] : []),
 		`Voice-based fallback agent name: ${defaultAgentName(input.voice)}`,
 		'Recipient: supplied per call at runtime as callerFirstName / callerLastName / callerEmail in the context block; the compiled prompt must not assume a specific person.',
 		`AI disclosure: ${formatAiDisclosure(input.aiDisclosure)}`,

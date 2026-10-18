@@ -237,6 +237,60 @@ for await (const event of call) {
 }
 ```
 
+## Web calls
+
+A call does not have to be dialed. With `channel: 'web'` nobody is called;
+instead the API returns what a browser needs to join the agent's room, and
+the conversation starts when the visitor connects.
+
+```typescript
+const call = mimic.call({
+	channel: 'web',
+	goal: 'Welcome the visitor and help them find the right plan',
+	recipient: { firstName: 'Jane' }, // optional; names the browser participant
+})
+
+// Resolves as soon as the call is created, before anyone has joined.
+const join = await call.web // { url, token } for web calls, null for phone calls
+```
+
+`join.url` is the LiveKit server and `join.token` is a one-hour token that can
+only join this call's room: it cannot create rooms, list participants, or join
+anything else, so it is safe to hand to the browser. Mint it on your server
+(where your `mk_` key lives) and pass it down, then connect with
+[`livekit-client`](https://www.npmjs.com/package/livekit-client):
+
+```typescript
+import { Room, RoomEvent, Track } from 'livekit-client'
+
+const room = new Room()
+room.on(RoomEvent.TrackSubscribed, (track) => {
+	if (track.kind === Track.Kind.Audio) track.attach() // plays the agent
+})
+await room.connect(join.url, join.token)
+await room.localParticipant.setMicrophoneEnabled(true)
+// ...
+await room.disconnect() // ends the call
+```
+
+How web calls differ from phone calls:
+
+- `to` is omitted; `channel` must be `'web'`. Everything else in
+  `CallOptions` applies, and `result`, events, tools and `extract` behave the
+  same way.
+- The agent waits up to two minutes for someone to join. If nobody does, the
+  call ends `failed` with the message `No one joined the call within 120 seconds`.
+- The call ends when the visitor disconnects. A page reload is a disconnect,
+  so a single-page join flow is the right shape.
+- `ambience` defaults to `false` for web calls (there is no phone line to
+  make plausible), and `userTimezone` is not inferred since there is no
+  number to infer it from. Pass it if the agent needs to talk about times.
+- Replaying a request with the same `idempotencyKey` returns a fresh token
+  for the same call while it can still be joined.
+
+`GET /api/v1/calls/:id` reports `channel` for every call so you can tell the
+two apart later.
+
 ## Cancelling a call
 
 ```typescript
@@ -292,8 +346,9 @@ mimic.call({
 ```typescript
 mimic.call({
   // Required
-  to: '+15551234567',           // E.164 phone number
   goal: 'What the agent should do',
+  to: '+15551234567',           // E.164 phone number; omit for web calls
+  channel: 'phone',             // 'phone' (default) or 'web' (see above)
 
   // Knowledge
   context: 'Background info as prose...',
@@ -341,4 +396,12 @@ From the repo root:
 
 ```bash
 MIMIC_API_KEY=mk_live_... npx tsx examples/sdk-call.ts
+```
+
+For a web call, `examples/web-call.ts` creates the call and serves a page
+that joins it:
+
+```bash
+MIMIC_API_KEY=mk_live_... MIMIC_BASE_URL=https://... npx tsx examples/web-call.ts
+# then open http://localhost:8787
 ```

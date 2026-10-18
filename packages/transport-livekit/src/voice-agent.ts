@@ -26,6 +26,7 @@ import {
 } from '@mimic/engine'
 import { createLiveKitTransport, type AudioTransport } from '@mimic/engine/livekit-transport'
 import { createAmbienceTrack } from './ambience-track.js'
+import { waitForCaller } from './caller-wait.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const AMBIENCE_FILE = join(__dirname, 'audio/office-ambience.mp3')
@@ -57,6 +58,13 @@ export interface VoiceAgentConfig {
 	identity: string
 	logPrefix: string
 	sessionTimeoutMs?: number
+	/**
+	 * How long to wait for the first remote participant before giving up.
+	 * Unset means wait indefinitely, which suits SIP (the leg is already in
+	 * the room when the agent connects). Set it when the far end joins on its
+	 * own schedule, such as a browser.
+	 */
+	callerJoinTimeoutMs?: number
 	grants?: { canPublish?: boolean; canSubscribe?: boolean }
 
 	livekitUrl: string
@@ -277,18 +285,7 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 		if (orchestrator) {
 			if (room.remoteParticipants.size === 0) {
 				console.log(`${prefix} waiting for caller to join room`)
-				await new Promise<void>((resolve, reject) => {
-					const onJoin = () => {
-						room.off(RoomEvent.Disconnected, onDisconnect)
-						resolve()
-					}
-					const onDisconnect = () => {
-						room.off(RoomEvent.ParticipantConnected, onJoin)
-						reject(new Error('room disconnected before caller joined'))
-					}
-					room.once(RoomEvent.ParticipantConnected, onJoin)
-					room.once(RoomEvent.Disconnected, onDisconnect)
-				})
+				await waitForCaller(room, agentConfig.callerJoinTimeoutMs)
 			}
 			await new Promise((resolve) => setTimeout(resolve, 500))
 			console.log(`${prefix} caller ready, starting orchestrator`)
@@ -302,6 +299,7 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 	} catch (err) {
 		clearTimeout(sessionTimeout)
 		console.error(`${prefix} failed during startup:`, err)
+		ambienceStop?.()
 		if (audioSource)
 			await audioSource.close().catch((e) => console.error(`${prefix} cleanup: audioSource.close failed:`, e))
 		if (agentTrack)

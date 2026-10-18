@@ -127,6 +127,7 @@ export { connectMcp } from './mcp.js'
 export type { McpConnectionOptions } from './mcp.js'
 export { introspectTools, tool } from './tools.js'
 export type {
+	CallChannel,
 	CallEvent,
 	CallEventMap,
 	CallOptions,
@@ -145,4 +146,5 @@ export type {
 	ToolSchema,
 	TranscriptEntry,
 	Voice,
+	WebJoin,
 } from './types.js'

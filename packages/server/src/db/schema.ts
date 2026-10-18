@@ -15,6 +15,9 @@ export const apiKeys = pgTable('api_keys', {
 export const voiceEnum = pgEnum('voice', ['female', 'male'])
 export const callStatusEnum = pgEnum('call_status', ['pending', 'in_progress', 'completed', 'failed', 'cancelled'])
 
+export const CALL_CHANNELS = ['phone', 'web'] as const
+export type CallChannel = (typeof CALL_CHANNELS)[number]
+
 export const apiAgents = pgTable('api_agents', {
 	id: uuid('id').primaryKey().defaultRandom(),
 	apiKeyId: uuid('api_key_id')
@@ -45,7 +48,10 @@ export const apiCalls = pgTable(
 		agentId: uuid('agent_id')
 			.notNull()
 			.references(() => apiAgents.id),
-		toPhone: text('to_phone').notNull(),
+		/** How the far end joins: dialed over SIP, or a browser connecting with a join token. */
+		channel: text('channel').$type<CallChannel>().notNull().default('phone'),
+		/** E.164 number for phone calls; null for web calls. */
+		toPhone: text('to_phone'),
 		status: callStatusEnum('status').notNull().default('pending'),
 		callContext: jsonb('call_context').notNull().default({}),
 		/** Per-call `data` values; the compiled agent only knows their shape. */

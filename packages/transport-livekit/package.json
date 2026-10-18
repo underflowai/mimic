@@ -13,10 +13,13 @@
 			"default": "./build/index.js"
 		}
 	},
-	"files": ["build/"],
+	"files": [
+		"build/"
+	],
 	"scripts": {
 		"build": "tsc -b tsconfig.lib.json",
-		"typecheck": "tsc -p tsconfig.json --noEmit"
+		"typecheck": "tsc -p tsconfig.json --noEmit",
+		"test": "tsx --test 'src/**/*.test.ts'"
 	},
 	"dependencies": {
 		"@livekit/rtc-node": "^0.13.28",
@@ -26,6 +29,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "^22.15.0",
+		"tsx": "^4.21.0",
 		"typescript": "^5.8.3"
 	}
 }

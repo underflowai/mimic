@@ -10,6 +10,7 @@ import type {
 	ExtractedData,
 	ServerMessage,
 	ToolInput,
+	WebJoin,
 	WebSocketConstructor,
 } from './types.js'
 
@@ -104,6 +105,20 @@ export class MimicCall<
 	/** Resolves when the call completes with the final typed result. */
 	readonly result: Promise<CallResult<T>>
 
+	/**
+	 * For `channel: 'web'`, resolves with what the browser needs to join as
+	 * soon as the call is created. Resolves `null` for phone calls. Rejects
+	 * if the call could not be created.
+	 *
+	 * @example
+	 * ```typescript
+	 * const call = mimic.call({ channel: 'web', goal: 'Welcome the visitor' })
+	 * const { url, token } = (await call.web)!
+	 * // hand url + token to the browser: await room.connect(url, token)
+	 * ```
+	 */
+	readonly web: Promise<WebJoin | null>
+
 	private callId: string | null = null
 	private readonly client: MimicClient
 	private readonly options: CallOptions
@@ -116,6 +131,8 @@ export class MimicCall<
 	private settled = false
 	private resultResolve!: (result: CallResult<T>) => void
 	private resultReject!: (error: Error) => void
+	private webResolve!: (join: WebJoin | null) => void
+	private webReject!: (error: Error) => void
 	private streamTimeout: ReturnType<typeof setTimeout> | null = null
 	private activeWs: WebSocket | null = null
 	private cancelled = false
@@ -131,6 +148,12 @@ export class MimicCall<
 			this.resultReject = reject
 		})
 		this.result.catch(() => {})
+
+		this.web = new Promise<WebJoin | null>((resolve, reject) => {
+			this.webResolve = resolve
+			this.webReject = reject
+		})
+		this.web.catch(() => {})
 
 		void this.start()
 	}
@@ -188,6 +211,7 @@ export class MimicCall<
 
 			const { call } = await this.client.createCall({
 				goal: this.options.goal,
+				channel: this.options.channel,
 				to: this.options.to,
 				voice: this.options.voice,
 				userTimezone: this.options.userTimezone,
@@ -204,6 +228,7 @@ export class MimicCall<
 			})
 
 			this.callId = call.id
+			this.webResolve(call.web ?? null)
 
 			if (this.cancelled) {
 				void this.client.cancelCall(call.id).catch(() => {})
@@ -235,8 +260,10 @@ export class MimicCall<
 				await this.pollUntilDone(call.id)
 			}
 		} catch (err) {
-			if (this.cancelled) return
 			const error = err instanceof Error ? err : new MimicError(String(err))
+			// No-op once createCall has succeeded; only a failed creation leaves `web` pending.
+			this.webReject(error)
+			if (this.cancelled) return
 			this.pushEvent({ type: 'error', message: error.message })
 			this.complete()
 			this.settle('reject', error)

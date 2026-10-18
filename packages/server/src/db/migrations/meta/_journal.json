@@ -29,6 +29,13 @@
       "when": 1792294446492,
       "tag": "0003_drop_success_condition",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792300857862,
+      "tag": "0004_call_channel",
+      "breakpoints": true
     }
   ]
 }

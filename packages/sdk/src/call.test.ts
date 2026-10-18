@@ -167,7 +167,7 @@ describe('Mimic.call', () => {
 		assert.ok(call)
 	})
 
-	it('sends persona, timezone, and webhook on the create request', async () => {
+	it('sends timezone and webhook on the create request', async () => {
 		let createBody: Record<string, unknown> | null = null
 		const fetchImpl: typeof fetch = async (input, init) => {
 			const url = String(input)
@@ -183,7 +183,6 @@ describe('Mimic.call', () => {
 			to: '+15551234567',
 			goal: 'Check in',
 			userTimezone: 'America/New_York',
-			persona: { systemPrompt: 'You are Ripple.', agentName: 'Ripple' },
 			webhook: 'https://example.com/hook',
 			pollIntervalMs: 1,
 		})
@@ -191,9 +190,38 @@ describe('Mimic.call', () => {
 
 		const sent = createBody as Record<string, unknown> | null
 		assert.ok(sent)
-		assert.deepEqual(sent.persona, { systemPrompt: 'You are Ripple.', agentName: 'Ripple' })
 		assert.equal(sent.webhook, 'https://example.com/hook')
 		assert.equal(sent.userTimezone, 'America/New_York')
+	})
+
+	it('reports a cancel the server refused instead of hiding it', async () => {
+		let deletes = 0
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = String(input)
+			if (url.endsWith('/api/v1/calls') && init?.method === 'POST') {
+				return jsonResponse({ id: 'call_1', status: 'pending' }, 201)
+			}
+			if (url.endsWith('/api/v1/calls/call_1') && init?.method === 'DELETE') {
+				deletes++
+				return jsonResponse({ error: 'enum call_status has no value "cancelled"' }, 500)
+			}
+			if (url.includes('/api/v1/calls/call_1')) return jsonResponse({ id: 'call_1', status: 'in_progress' })
+			return jsonResponse({ error: 'not found' }, 404)
+		}
+		const mimic = new Mimic({ apiKey: 'mk_test', baseUrl: 'http://localhost:3000', fetch: fetchImpl, WebSocket: null })
+		const call = mimic.call({ to: '+15551234567', goal: 'Check in', pollIntervalMs: 1 })
+		const errors: string[] = []
+		call.on('error', (event) => errors.push(event.message))
+
+		await call.web // the call exists on the server from here
+		call.cancel()
+		await assert.rejects(call.result, /Call cancelled/)
+
+		const deadline = Date.now() + 5_000
+		while (errors.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+		assert.ok(deletes >= 1, 'the SDK asked the server to cancel')
+		assert.equal(errors[0], 'Call cancelled')
+		assert.match(errors[1] ?? '', /Cancel did not reach the server.*may still be running/)
 	})
 })
 

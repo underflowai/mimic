@@ -16,7 +16,6 @@ function agent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 		voice: 'male',
 		context: {},
 		tools: [],
-		results: {},
 		aiDisclosure: true,
 		agentName: 'Casey',
 		systemPrompt: 'You are [AGENT_NAME].',
@@ -142,20 +141,17 @@ describe('buildOrchestratorConfigFromAgent', () => {
 		assert.deepEqual(buildOrchestratorConfigFromAgent(agent()).orchestratorConfig.toolKnownValues, [])
 	})
 
-	it('leaves the prompt alone when a call has no data', () => {
-		assert.equal(
-			buildOrchestratorConfigFromAgent(agent(), undefined, null).orchestratorConfig.systemPrompt,
-			'You are Casey.',
-		)
-		assert.equal(
-			buildOrchestratorConfigFromAgent(agent(), undefined, {}).orchestratorConfig.systemPrompt,
-			'You are Casey.',
-		)
-	})
-
-	it('falls back to data stored on the agent config for direct (non-API) callers', () => {
-		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(agent({ data: { office: 'Bright Smiles' } }))
-		assert.match(orchestratorConfig.systemPrompt, /office: Bright Smiles/)
+	it('leaves the prompt alone when a call has no data and wants nothing back', () => {
+		for (const [data, results] of [
+			[undefined, undefined],
+			[null, null],
+			[{}, {}],
+		] as const) {
+			assert.equal(
+				buildOrchestratorConfigFromAgent(agent(), undefined, data, results).orchestratorConfig.systemPrompt,
+				'You are Casey.',
+			)
+		}
 	})
 })
 

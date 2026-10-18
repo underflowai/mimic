@@ -1,16 +1,7 @@
 import { ApiError } from './errors.js'
 import { ZodObject, type ZodType } from 'zod'
 
-import type {
-	ApiCall,
-	CallChannel,
-	CreateCallResponse,
-	MimicOptions,
-	Persona,
-	Prompt,
-	ToolSchema,
-	Voice,
-} from './types.js'
+import type { ApiCall, CallChannel, CreateCallResponse, MimicOptions, Prompt, ToolSchema, Voice } from './types.js'
 
 function serializeExtractSchema(
 	schema?: ZodObject<Record<string, ZodType>>,
@@ -113,7 +104,6 @@ export class MimicClient {
 		tools?: ToolSchema[]
 		extract?: ZodObject<Record<string, ZodType>>
 		ambience?: boolean
-		persona?: Persona
 		webhook?: string
 		idempotencyKey?: string
 	}): Promise<{ call: CreateCallResponse }> {
@@ -133,7 +123,6 @@ export class MimicClient {
 				tools: params.tools ?? [],
 				extract: serializeExtractSchema(params.extract),
 				ambience: params.ambience,
-				persona: params.persona,
 				webhook: params.webhook,
 				idempotencyKey: params.idempotencyKey,
 			}),

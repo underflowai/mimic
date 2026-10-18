@@ -22,14 +22,22 @@ Changed
 - `data` and `extract` no longer shape the compiled prompt. They are appended
   to it at runtime, so changing the fields you confirm or ask for never
   triggers a recompile. Compiled prompts recompile once to pick this up.
+- Web calls bring up speech services and recording only once the visitor is
+  in the room. Before, a visitor who took over a minute to join hit a Deepgram
+  idle disconnect, and no-shows recorded two minutes of empty room.
 
-Deprecated
+Fixed
 
-- `persona`. Use `prompt` (with `goal` inside it). `persona` plus a top-level
-  `goal` is still accepted and behaves the same.
+- `call.cancel()` reports it through the `error` event when the server refuses
+  the cancel, instead of hiding the failure while the call keeps running.
+- Server: cancelling a call failed with a 500 in production because the
+  `call_status` enum there never received `cancelled`.
+- Server: a call that fails during startup (a web call nobody joined) no longer
+  races its own end-of-session path, and its room is deleted.
 
 Removed
 
+- `persona`. Pass a `Prompt` as `prompt` instead, with `goal` inside it.
 - API keys starting with `sk_` are no longer accepted. Every key the server
   issues starts with `mk_`.
 

@@ -90,6 +90,7 @@ const page = /* html */ `<!doctype html>
           p.textContent = (ev.role === 'agent' ? 'Aurora: ' : 'You: ') + ev.text
           transcript.appendChild(p)
         } else if (ev.type === 'done' || ev.type === 'error') {
+          status.textContent = ev.type === 'done' ? 'Call ended' : 'Call ended: ' + ev.message
           events.close()
         }
       }

@@ -39,7 +39,6 @@ function agentRowToConfig(row: ApiAgentRow): AgentConfig {
 		voice: row.voice as 'female' | 'male',
 		context: row.context as Record<string, string>,
 		tools: row.tools as AgentConfig['tools'],
-		results: row.results as Record<string, unknown>,
 		aiDisclosure: true,
 	}
 }
@@ -112,8 +111,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		}
 
 		const agentConfig = agentRowToConfig(agent)
-		// Calls created before `api_calls.results` existed carry their fields on the agent row.
-		const results = (call.results ?? agent.results) as Record<string, unknown>
+		const results = call.results as Record<string, unknown>
 		const { orchestratorConfig } = buildOrchestratorConfigFromAgent(
 			agentConfig,
 			call.callContext as Record<string, string> | undefined,

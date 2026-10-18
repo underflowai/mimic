@@ -186,13 +186,24 @@ export class MimicCall<
 	cancel() {
 		if (this.done) return
 		this.cancelled = true
-		if (this.callId) {
-			void this.client.cancelCall(this.callId).catch(() => {})
-		}
+		if (this.callId) void this.cancelOnServer(this.callId)
 		this.activeWs?.close()
 		this.pushEvent({ type: 'error', message: 'Call cancelled' })
 		this.complete()
 		this.settle('reject', new MimicError('Call cancelled'))
+	}
+
+	/**
+	 * The local side settles immediately; if the server does not take the
+	 * cancel, the call is still running there, and `error` listeners hear it.
+	 */
+	private async cancelOnServer(callId: string) {
+		try {
+			await this.client.cancelCall(callId)
+		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err)
+			this.pushEvent({ type: 'error', message: `Cancel did not reach the server; the call may still be running: ${reason}` })
+		}
 	}
 
 	async *[Symbol.asyncIterator](): AsyncIterator<CallEvent> {
@@ -223,7 +234,6 @@ export class MimicCall<
 				tools: toolSchemas,
 				extract: this.options.extract,
 				ambience: this.options.ambience,
-				persona: this.options.persona,
 				webhook: this.options.webhook,
 				idempotencyKey: this.options.idempotencyKey,
 			})
@@ -232,7 +242,7 @@ export class MimicCall<
 			this.webResolve(call.web ?? null)
 
 			if (this.cancelled) {
-				void this.client.cancelCall(call.id).catch(() => {})
+				void this.cancelOnServer(call.id)
 				return
 			}
 

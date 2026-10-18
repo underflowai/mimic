@@ -169,7 +169,6 @@ export type {
 	ExtractedData,
 	MimicOptions,
 	MimicTool,
-	Persona,
 	Prompt,
 	SpeechEvent,
 	ToolCallEvent,

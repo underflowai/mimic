@@ -60,9 +60,11 @@ export interface VoiceAgentConfig {
 	sessionTimeoutMs?: number
 	/**
 	 * How long to wait for the first remote participant before giving up.
-	 * Unset means wait indefinitely, which suits SIP (the leg is already in
-	 * the room when the agent connects). Set it when the far end joins on its
-	 * own schedule, such as a browser.
+	 * Unset means the far end is already in the room (SIP answers before the
+	 * agent connects) and any wait is open-ended. Set it when the far end
+	 * joins on its own schedule, such as a browser: speech services and
+	 * `onReady` then wait for the caller too, because Deepgram drops a socket
+	 * that has carried no audio for 60 seconds.
 	 */
 	callerJoinTimeoutMs?: number
 	grants?: { canPublish?: boolean; canSubscribe?: boolean }
@@ -192,6 +194,20 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 
 	const { promise: sessionComplete, resolve: resolveSession, reject: rejectSession } = Promise.withResolvers<void>()
 
+	/** Release local media, leave, and delete the room so nobody lingers in it. */
+	async function teardown() {
+		ambienceStop?.()
+		if (agentTrack) await agentTrack.close().catch((err) => console.error(`${prefix} agentTrack.close failed:`, err))
+		if (audioSource) await audioSource.close().catch((err) => console.error(`${prefix} audioSource.close failed:`, err))
+		await room.disconnect().catch((err) => console.error(`${prefix} room.disconnect failed:`, err))
+		try {
+			const roomService = new RoomServiceClient(livekitUrl, livekitApiKey, livekitApiSecret)
+			await roomService.deleteRoom(roomName)
+		} catch (err) {
+			console.error(`${prefix} failed to delete room ${roomName}:`, err)
+		}
+	}
+
 	async function completeSession() {
 		clearTimeout(sessionTimeout)
 
@@ -213,17 +229,7 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			console.error(`${prefix} onSessionEnd failed:`, err)
 		}
 
-		ambienceStop?.()
-		if (agentTrack) await agentTrack.close().catch((err) => console.error(`${prefix} agentTrack.close failed:`, err))
-		if (audioSource) await audioSource.close().catch((err) => console.error(`${prefix} audioSource.close failed:`, err))
-		await room.disconnect().catch((err) => console.error(`${prefix} room.disconnect failed:`, err))
-
-		try {
-			const roomService = new RoomServiceClient(livekitUrl, livekitApiKey, livekitApiSecret)
-			await roomService.deleteRoom(roomName)
-		} catch (err) {
-			console.error(`${prefix} failed to delete room ${roomName}:`, err)
-		}
+		await teardown()
 
 		if (completionError) {
 			rejectSession(completionError)
@@ -255,7 +261,13 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 
 	console.log(`${prefix} connecting to room ${roomName}`)
 	try {
-		await Promise.all([room.connect(livekitAgentUrl, agentToken), connectServices()])
+		// A phone leg is already in the room when the agent connects, so its
+		// services come up alongside the join. A browser arrives on its own
+		// schedule, and Deepgram drops a socket that has carried no audio for
+		// 60 seconds, so in that case the services wait for the caller.
+		const callerJoinsLater = agentConfig.callerJoinTimeoutMs !== undefined
+		let servicesReady = callerJoinsLater ? null : connectServices()
+		await Promise.all([room.connect(livekitAgentUrl, agentToken), servicesReady])
 		console.log(`${prefix} connected`)
 
 		if (agentTrack) {
@@ -280,13 +292,17 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			console.warn(`${prefix} ambience enabled but file missing at ${AMBIENCE_FILE}`)
 		}
 
+		if (orchestrator && room.remoteParticipants.size === 0) {
+			console.log(`${prefix} waiting for caller to join room`)
+			await waitForCaller(room, agentConfig.callerJoinTimeoutMs)
+		}
+		if (!servicesReady) servicesReady = connectServices()
+		await servicesReady
+
+		// Recording, and anything else set up for a live call, starts once there is someone on the other end.
 		await onReady?.()
 
 		if (orchestrator) {
-			if (room.remoteParticipants.size === 0) {
-				console.log(`${prefix} waiting for caller to join room`)
-				await waitForCaller(room, agentConfig.callerJoinTimeoutMs)
-			}
 			await new Promise((resolve) => setTimeout(resolve, 500))
 			console.log(`${prefix} caller ready, starting orchestrator`)
 			await orchestrator.start()
@@ -297,14 +313,14 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			triggerComplete()
 		}, sessionTimeoutMs)
 	} catch (err) {
-		clearTimeout(sessionTimeout)
 		console.error(`${prefix} failed during startup:`, err)
-		ambienceStop?.()
-		if (audioSource)
-			await audioSource.close().catch((e) => console.error(`${prefix} cleanup: audioSource.close failed:`, e))
-		if (agentTrack)
-			await agentTrack.close().catch((e) => console.error(`${prefix} cleanup: agentTrack.close failed:`, e))
-		await room.disconnect().catch((e) => console.error(`${prefix} cleanup: room.disconnect failed:`, e))
+		// The caller handles a failed start itself. Mark the session done first so
+		// the disconnect in teardown does not run the end-of-session path on top.
+		sessionCompleted = true
+		if (orchestrator) {
+			await orchestrator.close().catch((e) => console.error(`${prefix} cleanup: orchestrator.close failed:`, e))
+		}
+		await teardown()
 		throw err
 	}
 

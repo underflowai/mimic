@@ -69,16 +69,6 @@ export interface CompileOptions {
 	channel?: CallChannel
 }
 
-/**
- * @deprecated Use {@link Prompt} with {@link CallOptions.prompt}. Still accepted.
- */
-export interface Persona {
-	/** Full system prompt for the voice agent. Used verbatim; max 48,000 characters. */
-	systemPrompt: string
-	/** Name the agent goes by on the call. Defaults to the voice's default name (Aurora / Arlo). */
-	agentName?: string
-}
-
 // ── Tool types ────────────────────────────────────────────────────────
 
 /**
@@ -238,11 +228,6 @@ export interface CallOptionsBase {
 	aiDisclosure?: boolean
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
-	/**
-	 * @deprecated Pass a {@link Prompt} as `prompt` instead; `goal` moves inside
-	 * it. `persona` with a top-level `goal` is still accepted and behaves the same.
-	 */
-	persona?: Persona
 	/**
 	 * URL to POST a `call.completed` event to when the call finishes.
 	 * Must be an http(s) URL.

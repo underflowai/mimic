@@ -40,7 +40,6 @@ const { orchestratorConfig } = buildOrchestratorConfigFromAgent({
 	voice: 'female',
 	context: {},
 	tools: [],
-	results: {},
 	aiDisclosure: true,
 })
 

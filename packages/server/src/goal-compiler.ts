@@ -60,14 +60,13 @@ export interface CompiledGoal {
 	agentName: string
 }
 
+/** The agent as stored: the compiled (or owned) prompt plus the job it was written for. Per-call details arrive separately. */
 export interface AgentConfig extends CompiledGoal {
 	goal: string
 	recipient?: GoalRecipient
 	voice: GoalVoice
 	context: GoalContext
-	data?: GoalData
 	tools: GoalToolDefinition[]
-	results: GoalResults
 	aiDisclosure: boolean
 }
 
@@ -307,8 +306,8 @@ export function buildOrchestratorConfigFromAgent(
 	const userTimezone = callContext?.userTimezone
 	const userTimezoneInferred = Boolean(userTimezone) && callContext?.userTimezoneInferred === 'true'
 	const recipient = resolveRecipient(agent, callContext)
-	const dataBlock = renderDataBlock(callData ?? agent.data)
-	const wantedBlock = renderWantedBlock(callResults ?? agent.results)
+	const dataBlock = renderDataBlock(callData)
+	const wantedBlock = renderWantedBlock(callResults)
 	return {
 		orchestratorConfig: {
 			persona,

@@ -44,14 +44,13 @@ calls.post('/', async (c) => {
 		channel?: CallChannel
 		/** E.164 phone number. Required for phone calls; ignored for web calls. */
 		to?: string
-		/** What the agent is trying to do. Compiled into a prompt (and cached) unless `prompt` is supplied. */
+		/** What the agent is trying to do. Compiled into a prompt once and cached. Pass this or `prompt`. */
 		goal?: string
 		/**
 		 * A prompt the caller owns, from `POST /prompts/compile` or hand-written.
-		 * Used verbatim, never recompiled. `goal` here is the extractor's rubric
-		 * and falls back to the top-level `goal`.
+		 * Used verbatim, never recompiled. Its `goal` is the extractor's rubric.
 		 */
-		prompt?: { goal?: string; systemPrompt: string; turnControlBlock?: string | null; agentName?: string }
+		prompt?: { goal: string; systemPrompt: string; turnControlBlock?: string | null; agentName?: string }
 		voice?: 'female' | 'male'
 		userTimezone?: string
 		context?: string
@@ -59,12 +58,10 @@ calls.post('/', async (c) => {
 		recipient?: { firstName: string; lastName?: string; email?: string }
 		aiDisclosure?: boolean
 		tools?: ApiToolInput[]
-		results?: Record<string, unknown>
+		/** What the caller wants back. Shown to the agent at runtime and read by the extractor afterward. */
 		extract?: Record<string, unknown>
 		ambience?: boolean
 		idempotencyKey?: string
-		/** @deprecated Older spelling of `prompt` without `goal`/`turnControlBlock`. Still accepted. */
-		persona?: { systemPrompt: string; agentName?: string }
 		/** Optional completion webhook (event: call.completed) for this agent config. */
 		webhook?: string
 	}
@@ -92,16 +89,15 @@ calls.post('/', async (c) => {
 		return c.json({ error: error instanceof Error ? error.message : 'Invalid tool or timezone configuration' }, 400)
 	}
 
-	// A caller-owned prompt is used as-is. `persona` is the older spelling.
-	const owned = body.prompt ?? (body.persona ? { ...body.persona, goal: undefined, turnControlBlock: null } : null)
-	const goal = (owned?.goal ?? body.goal)?.trim() ?? ''
-	if (!goal) return c.json({ error: owned ? 'prompt.goal (or goal) is required' : 'goal is required' }, 400)
+	// The agent is defined by a goal to compile or by a prompt the caller owns.
+	const goal = (body.prompt ? body.prompt.goal : body.goal)?.trim() ?? ''
+	if (!goal) return c.json({ error: body.prompt ? 'prompt.goal is required' : 'goal is required' }, 400)
 
-	const ownedPrompt = owned
+	const ownedPrompt = body.prompt
 		? {
-				systemPrompt: owned.systemPrompt?.trim() ?? '',
-				turnControlBlock: owned.turnControlBlock?.trim() || undefined,
-				agentName: owned.agentName?.trim() || undefined,
+				systemPrompt: body.prompt.systemPrompt?.trim() ?? '',
+				turnControlBlock: body.prompt.turnControlBlock?.trim() || undefined,
+				agentName: body.prompt.agentName?.trim() || undefined,
 			}
 		: null
 	if (ownedPrompt && !ownedPrompt.systemPrompt) {
@@ -127,9 +123,7 @@ calls.post('/', async (c) => {
 
 	const voice = body.voice ?? 'female'
 	const defaultAgentName = voice === 'male' ? 'Arlo' : 'Aurora'
-	// What the caller wants back. Belongs to the call: it is shown to the agent
-	// at runtime and read by the extractor afterward, and never recompiles anything.
-	const results = body.results ?? body.extract ?? {}
+	const results = body.extract ?? {}
 	// Office ambience is for the phone; a browser session defaults to a clean mix.
 	const ambience = channel === 'web' ? (body.ambience ?? false) : body.ambience
 

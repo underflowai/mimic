@@ -338,9 +338,6 @@ a branded assistant with a maintained voice. `prompt.goal` is still used by
 the result extractor as its rubric for `goalAchieved`. `context` is not woven
 into an owned prompt, so put required background in `systemPrompt`.
 
-The earlier `persona: { systemPrompt, agentName }` option with a top-level
-`goal` is still accepted and behaves the same way.
-
 ## Completion webhook
 
 ```typescript

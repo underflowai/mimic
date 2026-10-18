@@ -28,8 +28,6 @@ export const apiAgents = pgTable('api_agents', {
 	voice: voiceEnum('voice').notNull().default('female'),
 	context: jsonb('context').notNull().default({}),
 	tools: jsonb('tools').notNull().default([]),
-	/** Legacy: `extract` fields now live on each call (`api_calls.results`). Read as a fallback for older calls only. */
-	results: jsonb('results').notNull().default({}),
 	systemPrompt: text('system_prompt').notNull(),
 	turnControlBlock: text('turn_control_block'),
 	agentName: text('agent_name').notNull(),
@@ -58,7 +56,7 @@ export const apiCalls = pgTable(
 		/** Per-call `data` values, appended to the agent's prompt at runtime. */
 		callData: jsonb('call_data'),
 		/** Per-call `extract` fields: shown to the agent at runtime, filled in by the extractor afterward. */
-		results: jsonb('results'),
+		results: jsonb('results').notNull().default({}),
 		transcript: jsonb('transcript'),
 		toolCalls: jsonb('tool_calls'),
 		result: jsonb('result'),

@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { and, eq } from 'drizzle-orm'
 
 import { registerToolHandler, subscribeToCall, type ToolHandler } from '../call-bus.js'
-import { keyPrefixFor, verifyApiKey } from '../auth.js'
 import { getDb } from '../db/index.js'
-import { apiCalls, apiKeys, type ApiKeyRow } from '../db/schema.js'
+import { apiCalls } from '../db/schema.js'
 import { childLogger } from '../logger.js'
+import { authenticateApiKey } from '../middleware/auth.js'
 import { isUuid } from '../uuid.js'
 
 const authTimeoutMs = 10_000
@@ -15,17 +15,6 @@ interface ToolCallbackResolution {
 	connectionId: string
 	resolve: (result: { result: string } | { error: string }) => void
 	timeout: ReturnType<typeof setTimeout>
-}
-
-async function authenticateToken(token: string): Promise<ApiKeyRow | null> {
-	if (!token) return null
-	const db = getDb()
-	const prefix = keyPrefixFor(token)
-	const rows = await db
-		.select()
-		.from(apiKeys)
-		.where(and(eq(apiKeys.status, 'active'), eq(apiKeys.keyPrefix, prefix)))
-	return rows.find((row) => verifyApiKey(token, row.keyHash)) ?? null
 }
 
 async function getAuthorizedCallStatus(callId: string, apiKeyId: string) {
@@ -95,7 +84,7 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 			return
 		}
 
-		const apiKey = await authenticateToken(token)
+		const apiKey = await authenticateApiKey(token)
 		if (!apiKey) {
 			ws.send(JSON.stringify({ type: 'error', message: 'Invalid or missing API key' }))
 			ws.close()

@@ -19,7 +19,8 @@ export const apiKeys = pgTable('api_keys', {
 	keyPrefix: text('key_prefix').notNull(),
 	name: text('name').notNull(),
 	status: apiKeyStatusEnum('status').notNull().default('active'),
-	tenantId: text('tenant_id'),
+	/** Refreshed at most hourly by authentication; null means never used. */
+	lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
 	createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 

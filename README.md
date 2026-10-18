@@ -321,6 +321,11 @@ npx tsx src/scripts/create-key.ts my-app   # prints the key once; one per app
 pnpm start
 ```
 
+Keys are stored hashed. `api_keys` keeps each key's `name` and `last_used_at`
+(refreshed hourly while it is in use), so `SELECT name, status, last_used_at
+FROM api_keys` says what every key is and whether it is still alive;
+`src/scripts/revoke-key.ts` retires one.
+
 ### Deploy
 
 ```bash

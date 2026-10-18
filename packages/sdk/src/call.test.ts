@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { z } from 'zod'
+import { z as z4 } from 'zod/v4'
 
 import { Mimic, tool, type ExtractedData } from './index.js'
 import type { CallEvent, WebSocketConstructor } from './types.js'
@@ -504,6 +505,94 @@ describe('Mimic.calls', () => {
 			'DELETE http://localhost:3000/api/v1/calls/call_1',
 		])
 	})
+
+	it('creates a call without attaching anything to it', async () => {
+		let body: Record<string, unknown> = {}
+		const { mimic, ws } = createTestMimic(async (_input, init) => {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>
+			return jsonResponse({ id: 'call_9', status: 'pending', web: { url: 'wss://lk', token: 't' } }, 201)
+		})
+
+		const created = await mimic.calls.create({
+			channel: 'web',
+			goal: 'Welcome the visitor',
+			extract: z.object({ mood: z.enum(['happy', 'sad']).describe('how they seemed') }),
+			idempotencyKey: 'k1',
+		})
+		assert.deepEqual(created, { id: 'call_9', status: 'pending', web: { url: 'wss://lk', token: 't' } })
+		assert.equal(body.channel, 'web')
+		assert.equal(body.idempotencyKey, 'k1')
+		assert.deepEqual(body.extract, { mood: { type: 'string', enum: ['happy', 'sad'], description: 'how they seemed' } })
+		// No stream was opened: nothing in this process is watching the call.
+		await new Promise((r) => setImmediate(r))
+		assert.equal(ws.last, undefined)
+
+		const phone = createTestMimic(async () => jsonResponse({ id: 'call_10', status: 'pending' }, 201))
+		assert.equal((await phone.mimic.calls.create({ to: '+15551234567', goal: 'Say hi' })).web, null)
+
+		await assert.rejects(
+			mimic.calls.create({
+				goal: 'x',
+				to: '+15551234567',
+				tools: { t: tool({ description: 'd', parameters: z.object({}), run: () => 'ok' }) },
+			}),
+			/cannot take tools/,
+		)
+	})
+
+	it('streams events of an existing call as an observer and stops when it ends', async () => {
+		const { mimic, ws } = createTestMimic()
+		const events: CallEvent[] = []
+		const done = (async () => {
+			for await (const event of mimic.calls.events('call_1')) events.push(event)
+		})()
+
+		await new Promise((r) => setImmediate(r))
+		ws.last.open()
+		assert.deepEqual(JSON.parse(ws.last.sent[0]!), { type: 'auth', token: 'mk_test', tools: false })
+
+		ws.last.serverSend({ type: 'call_status', status: 'in_progress' })
+		ws.last.serverSend({ type: 'speech', role: 'agent', text: 'Hi!' })
+		ws.last.serverSend({ type: 'tool_call', callbackId: 'cb', toolName: 'x', toolArgs: {} })
+		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'yes' })
+		ws.last.serverSend({ type: 'speech', role: 'agent', text: 'after the end' })
+		await done
+
+		assert.deepEqual(events, [
+			{ type: 'status', status: 'in_progress' },
+			{ type: 'speech', role: 'agent', text: 'Hi!' },
+			{ type: 'done', goalAchieved: true, goalAchievedReason: 'yes' },
+		])
+		assert.equal(ws.last.readyState, 3)
+	})
+
+	it('ends the event stream on a terminal status and reports a dropped socket', async () => {
+		const { mimic, ws } = createTestMimic()
+
+		const finished: CallEvent[] = []
+		const finishedRun = (async () => {
+			for await (const event of mimic.calls.events('call_1')) finished.push(event)
+		})()
+		await new Promise((r) => setImmediate(r))
+		ws.last.open()
+		ws.last.serverSend({ type: 'error', message: 'No one joined' })
+		ws.last.serverSend({ type: 'call_status', status: 'failed' })
+		await finishedRun
+		assert.deepEqual(finished, [
+			{ type: 'error', message: 'No one joined' },
+			{ type: 'status', status: 'failed' },
+		])
+
+		const dropped = (async () => {
+			for await (const _event of mimic.calls.events('call_1')) {
+				// never reached
+			}
+		})()
+		await new Promise((r) => setImmediate(r))
+		ws.last.open()
+		ws.last.close()
+		await assert.rejects(dropped, /closed before the call ended/)
+	})
 })
 
 // ---------------------------------------------------------------------------
@@ -576,6 +665,43 @@ describe('Typed extract and discriminated result', () => {
 			concerns: { type: 'array', items: 'string', description: 'what worried them' },
 			callback: { type: 'number', description: 'hour to call back', nullable: true, optional: true },
 		})
+	})
+
+	it('reads Zod 4 schemas the same way, for extract and for tool parameters', async () => {
+		let body: Record<string, unknown> = {}
+		const { mimic } = createTestMimic(async (_input, init) => {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>
+			return jsonResponse({ id: 'call_1', status: 'pending' }, 201)
+		})
+		const lookup = tool({
+			description: 'Look something up',
+			parameters: z4.object({ id: z4.string().describe('what to look up') }),
+			run: ({ id }) => `found ${id.toUpperCase()}`, // `id` is typed as string
+		})
+		const call = mimic.call({
+			to: '+15551234567',
+			goal: 'Record the outcome',
+			tools: { lookup },
+			extract: z4.object({
+				outcome: z4.enum(['confirmed', 'rescheduled']).describe('what they decided'),
+				concerns: z4.array(z4.string()).describe('what worried them'),
+				callback: z4.number().nullable().optional().describe('hour to call back'),
+			}),
+		})
+		await call.id
+		assert.deepEqual(body.extract, {
+			outcome: { type: 'string', enum: ['confirmed', 'rescheduled'], description: 'what they decided' },
+			concerns: { type: 'array', items: 'string', description: 'what worried them' },
+			callback: { type: 'number', description: 'hour to call back', nullable: true, optional: true },
+		})
+		const [schema] = body.tools as Array<{ name: string; parameters: Record<string, unknown> }>
+		assert.equal(schema!.name, 'lookup')
+		assert.deepEqual(schema!.parameters.required, ['id'])
+		assert.equal((await lookup.run({ id: 'abc' })) as string, 'found ABC')
+		type Completed = Extract<Awaited<typeof call.result>, { status: 'completed' }>
+		null as unknown as Completed['data']['outcome'] satisfies 'confirmed' | 'rescheduled' | null
+		call.result.catch(() => {})
+		call.cancel()
 	})
 
 	it('preserves unknown null, explicit false, and zero in completed results', async () => {

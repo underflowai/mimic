@@ -1,18 +1,19 @@
-import type { z } from 'zod'
-
 import { MimicCall } from './call.js'
 import { MimicClient } from './client.js'
 import { MimicError } from './errors.js'
+import { streamCallEvents } from './events.js'
 import type { McpConnectionOptions } from './mcp.js'
 import { introspectTools } from './tools.js'
 import type {
 	AgentSpec,
 	Call,
+	CallEvent,
 	CallOptions,
 	CallOptionsBase,
 	CallPage,
 	CallStatus,
 	CompileOptions,
+	CreatedCall,
 	ExtractSchema,
 	ListCallsOptions,
 	MimicOptions,
@@ -58,22 +59,37 @@ export class Mimic {
 	private readonly wsOption: MimicOptions['WebSocket']
 
 	/**
-	 * Calls that already exist, live or finished.
+	 * Calls as records, with nothing held in this process. This is the API for
+	 * servers that answer requests and move on: create a call in one request,
+	 * read or watch it in another, let a webhook report the end.
 	 *
 	 * @example
 	 * ```typescript
-	 * const call = await mimic.calls.get(id)          // one call, with transcript, data, recordingUrl
+	 * const { id, web } = await mimic.calls.create({ channel: 'web', goal: '...' })
+	 * for await (const event of mimic.calls.events(id)) { ... } // from any process
+	 * const call = await mimic.calls.get(id)          // transcript, data, recordingUrl
 	 * const page = await mimic.calls.list({ limit: 50 }) // newest first; page.nextCursor for more
-	 * await mimic.calls.cancel(id)                     // end a call from anywhere
+	 * await mimic.calls.cancel(id)
 	 * ```
 	 */
 	readonly calls: {
+		/**
+		 * Create a call and return at once. Tools cannot be passed here: they run
+		 * in the process that made the call, which {@link Mimic.call} keeps open.
+		 */
+		create: (options: CallOptions) => Promise<CreatedCall>
 		/** Fetch a call by id. `recordingUrl` is a fresh one-hour link each time. */
 		get: (id: string) => Promise<Call>
 		/** Page through your calls, newest first. */
 		list: (options?: ListCallsOptions) => Promise<CallPage>
 		/** End a call that is pending or in progress. Finished calls are returned as they are. */
 		cancel: (id: string) => Promise<{ id: string; status: CallStatus }>
+		/**
+		 * Watch a call's `speech`, `status`, `error`, and `done` events as they
+		 * happen; the iteration ends with the call. Listening only, so it works
+		 * beside whatever created the call.
+		 */
+		events: (id: string) => AsyncIterable<CallEvent>
 	}
 
 	/**
@@ -102,9 +118,21 @@ export class Mimic {
 		this.client = new MimicClient(opts)
 		this.wsOption = typeof options === 'object' ? options.WebSocket : undefined
 		this.calls = {
+			create: async (callOptions) => {
+				if (callOptions.tools && Object.keys(callOptions.tools).length > 0) {
+					throw new MimicError('calls.create() cannot take tools; use mimic.call(), which stays connected to run them')
+				}
+				const created = await this.client.createCall(callOptions)
+				return { id: created.id, status: created.status, web: created.web ?? null }
+			},
 			get: (id) => this.client.getCall(id),
 			list: (listOptions) => this.client.listCalls(listOptions),
 			cancel: (id) => this.client.cancelCall(id),
+			events: (id) => {
+				const WebSocketImpl = this.wsOption === null ? undefined : (this.wsOption ?? globalThis.WebSocket)
+				if (!WebSocketImpl) throw new MimicError('calls.events() needs a WebSocket; pass one in the Mimic options')
+				return streamCallEvents(this.client, id, WebSocketImpl)
+			},
 		}
 	}
 
@@ -192,7 +220,7 @@ export class Mimic {
 }
 
 /** The object type an `extract` schema produces, as the result generic expects it. */
-type Extracted<S extends ExtractSchema> = { [K in keyof z.infer<S>]: z.infer<S>[K] }
+type Extracted<S extends ExtractSchema> = { [K in keyof S['_output']]: S['_output'][K] }
 
 // ── Re-exports ────────────────────────────────────────────────────────
 
@@ -213,6 +241,7 @@ export type {
 	CallResult,
 	CallStatus,
 	CompileOptions,
+	CreatedCall,
 	DoneEvent,
 	ErrorEvent,
 	ExtractedData,
@@ -222,6 +251,7 @@ export type {
 	MimicTool,
 	Prompt,
 	SpeechEvent,
+	StatusEvent,
 	ToolCallEvent,
 	ToolCallRecord,
 	ToolErrorEvent,
@@ -232,4 +262,5 @@ export type {
 	Voice,
 	WebhookEvent,
 	WebJoin,
+	ZodSchemaLike,
 } from './types.js'

@@ -1,6 +1,6 @@
 import { MimicClient } from './client.js'
 import { CallFailedError, CallTimeoutError, MimicError } from './errors.js'
-import { executeTool, introspectTools } from './tools.js'
+import { executeTool } from './tools.js'
 import type {
 	Call,
 	CallEvent,
@@ -148,6 +148,7 @@ export class MimicCall<
 	private streamTimeout: ReturnType<typeof setTimeout> | null = null
 	private activeWs: WebSocket | null = null
 	private cancelled = false
+	private lastError: string | null = null
 
 	constructor(init: MimicCallInit) {
 		this.client = init.client
@@ -239,26 +240,7 @@ export class MimicCall<
 
 	private async start() {
 		try {
-			const toolSchemas = introspectTools(this.tools)
-
-			const { call } = await this.client.createCall({
-				goal: this.options.goal,
-				prompt: this.options.prompt,
-				channel: this.options.channel,
-				to: this.options.to,
-				voice: this.options.voice,
-				userTimezone: this.options.userTimezone,
-				context: this.options.context,
-				data: this.options.data,
-				recipient: this.options.recipient,
-				aiDisclosure: this.options.aiDisclosure,
-				tools: toolSchemas,
-				extract: this.options.extract,
-				ambience: this.options.ambience,
-				webhook: this.options.webhook,
-				webhookSecret: this.options.webhookSecret,
-				idempotencyKey: this.options.idempotencyKey,
-			})
+			const call = await this.client.createCall(this.options)
 
 			this.callId = call.id
 			this.idResolve(call.id)
@@ -393,13 +375,16 @@ export class MimicCall<
 			}
 
 			case 'error':
+				this.lastError = msg.message
 				this.pushEvent({ type: 'error', message: msg.message })
 				break
 
 			case 'call_status':
+				this.pushEvent({ type: 'status', status: msg.status })
 				if (msg.status === 'failed' || msg.status === 'cancelled') {
-					const message = msg.status === 'cancelled' ? 'Call cancelled' : 'Call failed'
-					this.pushEvent({ type: 'error', message })
+					// The server sends the reason just before the status; fall back to a generic one.
+					const message = this.lastError ?? (msg.status === 'cancelled' ? 'Call cancelled' : 'Call failed')
+					if (!this.lastError) this.pushEvent({ type: 'error', message })
 					this.complete()
 					this.settle('reject', new CallFailedError(message, this.callId!, msg))
 				} else if (msg.status === 'completed' && !this.done) {
@@ -450,11 +435,17 @@ export class MimicCall<
 		const pollIntervalMs = this.options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
 		const started = Date.now()
 
+		let lastStatus: Call['status'] | null = null
+
 		while (Date.now() - started < timeoutMs) {
 			if (this.cancelled) return
 
 			try {
 				const call = await this.client.getCall(callId)
+				if (call.status !== lastStatus) {
+					lastStatus = call.status
+					this.pushEvent({ type: 'status', status: call.status })
+				}
 
 				if (call.status === 'completed') {
 					const result = toCallResult<T>(call)

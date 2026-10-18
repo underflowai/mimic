@@ -145,6 +145,16 @@ const page = await mimic.calls.list({ limit: 50 }) // newest first; page.nextCur
 await mimic.calls.cancel(id) // end a call from another process
 ```
 
+A request handler that cannot stay connected can create the call and let
+another request watch it:
+
+```typescript
+const { id, web } = await mimic.calls.create({ channel: 'web', goal, extract }) // returns at once
+for await (const event of mimic.calls.events(id)) {
+	/* status, speech, done, error */
+}
+```
+
 To be told when a call ends without holding the process open, pass a
 `webhook`. It receives `{ event: 'call.completed' | 'call.failed', call }`
 where `call` is the same object `mimic.calls.get()` returns. Add a

@@ -1,6 +1,6 @@
 # @underflowai/mimic
 
-## Unreleased
+## 0.4.0
 
 Added
 
@@ -30,8 +30,21 @@ Added
 - `webhookSecret` signs webhook deliveries (`x-mimic-signature: t=...,v1=...`);
   `verifyWebhook({ payload, signature, secret })` checks them. New type
   `WebhookEvent`.
+- `mimic.calls.create(options)` creates a call without attaching to it and
+  returns `{ id, status, web }` (`CreatedCall`), for request handlers that
+  cannot stay connected. It takes everything `mimic.call()` takes except
+  `tools`. `mimic.calls.events(id)` then streams the call's events
+  (`status`, `speech`, `done`, `error`) as an async iterable that ends with
+  the call; any number of watchers can follow one call.
+- `status` event (`{ status }`) whenever the call changes state, on
+  `MimicCall` and `calls.events()`.
+- Zod 4 schemas work for `extract` and tool `parameters` alongside Zod 3.
+  New type `ZodSchemaLike`.
 
 Changed
+
+- A call that fails or is cancelled delivers its `error` event before the
+  final status, so a stream that stops at the status still has the reason.
 
 - Webhooks fire when a call fails or is cancelled too, not only when it
   completes. The body is `{ event: 'call.completed' | 'call.failed', call }`

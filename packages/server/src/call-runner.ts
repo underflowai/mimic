@@ -301,8 +301,8 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		}
 
 		await updateCall(callId, { status: 'failed', errorMessage }).catch(() => {})
-		publishCallEvent(callId, { type: 'call_status', status: 'failed' })
 		publishCallEvent(callId, { type: 'error', message: errorMessage })
+		publishCallEvent(callId, { type: 'call_status', status: 'failed' })
 		await notifyCallWebhook(callId)
 	}
 }

@@ -2,7 +2,7 @@
 
 ## Setup
 
-Install the SDK and Zod:
+Install the SDK and Zod (3 or 4; both work):
 
 ```bash
 npm install @underflowai/mimic zod
@@ -223,6 +223,10 @@ call.on('done', ({ goalAchieved, goalAchievedReason }) => {
 call.on('error', ({ message }) => {
 	console.error(`Error: ${message}`)
 })
+
+call.on('status', ({ status }) => {
+	console.log(`Call is now ${status}`) // pending → in_progress → completed | failed | cancelled
+})
 ```
 
 Or use async iteration:
@@ -324,6 +328,30 @@ page.nextCursor // pass as `cursor` for the next page; null on the last
 
 Over HTTP the same records come from `GET /api/v1/calls/:id` and
 `GET /api/v1/calls?limit=&status=&cursor=`.
+
+### From a request/response server
+
+`mimic.call()` keeps a connection open for the life of the call, which does
+not fit a request handler that has to return. Create the call without
+attaching to it, hand the id (and `web` join details) to the client, and
+watch it later from whichever request needs to:
+
+```typescript
+// POST /sessions
+const { id, status, web } = await mimic.calls.create({ channel: 'web', goal, extract })
+
+// GET /sessions/:id/events, as server-sent events
+for await (const event of mimic.calls.events(id)) {
+	// 'status' | 'speech' | 'done' | 'error'; the loop ends with the call
+	res.write(`data: ${JSON.stringify(event)}\n\n`)
+}
+```
+
+`calls.create` takes the same options as `mimic.call()` except `tools`:
+nothing stays connected to run them. Any number of processes can iterate
+`calls.events(id)` at once, and a stream that stops before the call has
+ended throws a `MimicError`. In Node 22+ and browsers the stream uses the
+global `WebSocket`; elsewhere pass one in the `Mimic` options.
 
 ## Cancelling a call
 

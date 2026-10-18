@@ -1,9 +1,9 @@
 import { ApiError } from './errors.js'
-import { ZodObject, type ZodType } from 'zod'
-
+import { introspectTools } from './tools.js'
 import type {
 	Call,
 	CallChannel,
+	CallOptions,
 	CallPage,
 	CallStatus,
 	CreateCallResponse,
@@ -14,6 +14,7 @@ import type {
 	ToolSchema,
 	Voice,
 } from './types.js'
+import { SDK_VERSION } from './version.js'
 
 /** Wire form of one `extract` field. The server reads string, number, boolean, enum, and arrays of those. */
 interface ExtractField {
@@ -26,42 +27,52 @@ interface ExtractField {
 }
 
 export function serializeExtractSchema(schema?: ExtractSchema): Record<string, ExtractField> | undefined {
-	if (!schema || !(schema instanceof ZodObject)) return undefined
-	const shape = schema.shape as Record<string, ZodType>
+	const shape = schema?.shape
+	if (!shape) return undefined
 	const result: Record<string, ExtractField> = {}
 	for (const [key, field] of Object.entries(shape)) {
-		const description = field.description ?? key
-		const nullable = field.isNullable()
-		const optional = field.isOptional()
-		result[key] = {
-			...describeZodType(field),
-			description,
-			...(nullable && { nullable }),
-			...(optional && { optional }),
-		}
+		const description = (field as { description?: string }).description ?? key
+		result[key] = { ...describeZodField(field), description }
 	}
 	return result
 }
 
-type ZodDef = { typeName?: string; innerType?: ZodType; type?: ZodType; values?: string[] }
-
-function describeZodType(field: ZodType): Pick<ExtractField, 'type' | 'enum' | 'items'> {
-	// Walk through nullable/optional wrappers to find the base type
-	const def = (field as { _def?: ZodDef })._def
-	if (!def) return { type: 'string' }
-	if (
-		(def.typeName === 'ZodNullable' || def.typeName === 'ZodOptional' || def.typeName === 'ZodDefault') &&
-		def.innerType
-	) {
-		return describeZodType(def.innerType)
-	}
-	if (def.typeName === 'ZodEnum' && def.values) return { type: 'string', enum: def.values }
-	if (def.typeName === 'ZodArray' && def.type) return { type: 'array', items: describeZodType(def.type).type }
-	const name = def.typeName?.replace('Zod', '').toLowerCase()
-	return { type: name ?? 'string' }
+/**
+ * One field's definition. Zod 3 keeps it on `_def` with a `typeName` like
+ * `ZodNullable`; Zod 4 on `_zod.def` with a `type` like `nullable`. Wrappers
+ * point at `innerType` in both; arrays hold their element in `type` (3) or
+ * `element` (4); enums list `values` (3) or `entries` (4).
+ */
+interface ZodFieldDef {
+	typeName?: string
+	type?: unknown
+	innerType?: unknown
+	element?: unknown
+	values?: string[]
+	entries?: Record<string, unknown>
 }
 
-import { SDK_VERSION } from './version.js'
+function describeZodField(field: unknown): Omit<ExtractField, 'description'> {
+	const def =
+		(field as { _zod?: { def?: ZodFieldDef }; _def?: ZodFieldDef } | null)?._zod?.def ??
+		(field as { _def?: ZodFieldDef } | null)?._def
+	if (!def) return { type: 'string' }
+	const kind = (def.typeName ?? (typeof def.type === 'string' ? def.type : '')).replace(/^Zod/, '').toLowerCase()
+	switch (kind) {
+		case 'nullable':
+			return { ...describeZodField(def.innerType), nullable: true }
+		case 'optional':
+		case 'default':
+			return { ...describeZodField(def.innerType), optional: true }
+		case 'enum':
+			return { type: 'string', enum: def.values ?? Object.values(def.entries ?? {}).map(String) }
+		case 'array':
+			return { type: 'array', items: describeZodField(def.element ?? def.type).type }
+		default:
+			return { type: kind || 'string' }
+	}
+}
+
 /** Hosted Mimic API. `mimic.dev` is not provisioned; this is the live Railway domain. */
 const DEFAULT_BASE_URL = 'https://api-production-6146.up.railway.app'
 const MAX_RETRIES = 2
@@ -104,8 +115,9 @@ export class MimicClient {
 		return url.toString()
 	}
 
-	streamAuthPayload(): string {
-		return JSON.stringify({ type: 'auth', token: this.apiKey })
+	/** First frame on the stream. `tools: false` only listens, so it can sit beside the connection that runs the call's tools. */
+	streamAuthPayload(options: { tools: boolean } = { tools: true }): string {
+		return JSON.stringify({ type: 'auth', token: this.apiKey, ...(options.tools ? {} : { tools: false }) })
 	}
 
 	async compilePrompt(params: {
@@ -122,47 +134,28 @@ export class MimicClient {
 		})
 	}
 
-	async createCall(params: {
-		goal?: string
-		prompt?: Prompt
-		channel?: CallChannel
-		to?: string
-		voice?: Voice
-		userTimezone?: string
-		context?: string
-		data?: Record<string, unknown>
-		recipient?: { firstName: string; lastName?: string; email?: string }
-		aiDisclosure?: boolean
-		tools?: ToolSchema[]
-		extract?: ExtractSchema
-		ambience?: boolean
-		webhook?: string
-		webhookSecret?: string
-		idempotencyKey?: string
-	}): Promise<{ call: CreateCallResponse }> {
-		const call = await this.request<CreateCallResponse>('/api/v1/calls', {
+	async createCall(options: CallOptions): Promise<CreateCallResponse> {
+		return this.request<CreateCallResponse>('/api/v1/calls', {
 			method: 'POST',
 			body: JSON.stringify({
-				channel: params.channel,
-				to: params.to,
-				goal: params.goal,
-				prompt: params.prompt,
-				voice: params.voice ?? 'female',
-				userTimezone: params.userTimezone,
-				context: params.context,
-				data: params.data,
-				recipient: params.recipient,
-				aiDisclosure: params.aiDisclosure,
-				tools: params.tools ?? [],
-				extract: serializeExtractSchema(params.extract),
-				ambience: params.ambience,
-				webhook: params.webhook,
-				webhookSecret: params.webhookSecret,
-				idempotencyKey: params.idempotencyKey,
+				channel: options.channel,
+				to: options.to,
+				goal: options.goal,
+				prompt: options.prompt,
+				voice: options.voice ?? 'female',
+				userTimezone: options.userTimezone,
+				context: options.context,
+				data: options.data,
+				recipient: options.recipient,
+				aiDisclosure: options.aiDisclosure,
+				tools: options.tools ? introspectTools(options.tools) : [],
+				extract: serializeExtractSchema(options.extract),
+				ambience: options.ambience,
+				webhook: options.webhook,
+				webhookSecret: options.webhookSecret,
+				idempotencyKey: options.idempotencyKey,
 			}),
 		})
-
-		return { call }
 	}
 
 	async getCall(id: string): Promise<Call> {

@@ -1,8 +1,8 @@
-import type { ZodError, ZodType } from 'zod'
+import type { ZodType } from 'zod'
 import { toJSONSchema as zod4ToJsonSchema, type $ZodType } from 'zod/v4/core'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 
-import type { MimicTool, ToolInput, ToolSchema } from './types.js'
+import type { MimicTool, ToolInput, ToolSchema, ZodSchemaLike } from './types.js'
 
 /**
  * A tool with no declared `kind` is a read: it runs as soon as the caller's
@@ -36,7 +36,7 @@ export const defaultToolKind = 'read'
  * })
  * ```
  */
-export function tool<T extends ZodType>(opts: {
+export function tool<T extends ZodSchemaLike>(opts: {
 	description: string
 	/**
 	 * `'read'` (default) runs as soon as the request is clear. `'write'` is for
@@ -44,8 +44,9 @@ export function tool<T extends ZodType>(opts: {
 	 * caller's explicit go-ahead.
 	 */
 	kind?: 'read' | 'write'
+	/** A Zod object schema (Zod 3 or 4) for the arguments. */
 	parameters: T
-	run: (input: T extends ZodType<infer U> ? U : never) => Promise<string> | string
+	run: (input: T['_output']) => Promise<string> | string
 }): MimicTool {
 	return {
 		__mimicTool: true,
@@ -60,14 +61,18 @@ export function tool<T extends ZodType>(opts: {
 
 /**
  * JSON Schema for a tool's parameters, preserving types, enums, nesting, and
- * required/optional. Accepts both Zod 3 schemas (the `zod` import) and Zod 4
- * schemas (`zod/v4`), which ship in the same package.
+ * required/optional. Accepts Zod 3 schemas and Zod 4 schemas (from `zod@4` or
+ * `zod/v4`), told apart by the `_zod` internals only Zod 4 has.
  */
-export function toolParameterSchema(schema: ZodType): Record<string, unknown> {
+export function toolParameterSchema(schema: ZodSchemaLike): Record<string, unknown> {
 	const json: Record<string, unknown> =
 		'_zod' in schema
 			? zod4ToJsonSchema(schema as unknown as $ZodType, { io: 'input', unrepresentable: 'any' })
-			: zodToJsonSchema(schema, { $refStrategy: 'none', target: 'jsonSchema7', pipeStrategy: 'input' })
+			: zodToJsonSchema(schema as unknown as ZodType, {
+					$refStrategy: 'none',
+					target: 'jsonSchema7',
+					pipeStrategy: 'input',
+				})
 	// The draft URL is noise on the wire; the server reads the shape, not the dialect.
 	const { $schema: _dialect, ...parameters } = json
 	return parameters
@@ -90,9 +95,12 @@ export function introspectTools(tools: Record<string, ToolInput>): ToolSchema[] 
 
 // ── Execution ─────────────────────────────────────────────────────────
 
-function formatZodError(toolName: string, err: ZodError): string {
+function formatZodError(
+	toolName: string,
+	err: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> },
+): string {
 	const issues = err.issues.map((issue) => {
-		const path = issue.path.length > 0 ? issue.path.join('.') : '(root)'
+		const path = issue.path.length > 0 ? issue.path.map(String).join('.') : '(root)'
 		return `  - ${path}: ${issue.message}`
 	})
 	return `Tool "${toolName}" received invalid arguments:\n${issues.join('\n')}`

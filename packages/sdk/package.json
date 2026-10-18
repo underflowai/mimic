@@ -1,6 +1,6 @@
 {
 	"name": "@underflowai/mimic",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"type": "module",
 	"description": "Make AI phone calls with a few lines of code. Tools run locally — no webhooks needed.",
 	"license": "MIT",

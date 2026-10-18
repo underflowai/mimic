@@ -322,8 +322,9 @@ calls.post('/', async (c) => {
 				.set({ status: 'failed', errorMessage })
 				.where(eq(apiCalls.id, call.id))
 				.catch(() => {})
-			publishCallEvent(call.id, { type: 'call_status', status: 'failed' })
+			// The reason goes out before the terminal status: subscribers stop reading at the status.
 			publishCallEvent(call.id, { type: 'error', message: errorMessage })
+			publishCallEvent(call.id, { type: 'call_status', status: 'failed' })
 		}
 	})()
 
@@ -447,8 +448,8 @@ calls.delete('/:id', async (c) => {
 		}
 	}
 
-	publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })
 	publishCallEvent(callId, { type: 'error', message: 'Call cancelled by client' })
+	publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })
 	// The worker skips its own writes once it sees the cancel, so the webhook is ours to send.
 	void notifyCallWebhook(callId)
 

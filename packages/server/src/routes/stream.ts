@@ -56,13 +56,13 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 	let authTimeout: ReturnType<typeof setTimeout> | null = null
 	const connectionId = randomUUID()
 
-	async function authenticateAndBind(token: string) {
+	async function authenticateAndBind(token: string, runsTools: boolean) {
 		// A client may send both a Bearer header and a first-frame auth message;
 		// only the first one gets to bind the connection.
 		if (authenticated || authInFlight) return
 		authInFlight = true
 		try {
-			await bind(token)
+			await bind(token, runsTools)
 		} catch (err) {
 			// Called without a catch from onOpen; an escaped rejection would take
 			// the process down. Close this socket and leave the rest alone.
@@ -76,7 +76,12 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 		}
 	}
 
-	async function bind(token: string) {
+	/**
+	 * A connection that runs tools takes the call's tool channel, which only
+	 * one connection may hold. An observer (`tools: false` in the auth frame)
+	 * just listens, so any number can watch a call alongside its owner.
+	 */
+	async function bind(token: string, runsTools: boolean) {
 		const ws = wsRef
 		if (!ws) return
 		if (!callId.trim()) {
@@ -109,6 +114,16 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 				ws.send(JSON.stringify(event))
 			} catch {}
 		})
+
+		if (!runsTools) {
+			authenticated = true
+			if (authTimeout) {
+				clearTimeout(authTimeout)
+				authTimeout = null
+			}
+			ws.send(JSON.stringify({ type: 'call_status', status }))
+			return
+		}
 
 		toolHandler = await registerToolHandler(
 			callId,
@@ -179,7 +194,7 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 				ws.send(JSON.stringify({ type: 'error', message: 'WebSocket auth timeout' }))
 				ws.close()
 			}, authTimeoutMs)
-			if (headerToken) void authenticateAndBind(headerToken)
+			if (headerToken) void authenticateAndBind(headerToken, true)
 		},
 
 		onMessage(event: { data: unknown }, _ws: unknown) {
@@ -188,6 +203,7 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 					const msg = JSON.parse(String(event.data)) as {
 						type?: string
 						token?: string
+						tools?: boolean
 						callbackId?: string
 						result?: string
 						error?: string
@@ -195,7 +211,7 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 
 					if (!authenticated) {
 						if (msg.type === 'auth' && typeof msg.token === 'string') {
-							await authenticateAndBind(msg.token)
+							await authenticateAndBind(msg.token, msg.tools !== false)
 							return
 						}
 						wsRef?.send(JSON.stringify({ type: 'error', message: 'Authenticate first with { type: "auth", token }' }))

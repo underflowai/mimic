@@ -1,7 +1,20 @@
-import type { ZodObject, ZodType } from 'zod'
+/**
+ * A Zod schema, from Zod 3 or Zod 4. Only what both expose is used: `safeParse`
+ * for tool arguments, the output type for inference, and the field definitions
+ * for the wire format. Bring whichever `zod` your project already has.
+ */
+export interface ZodSchemaLike<Output = unknown> {
+	safeParse(
+		data: unknown,
+	):
+		| { success: true; data: Output }
+		| { success: false; error: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> } }
+	readonly _output: Output
+	readonly description?: string
+}
 
-/** A Zod object schema describing what to extract from a call. */
-export type ExtractSchema = ZodObject<Record<string, ZodType>>
+/** A Zod object schema (`z.object({...})`, Zod 3 or 4) describing what to extract from a call. */
+export type ExtractSchema = ZodSchemaLike<Record<string, unknown>> & { readonly shape: Record<string, unknown> }
 
 // ── Client options ────────────────────────────────────────────────────
 
@@ -106,7 +119,7 @@ export interface MimicTool {
 	kind?: 'read' | 'write'
 	/** @internal Preserve the original schema of an MCP-discovered tool. */
 	_mcpMeta?: { toolName: string; inputSchema: Record<string, unknown> }
-	schema: ZodType
+	schema: ZodSchemaLike
 	run: (input: unknown) => Promise<string> | string
 }
 
@@ -330,8 +343,15 @@ export interface ErrorEvent {
 	message: string
 }
 
+/** The call moved to a new {@link CallStatus}: `in_progress` once it connects, then how it ended. */
+export interface StatusEvent {
+	type: 'status'
+	status: CallStatus
+}
+
 /** Union of all events emitted during a call. */
-export type CallEvent = SpeechEvent | ToolCallEvent | ToolResultEvent | ToolErrorEvent | DoneEvent | ErrorEvent
+export type CallEvent =
+	SpeechEvent | ToolCallEvent | ToolResultEvent | ToolErrorEvent | DoneEvent | ErrorEvent | StatusEvent
 
 /** Map from event type string to its event interface. Used by `.on()`. */
 export interface CallEventMap {
@@ -341,6 +361,7 @@ export interface CallEventMap {
 	tool_error: ToolErrorEvent
 	done: DoneEvent
 	error: ErrorEvent
+	status: StatusEvent
 }
 
 // ── Call records ──────────────────────────────────────────────────────
@@ -455,6 +476,19 @@ export type CallResult<T extends Record<string, unknown> = Record<string, unknow
 			id: string
 			error: string
 	  }
+
+/**
+ * What {@link Mimic.calls.create} returns: the call exists and is on its way.
+ * Nothing in your process is attached to it; find it again with
+ * `mimic.calls.get(id)`, watch it with `mimic.calls.events(id)`, or let the
+ * `webhook` tell you when it ends.
+ */
+export interface CreatedCall {
+	id: string
+	status: CallStatus
+	/** For web calls, what the browser needs to join. Null for phone calls. */
+	web: WebJoin | null
+}
 
 // ── API wire types ────────────────────────────────────────────────────
 

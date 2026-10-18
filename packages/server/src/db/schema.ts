@@ -83,7 +83,8 @@ export const apiCalls = pgTable(
 		/** HMAC key for the webhook signature, when the caller wants one. */
 		webhookSecret: text('webhook_secret'),
 		webhookDeliveredAt: timestamp('webhook_delivered_at', { withTimezone: true }),
-		createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+		/** Millisecond precision so a value that went through a JS Date (the list cursor) matches the row exactly. */
+		createdAt: timestamp('created_at', { withTimezone: true, precision: 3 }).notNull().defaultNow(),
 		updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 	},
 	(table) => ({

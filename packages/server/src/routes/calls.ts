@@ -339,11 +339,11 @@ function encodeCursor(row: Pick<ApiCallRow, 'createdAt' | 'id'>) {
 	return Buffer.from(`${row.createdAt.toISOString()}|${row.id}`).toString('base64url')
 }
 
-function decodeCursor(cursor: string): { createdAt: Date; id: string } | null {
-	const [iso, id] = Buffer.from(cursor, 'base64url').toString().split('|')
-	if (!iso || !id || !isUuid(id)) return null
-	const createdAt = new Date(iso)
-	return Number.isNaN(createdAt.getTime()) ? null : { createdAt, id }
+/** The timestamp stays a string: the postgres driver will not serialize a Date inside a raw `sql` fragment. */
+function decodeCursor(cursor: string): { createdAt: string; id: string } | null {
+	const [createdAt, id] = Buffer.from(cursor, 'base64url').toString().split('|')
+	if (!createdAt || !id || !isUuid(id) || Number.isNaN(Date.parse(createdAt))) return null
+	return { createdAt, id }
 }
 
 /** Newest first. `?limit=` (1–100, default 20), `?status=`, `?cursor=` from the previous page's `nextCursor`. */
@@ -369,7 +369,9 @@ calls.get('/', async (c) => {
 			and(
 				eq(apiCalls.apiKeyId, apiKey.id),
 				status && eq(apiCalls.status, status),
-				cursor ? sql`(${apiCalls.createdAt}, ${apiCalls.id}) < (${cursor.createdAt}, ${cursor.id}::uuid)` : undefined,
+				cursor
+					? sql`(${apiCalls.createdAt}, ${apiCalls.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`
+					: undefined,
 			),
 		)
 		.orderBy(desc(apiCalls.createdAt), desc(apiCalls.id))

@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { eq } from 'drizzle-orm'
-import { EgressClient, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
+import { EgressClient, EgressStatus, EncodedFileOutput, EncodedFileType, S3Upload } from 'livekit-server-sdk'
 import OpenAI from 'openai'
 
 import { config, createCallOrchestrator, type AudioTransport, type CallEventRecord } from '@mimic/engine'
@@ -29,6 +29,35 @@ import { callRoomName } from './web-join.js'
 
 /** How long a web call waits for the browser before failing with "no one joined". */
 const WEB_CALLER_JOIN_TIMEOUT_MS = 2 * 60_000
+
+/** How long to wait for the recording upload before linking it unverified. */
+const RECORDING_UPLOAD_TIMEOUT_MS = 30_000
+
+/**
+ * Stop the recording and wait for its upload, so the `recordingUrl` handed out
+ * with the completed call works on the first fetch. Left to the room closing,
+ * the egress was still flushing when the webhook fired, and the link 404ed for
+ * a few seconds. Returns the object key, or null when the egress failed.
+ */
+async function finishRecording(egress: EgressClient, callId: string, egressId: string): Promise<string | null> {
+	const key = `call-recordings/${callId}.ogg`
+	await egress.stopEgress(egressId).catch((err: unknown) => {
+		// Usually already ending because the far end left and emptied the room; the poll below settles it either way.
+		childLogger({ callId, egressId, err }).warn('stopEgress failed')
+	})
+	const deadline = Date.now() + RECORDING_UPLOAD_TIMEOUT_MS
+	while (Date.now() < deadline) {
+		const [info] = await egress.listEgress({ egressId }).catch(() => [])
+		if (info?.status === EgressStatus.EGRESS_COMPLETE) return key
+		if (info && info.status > EgressStatus.EGRESS_COMPLETE) {
+			childLogger({ callId, egressId, status: EgressStatus[info.status], error: info.error }).error('recording failed')
+			return null
+		}
+		await new Promise((resolve) => setTimeout(resolve, 1000))
+	}
+	childLogger({ callId, egressId }).warn('recording upload still pending; linking it anyway')
+	return key
+}
 
 function agentRowToConfig(row: ApiAgentRow): AgentConfig {
 	return {
@@ -124,7 +153,9 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		const toolCallRecords: ToolCallRecord[] = []
 
 		const ambienceEnabled = (agent.ambience as boolean | null) !== false
-		const recordingEnabled = Boolean(process.env.RECORDING_S3_BUCKET)
+		const egressClient = process.env.RECORDING_S3_BUCKET
+			? new EgressClient(config.livekit.url, config.livekit.apiKey, config.livekit.apiSecret)
+			: null
 
 		const { sessionComplete } = await createVoiceAgent({
 			roomName,
@@ -139,9 +170,8 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 			// in the room. A browser may never show up; give it a bounded wait.
 			callerJoinTimeoutMs: isWebCall ? WEB_CALLER_JOIN_TIMEOUT_MS : undefined,
 			async onReady() {
-				if (!recordingEnabled) return
+				if (!egressClient) return
 				try {
-					const egressClient = new EgressClient(config.livekit.url, config.livekit.apiKey, config.livekit.apiSecret)
 					const info = await egressClient.startRoomCompositeEgress(
 						roomName,
 						{
@@ -214,6 +244,9 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					return
 				}
 
+				// Overlaps the upload with extraction; awaited before the completion write.
+				const recordingPath = egressClient && egressId ? finishRecording(egressClient, callId, egressId) : null
+
 				const transcript = result.turns.map((turn) => ({
 					role: turn.role === 'agent' ? 'agent' : 'caller',
 					content: turn.content,
@@ -240,7 +273,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					goalAchieved: extraction.goalAchieved,
 					goalAchievedReason: extraction.goalAchievedReason,
 					duration: result.durationSeconds,
-					recordingPath: egressId ? `call-recordings/${callId}.ogg` : null,
+					recordingPath: await recordingPath,
 					eventLogPath,
 				})
 

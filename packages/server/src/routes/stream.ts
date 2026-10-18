@@ -5,6 +5,8 @@ import { registerToolHandler, subscribeToCall, type ToolHandler } from '../call-
 import { keyPrefixFor, verifyApiKey } from '../auth.js'
 import { getDb } from '../db/index.js'
 import { apiCalls, apiKeys, type ApiKeyRow } from '../db/schema.js'
+import { childLogger } from '../logger.js'
+import { isUuid } from '../uuid.js'
 
 const authTimeoutMs = 10_000
 const toolCallbackTimeoutMs = 30_000
@@ -61,6 +63,14 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 		authInFlight = true
 		try {
 			await bind(token)
+		} catch (err) {
+			// Called without a catch from onOpen; an escaped rejection would take
+			// the process down. Close this socket and leave the rest alone.
+			childLogger({ callId, err: err instanceof Error ? err.message : String(err) }).error('failed to bind call stream')
+			try {
+				wsRef?.send(JSON.stringify({ type: 'error', message: 'Could not open the call stream' }))
+				wsRef?.close()
+			} catch {}
 		} finally {
 			authInFlight = false
 		}
@@ -71,6 +81,11 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 		if (!ws) return
 		if (!callId.trim()) {
 			ws.send(JSON.stringify({ type: 'error', message: 'Missing call id' }))
+			ws.close()
+			return
+		}
+		if (!isUuid(callId)) {
+			ws.send(JSON.stringify({ type: 'error', message: 'Call not found or unauthorized' }))
 			ws.close()
 			return
 		}
@@ -113,12 +128,14 @@ export function handleStreamUpgrade(callId: string, headerToken?: string) {
 					pendingToolCalls.set(callbackId, { connectionId, resolve, timeout })
 
 					try {
-						socket.send(JSON.stringify({
-							type: 'tool_call',
-							callbackId,
-							toolName,
-							toolArgs,
-						}))
+						socket.send(
+							JSON.stringify({
+								type: 'tool_call',
+								callbackId,
+								toolName,
+								toolArgs,
+							}),
+						)
 					} catch {
 						pendingToolCalls.delete(callbackId)
 						clearTimeout(timeout)

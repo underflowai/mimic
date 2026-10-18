@@ -13,6 +13,7 @@ import { hashPromptConfig, normalizeCallTools, type ApiToolInput } from '../prom
 import { cancelQueuedCall, enqueueCall } from '../jobs/queue.js'
 import { childLogger } from '../logger.js'
 import { MAX_CONCURRENT_CALLS } from '../middleware/rate-limit.js'
+import { isUuid } from '../uuid.js'
 
 const calls = new Hono()
 
@@ -286,12 +287,14 @@ calls.post('/', async (c) => {
 
 calls.get('/:id', async (c) => {
 	const apiKey = c.get('apiKey')
+	const callId = c.req.param('id')
+	if (!isUuid(callId)) return c.json({ error: 'Call not found' }, 404)
 	const db = getDb()
 
 	const [call] = await db
 		.select()
 		.from(apiCalls)
-		.where(and(eq(apiCalls.id, c.req.param('id')), eq(apiCalls.apiKeyId, apiKey.id)))
+		.where(and(eq(apiCalls.id, callId), eq(apiCalls.apiKeyId, apiKey.id)))
 		.limit(1)
 
 	if (!call) return c.json({ error: 'Call not found' }, 404)
@@ -312,6 +315,7 @@ calls.get('/:id', async (c) => {
 calls.delete('/:id', async (c) => {
 	const apiKey = c.get('apiKey')
 	const callId = c.req.param('id')
+	if (!isUuid(callId)) return c.json({ error: 'Call not found' }, 404)
 	const db = getDb()
 
 	const [call] = await db

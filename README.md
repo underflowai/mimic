@@ -105,8 +105,10 @@ mimic.call({ to: '+15551234567', goal: 'Book an appointment', tools })
 
 ## Extracting data
 
-Use a Zod schema to get typed results from the call. Any requested field can be
-`null` when the call did not establish its value; unknown is distinct from false:
+Use a Zod schema to get typed results from the call. Fields can be strings,
+numbers, booleans, enums, or arrays of those; `result.data` is typed from the
+schema. Any field can be `null` when the call did not establish its value;
+unknown is distinct from false:
 
 ```typescript
 import { z } from 'zod'
@@ -115,15 +117,48 @@ const call = mimic.call({
 	to: '+15551234567',
 	goal: 'Confirm the appointment',
 	extract: z.object({
-		confirmed: z.boolean().describe('whether the appointment was confirmed'),
+		outcome: z.enum(['confirmed', 'rescheduled', 'declined']).describe('what they decided'),
+		concerns: z.array(z.string()).describe('anything they were worried about'),
 		notes: z.string().nullable().describe('any notes from the conversation'),
 	}),
 })
 
 const result = await call.result
 if (result.status === 'completed') {
-	result.data.confirmed // boolean | null (unknown)
-	result.data.notes // string | null
+	result.data.outcome // 'confirmed' | 'rescheduled' | 'declined' | null
+	result.data.concerns // string[] | null
+	result.recordingUrl // signed link to the audio, good for an hour
+}
+```
+
+## Finished calls
+
+Every call is kept, with its transcript, extracted data, tool calls, and a
+recording. `call.id` resolves as soon as the call exists, so you can find it
+again from anywhere:
+
+```typescript
+const id = await call.id
+
+const finished = await mimic.calls.get(id) // transcript, data, recordingUrl, ...
+const page = await mimic.calls.list({ limit: 50 }) // newest first; page.nextCursor for more
+await mimic.calls.cancel(id) // end a call from another process
+```
+
+To be told when a call ends without holding the process open, pass a
+`webhook`. It receives `{ event: 'call.completed' | 'call.failed', call }`
+where `call` is the same object `mimic.calls.get()` returns. Add a
+`webhookSecret` and check deliveries with `verifyWebhook`:
+
+```typescript
+import { verifyWebhook, type WebhookEvent } from '@underflowai/mimic'
+
+mimic.call({ to, goal, webhook: 'https://example.com/mimic', webhookSecret: process.env.MIMIC_WEBHOOK_SECRET })
+
+// In your handler, against the raw body:
+const ok = await verifyWebhook({ payload: rawBody, signature: req.headers['x-mimic-signature'], secret })
+if (ok) {
+	const { event, call } = JSON.parse(rawBody) as WebhookEvent
 }
 ```
 
@@ -212,11 +247,12 @@ mimic.call({
   aiDisclosure: true,           // Identify the agent as AI; recording notice is separate
   ambience: true,               // Office background noise
 
-  // Completion webhook (call.completed)
-  webhook: 'https://example.com/mimic/completed',
+  // Told when the call ends (call.completed | call.failed)
+  webhook: 'https://example.com/mimic',
+  webhookSecret: 'whsec_...',   // Signs deliveries; check with verifyWebhook()
 
   // Timeouts
-  timeoutMs: 300_000,           // Max wait (default 5 min)
+  timeoutMs: 3_600_000,         // Cancels the call when it elapses (default 60 min, the maximum)
   toolTimeoutMs: 30_000,        // Per-tool timeout (default 30s)
 
   // Deduplication
@@ -255,6 +291,14 @@ LIVEKIT_API_SECRET=...
 LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_...
 REDIS_URL=redis://localhost:6379
 DATABASE_URL=postgresql://...
+
+# Recordings (optional). Any S3-compatible bucket; the worker writes to it and
+# the API signs the one-hour `recordingUrl` links, so both need these.
+RECORDING_S3_BUCKET=...
+RECORDING_S3_ACCESS_KEY=...
+RECORDING_S3_SECRET=...
+RECORDING_S3_ENDPOINT=https://...
+RECORDING_S3_REGION=us-east-1
 ```
 
 ### Run locally

@@ -91,4 +91,61 @@ describe('extractCallResult', () => {
 		assert.equal(extraction.result.wantsFollowUp, null)
 		assert.equal(extraction.goalAchieved, false)
 	})
+
+	it('constrains enums and arrays in the schema and keeps only values that fit', async () => {
+		const mock = createClient(
+			JSON.stringify({
+				outcome: 'rescheduled',
+				concerns: ['price', 'timing'],
+				badOutcome: 'maybe',
+				badList: ['ok', 3],
+				goalAchieved: true,
+				goalAchievedReason: 'Rescheduled.',
+			}),
+		)
+		const extraction = await extractCallResult(mock.client, {
+			goal: 'Record the outcome.',
+			transcript: [],
+			results: {
+				outcome: { type: 'string', enum: ['confirmed', 'rescheduled'], description: 'what they decided' },
+				concerns: { type: 'array', items: 'string', description: 'what worried them' },
+				badOutcome: { type: 'string', enum: ['yes', 'no'], description: 'a field the model answered off-list' },
+				badList: { type: 'array', items: 'string', description: 'a list with a wrong element type' },
+			},
+		})
+
+		const schema = (mock.getRequest().response_format as { json_schema: { schema: Record<string, unknown> } })
+			.json_schema.schema
+		const properties = schema.properties as Record<string, Record<string, unknown>>
+		assert.deepEqual(properties.outcome.anyOf, [
+			{ type: 'string', enum: ['confirmed', 'rescheduled'] },
+			{ type: 'null' },
+		])
+		assert.deepEqual(properties.concerns.type, ['array', 'null'])
+		assert.deepEqual(properties.concerns.items, { type: 'string' })
+
+		const prompt = String(mock.getRequest().messages[1]?.content)
+		assert.match(prompt, /outcome \(one of: confirmed, rescheduled; unknown = null\)/)
+		assert.match(prompt, /concerns \(list of strings; unknown = null\)/)
+
+		// A response that breaks the schema anywhere establishes nothing: unknown, not approximately right.
+		assert.deepEqual(extraction.result, { outcome: null, concerns: null, badOutcome: null, badList: null })
+		assert.equal(extraction.goalAchieved, false)
+	})
+
+	it('accepts enum and array values that fit', async () => {
+		const mock = createClient(
+			JSON.stringify({ outcome: 'confirmed', concerns: [], goalAchieved: true, goalAchievedReason: 'Confirmed.' }),
+		)
+		const extraction = await extractCallResult(mock.client, {
+			goal: 'Record the outcome.',
+			transcript: [],
+			results: {
+				outcome: { type: 'string', enum: ['confirmed', 'rescheduled'], description: 'what they decided' },
+				concerns: { type: 'array', items: 'string', description: 'what worried them' },
+			},
+		})
+		assert.deepEqual(extraction.result, { outcome: 'confirmed', concerns: [] })
+		assert.equal(extraction.goalAchieved, true)
+	})
 })

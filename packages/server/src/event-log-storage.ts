@@ -46,14 +46,8 @@ export function recordingS3ForcePathStyle(env: EventLogStorageEnv = process.env)
 /** The subset of `S3Client` used here; injectable for tests. */
 export type EventLogS3Client = Pick<S3Client, 'send'>
 
-/** Null when `RECORDING_S3_BUCKET` is unset: logs are then only in memory and dropped at session end. */
-export function createEventLogStorage(
-	env: EventLogStorageEnv = process.env,
-	createClient: (config: S3ClientConfig) => EventLogS3Client = (config) => new S3Client(config),
-): EventLogStorage | null {
-	const bucket = env.RECORDING_S3_BUCKET
-	if (!bucket) return null
-
+/** Client settings for the recordings bucket, shared by the event log, egress, and recording links. */
+export function recordingS3ClientConfig(env: EventLogStorageEnv = process.env): S3ClientConfig {
 	const clientConfig: S3ClientConfig = {
 		region: env.RECORDING_S3_REGION ?? 'us-east-1',
 		credentials:
@@ -63,7 +57,18 @@ export function createEventLogStorage(
 	}
 	if (env.RECORDING_S3_ENDPOINT) clientConfig.endpoint = env.RECORDING_S3_ENDPOINT
 	if (recordingS3ForcePathStyle(env)) clientConfig.forcePathStyle = true
-	const client = createClient(clientConfig)
+	return clientConfig
+}
+
+/** Null when `RECORDING_S3_BUCKET` is unset: logs are then only in memory and dropped at session end. */
+export function createEventLogStorage(
+	env: EventLogStorageEnv = process.env,
+	createClient: (config: S3ClientConfig) => EventLogS3Client = (config) => new S3Client(config),
+): EventLogStorage | null {
+	const bucket = env.RECORDING_S3_BUCKET
+	if (!bucket) return null
+
+	const client = createClient(recordingS3ClientConfig(env))
 
 	return {
 		async persist(callId, events) {

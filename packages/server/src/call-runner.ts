@@ -17,6 +17,7 @@ import { config, createCallOrchestrator, type AudioTransport, type CallEventReco
 import { createVoiceAgent } from '@mimic/transport-livekit'
 
 import { executeToolViaBus, publishCallEvent } from './call-bus.js'
+import { notifyCallWebhook } from './call-record.js'
 import { getDb } from './db/index.js'
 import { apiCalls, type ApiAgentRow, type ApiCallRow } from './db/schema.js'
 import { createEventLogStorage, recordingS3ForcePathStyle } from './event-log-storage.js'
@@ -25,7 +26,6 @@ import { childLogger } from './logger.js'
 import { extractCallResult, type ToolCallRecord, type TranscriptEntry } from './result-extractor.js'
 import { createSipDialer } from './sip.js'
 import { callRoomName } from './web-join.js'
-import { deliverWebhook } from './webhook.js'
 
 /** How long a web call waits for the browser before failing with "no one joined". */
 const WEB_CALLER_JOIN_TIMEOUT_MS = 2 * 60_000
@@ -250,17 +250,7 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					goalAchievedReason: extraction.goalAchievedReason,
 				})
 
-				if (agent.webhook) {
-					await deliverWebhook({
-						url: agent.webhook,
-						payload: {
-							event: 'call.completed',
-							callId,
-							result: extraction,
-							transcript,
-						},
-					}).catch((err) => childLogger({ callId, err }).error('webhook delivery failed'))
-				}
+				await notifyCallWebhook(callId)
 
 				childLogger({ callId, durationSeconds: result.durationSeconds }).info('call completed')
 			},
@@ -280,5 +270,6 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 		await updateCall(callId, { status: 'failed', errorMessage }).catch(() => {})
 		publishCallEvent(callId, { type: 'call_status', status: 'failed' })
 		publishCallEvent(callId, { type: 'error', message: errorMessage })
+		await notifyCallWebhook(callId)
 	}
 }

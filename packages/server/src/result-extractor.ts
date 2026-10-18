@@ -22,11 +22,50 @@ export interface ToolCallRecord {
 	success?: boolean
 }
 
+/** Scalar JSON types the extractor can return. Anything else the SDK sends is read as a string. */
+export type ExtractScalar = 'string' | 'number' | 'boolean'
+
 export interface TypedField {
 	type: string
 	description: string
 	nullable?: boolean
 	optional?: boolean
+	/** Allowed values for a `z.enum` field. */
+	enum?: string[]
+	/** Element type of a `z.array` field. */
+	items?: ExtractScalar
+}
+
+function scalarOf(type: string | undefined): ExtractScalar {
+	return type === 'boolean' || type === 'number' ? type : 'string'
+}
+
+/** How a field is described to the agent and the extractor: `string`, `one of: a, b`, `list of numbers`. */
+export function describeFieldType(field: Pick<TypedField, 'type' | 'enum' | 'items'>): string {
+	if (field.enum && field.enum.length > 0) return `one of: ${field.enum.join(', ')}`
+	if (field.type === 'array') return `list of ${scalarOf(field.items)}s`
+	return scalarOf(field.type)
+}
+
+/** Whether an extracted value has the shape the field asked for. Null always does: unknown stays unknown. */
+export function fieldAccepts(field: Pick<TypedField, 'type' | 'enum' | 'items'>, value: unknown): boolean {
+	if (value === null) return true
+	if (field.enum && field.enum.length > 0) return typeof value === 'string' && field.enum.includes(value)
+	if (field.type === 'array') {
+		const scalar = scalarOf(field.items)
+		return Array.isArray(value) && value.every((item) => typeof item === scalar)
+	}
+	return typeof value === scalarOf(field.type)
+}
+
+function fieldJsonSchema(field: TypedField): Record<string, unknown> {
+	if (field.enum && field.enum.length > 0) {
+		return { description: field.description, anyOf: [{ type: 'string', enum: field.enum }, { type: 'null' }] }
+	}
+	if (field.type === 'array') {
+		return { description: field.description, type: ['array', 'null'], items: { type: scalarOf(field.items) } }
+	}
+	return { description: field.description, type: [scalarOf(field.type), 'null'] }
 }
 
 export interface ExtractionResult {
@@ -64,16 +103,10 @@ function buildJsonSchema(results: Record<string, TypedField>): Record<string, un
 	const required: string[] = []
 
 	for (const [key, field] of Object.entries(results)) {
-		const prop: Record<string, unknown> = { description: field.description }
-
-		const baseType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
-
 		// Missing evidence must remain unknown even for a business-required field.
 		// Strict structured output requires every property in `required`; optional
 		// caller input is represented by null instead of an omitted JSON key.
-		prop.type = [baseType, 'null']
-
-		properties[key] = prop
+		properties[key] = fieldJsonSchema(field)
 		required.push(key)
 	}
 
@@ -101,7 +134,7 @@ function formatResults(results: Record<string, unknown>) {
 		.map(([key, value]) => {
 			if (typeof value === 'object' && value !== null && 'description' in value) {
 				const f = value as TypedField
-				return `${key} (${f.type}; unknown = null${f.optional ? '; optional' : ''}): ${f.description}`
+				return `${key} (${describeFieldType(f)}; unknown = null${f.optional ? '; optional' : ''}): ${f.description}`
 			}
 			return `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`
 		})
@@ -171,10 +204,9 @@ export async function extractCallResult(client: OpenAI, input: ExtractionInput):
 			const value: unknown = JSON.parse(choice.message.content)
 			if (value && typeof value === 'object' && !Array.isArray(value)) {
 				const candidate = value as Record<string, unknown>
-				const validFields = Object.entries(typedResults).every(([key, field]) => {
-					const expectedType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
-					return Object.hasOwn(candidate, key) && (candidate[key] === null || typeof candidate[key] === expectedType)
-				})
+				const validFields = Object.entries(typedResults).every(
+					([key, field]) => Object.hasOwn(candidate, key) && fieldAccepts(field, candidate[key]),
+				)
 				if (
 					validFields &&
 					typeof candidate.goalAchieved === 'boolean' &&
@@ -197,8 +229,7 @@ export async function extractCallResult(client: OpenAI, input: ExtractionInput):
 
 	const result: Record<string, unknown> = {}
 	for (const [key, field] of Object.entries(typedResults)) {
-		const expectedType = field.type === 'boolean' ? 'boolean' : field.type === 'number' ? 'number' : 'string'
-		result[key] = typeof parsed[key] === expectedType ? parsed[key] : null
+		result[key] = extractionAvailable && fieldAccepts(field, parsed[key]) ? (parsed[key] ?? null) : null
 	}
 
 	return { result, goalAchieved, goalAchievedReason }

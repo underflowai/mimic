@@ -1,9 +1,24 @@
+import type { z } from 'zod'
+
 import { MimicCall } from './call.js'
 import { MimicClient } from './client.js'
 import { MimicError } from './errors.js'
 import type { McpConnectionOptions } from './mcp.js'
 import { introspectTools } from './tools.js'
-import type { CallOptions, CompileOptions, MimicOptions, Prompt, ToolInput } from './types.js'
+import type {
+	AgentSpec,
+	Call,
+	CallOptions,
+	CallOptionsBase,
+	CallPage,
+	CallStatus,
+	CompileOptions,
+	ExtractSchema,
+	ListCallsOptions,
+	MimicOptions,
+	Prompt,
+	ToolInput,
+} from './types.js'
 
 /**
  * The Mimic client. Create one with your API key, then make calls.
@@ -21,7 +36,7 @@ import type { CallOptions, CompileOptions, MimicOptions, Prompt, ToolInput } fro
  *   run: async ({ date }) => calendar.getSlots(date),
  * })
  *
- * const call = mimic.call<{ confirmed: boolean }>({
+ * const call = mimic.call({
  *   to: '+15551234567',
  *   goal: 'Confirm the appointment',
  *   tools: { checkCalendar },
@@ -34,13 +49,32 @@ import type { CallOptions, CompileOptions, MimicOptions, Prompt, ToolInput } fro
  *
  * const result = await call.result
  * if (result.status === 'completed') {
- *   console.log(result.data.confirmed) // boolean | null
+ *   console.log(result.data.confirmed) // boolean | null, typed from `extract`
  * }
  * ```
  */
 export class Mimic {
 	private readonly client: MimicClient
 	private readonly wsOption: MimicOptions['WebSocket']
+
+	/**
+	 * Calls that already exist, live or finished.
+	 *
+	 * @example
+	 * ```typescript
+	 * const call = await mimic.calls.get(id)          // one call, with transcript, data, recordingUrl
+	 * const page = await mimic.calls.list({ limit: 50 }) // newest first; page.nextCursor for more
+	 * await mimic.calls.cancel(id)                     // end a call from anywhere
+	 * ```
+	 */
+	readonly calls: {
+		/** Fetch a call by id. `recordingUrl` is a fresh one-hour link each time. */
+		get: (id: string) => Promise<Call>
+		/** Page through your calls, newest first. */
+		list: (options?: ListCallsOptions) => Promise<CallPage>
+		/** End a call that is pending or in progress. Finished calls are returned as they are. */
+		cancel: (id: string) => Promise<{ id: string; status: CallStatus }>
+	}
 
 	/**
 	 * Create a Mimic client.
@@ -67,6 +101,11 @@ export class Mimic {
 		}
 		this.client = new MimicClient(opts)
 		this.wsOption = typeof options === 'object' ? options.WebSocket : undefined
+		this.calls = {
+			get: (id) => this.client.getCall(id),
+			list: (listOptions) => this.client.listCalls(listOptions),
+			cancel: (id) => this.client.cancelCall(id),
+		}
 	}
 
 	/**
@@ -115,13 +154,11 @@ export class Mimic {
 
 	/**
 	 * Make a voice call. Returns a {@link MimicCall} that streams events
-	 * and resolves with a typed result.
-	 *
-	 * @typeParam T - Shape of the extracted data. Must match the `extract` keys.
+	 * and resolves with a result typed from your `extract` schema.
 	 *
 	 * @example
 	 * ```typescript
-	 * const call = mimic.call<{ confirmed: boolean }>({
+	 * const call = mimic.call({
 	 *   to: '+15551234567',
 	 *   goal: 'Confirm the appointment', // or `prompt` from mimic.compile()
 	 *   tools: { checkCalendar },
@@ -138,16 +175,24 @@ export class Mimic {
 	 *
 	 * // Option C: just get the result
 	 * const result = await call.result
+	 * if (result.status === 'completed') result.data.confirmed // boolean | null
 	 * ```
 	 */
-	call<T extends Record<string, unknown> = Record<string, unknown>>(options: CallOptions): MimicCall<T> {
-		return new MimicCall<T>({
+	call<S extends ExtractSchema>(
+		options: Omit<CallOptionsBase, 'extract'> & { extract: S } & AgentSpec,
+	): MimicCall<Extracted<S>>
+	call<T extends Record<string, unknown> = Record<string, unknown>>(options: CallOptions): MimicCall<T>
+	call(options: CallOptions): MimicCall {
+		return new MimicCall({
 			client: this.client,
 			options,
 			WebSocketImpl: this.wsOption,
 		})
 	}
 }
+
+/** The object type an `extract` schema produces, as the result generic expects it. */
+type Extracted<S extends ExtractSchema> = { [K in keyof z.infer<S>]: z.infer<S>[K] }
 
 // ── Re-exports ────────────────────────────────────────────────────────
 
@@ -156,27 +201,35 @@ export { ApiError, CallFailedError, CallTimeoutError, MimicError } from './error
 export { connectMcp } from './mcp.js'
 export type { McpConnectionOptions } from './mcp.js'
 export { introspectTools, tool } from './tools.js'
+export { verifyWebhook } from './webhook.js'
 export type {
+	Call,
 	CallChannel,
 	CallEvent,
 	CallEventMap,
 	CallOptions,
 	CallOptionsBase,
+	CallPage,
 	CallResult,
+	CallStatus,
 	CompileOptions,
 	DoneEvent,
 	ErrorEvent,
 	ExtractedData,
+	ExtractSchema,
+	ListCallsOptions,
 	MimicOptions,
 	MimicTool,
 	Prompt,
 	SpeechEvent,
 	ToolCallEvent,
+	ToolCallRecord,
 	ToolErrorEvent,
 	ToolInput,
 	ToolResultEvent,
 	ToolSchema,
 	TranscriptEntry,
 	Voice,
+	WebhookEvent,
 	WebJoin,
 } from './types.js'

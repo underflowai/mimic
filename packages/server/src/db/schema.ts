@@ -1,4 +1,15 @@
-import { boolean, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+import {
+	boolean,
+	index,
+	integer,
+	jsonb,
+	pgEnum,
+	pgTable,
+	text,
+	timestamp,
+	uniqueIndex,
+	uuid,
+} from 'drizzle-orm/pg-core'
 
 export const apiKeyStatusEnum = pgEnum('api_key_status', ['active', 'revoked'])
 
@@ -32,7 +43,6 @@ export const apiAgents = pgTable('api_agents', {
 	turnControlBlock: text('turn_control_block'),
 	agentName: text('agent_name').notNull(),
 	configHash: text('config_hash'),
-	webhook: text('webhook'),
 	ambience: jsonb('ambience'),
 	createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
@@ -68,6 +78,10 @@ export const apiCalls = pgTable(
 		/** S3 key of the per-call engine event log (`call-events/<id>.jsonl`), when one was persisted. */
 		eventLogPath: text('event_log_path'),
 		idempotencyKey: text('idempotency_key'),
+		/** Where to POST `call.completed` / `call.failed` when this call ends. Per call: changing it never touches the agent. */
+		webhookUrl: text('webhook_url'),
+		/** HMAC key for the webhook signature, when the caller wants one. */
+		webhookSecret: text('webhook_secret'),
 		webhookDeliveredAt: timestamp('webhook_delivered_at', { withTimezone: true }),
 		createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 		updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -77,6 +91,8 @@ export const apiCalls = pgTable(
 			table.apiKeyId,
 			table.idempotencyKey,
 		),
+		/** GET /calls pages newest-first per key; the btree is read backwards. */
+		listByKey: index('api_calls_api_key_id_created_at_id_idx').on(table.apiKeyId, table.createdAt, table.id),
 	}),
 )
 

@@ -1,4 +1,7 @@
-import type { ZodType } from 'zod'
+import type { ZodObject, ZodType } from 'zod'
+
+/** A Zod object schema describing what to extract from a call. */
+export type ExtractSchema = ZodObject<Record<string, ZodType>>
 
 // ── Client options ────────────────────────────────────────────────────
 
@@ -158,19 +161,20 @@ export interface WebJoin {
  * // result.data.notes → string | null
  * ```
  */
-export type CallOptions = CallOptionsBase &
-	(
-		| {
-				/** What the agent should accomplish. Compiled into a prompt once per distinct goal, then cached. */
-				goal: string
-				prompt?: undefined
-		  }
-		| {
-				/** A prompt you own, from {@link Mimic.compile} or hand-written. Used verbatim. */
-				prompt: Prompt
-				goal?: undefined
-		  }
-	)
+export type CallOptions = CallOptionsBase & AgentSpec
+
+/** @internal Exactly one of `goal` or `prompt` defines the agent. */
+export type AgentSpec =
+	| {
+			/** What the agent should accomplish. Compiled into a prompt once per distinct goal, then cached. */
+			goal: string
+			prompt?: undefined
+	  }
+	| {
+			/** A prompt you own, from {@link Mimic.compile} or hand-written. Used verbatim. */
+			prompt: Prompt
+			goal?: undefined
+	  }
 
 /** Everything about a call other than how the agent is defined. */
 export interface CallOptionsBase {
@@ -229,27 +233,39 @@ export interface CallOptionsBase {
 	/** Office ambience background audio. Defaults to `true`. */
 	ambience?: boolean
 	/**
-	 * URL to POST a `call.completed` event to when the call finishes.
-	 * Must be an http(s) URL.
+	 * URL that receives `{ event: 'call.completed' | 'call.failed', call: Call }`
+	 * when the call ends, whatever your process is doing by then. Retried a few
+	 * times on failure. Must be an http(s) URL.
 	 */
 	webhook?: string
 	/**
-	 * What you want back from the call. Pass a Zod object schema — types
-	 * describe known values in `result.data`. Every field can also be null
-	 * when the call did not establish a value, even if the input schema is nonnullable.
-	 * Use `.describe()` on each field so the agent knows what to find out.
-	 * Shown to the agent at runtime; changing it never recompiles the prompt.
+	 * Signs each webhook delivery so you can tell it came from Mimic. Check it
+	 * with {@link verifyWebhook}. Requires `webhook`.
+	 */
+	webhookSecret?: string
+	/**
+	 * What you want back from the call. Pass a Zod object schema; `result.data`
+	 * is typed from it. Fields can be strings, numbers, booleans, enums, or
+	 * arrays of those. Every field can also be null when the call did not
+	 * establish a value, even if the schema is nonnullable. Use `.describe()`
+	 * on each field so the agent knows what to find out. Shown to the agent at
+	 * runtime; changing it never recompiles the prompt.
 	 *
 	 * @example
 	 * ```typescript
 	 * extract: z.object({
-	 *   confirmed: z.boolean().describe('whether confirmed'),
+	 *   outcome: z.enum(['confirmed', 'rescheduled', 'declined']).describe('what they decided'),
+	 *   concerns: z.array(z.string()).describe('anything they were worried about'),
 	 *   notes: z.string().nullable().describe('any notes'),
 	 * })
 	 * ```
 	 */
-	extract?: import('zod').ZodObject<Record<string, import('zod').ZodType>>
-	/** Maximum time to wait for the call to complete, in milliseconds. Defaults to 5 minutes. */
+	extract?: ExtractSchema
+	/**
+	 * How long to wait for the call to end, in milliseconds. When it elapses the
+	 * call is cancelled and `.result` rejects with {@link CallTimeoutError}.
+	 * Defaults to 60 minutes, which is also the longest a call can run.
+	 */
 	timeoutMs?: number
 	/** Polling interval when WebSocket is unavailable, in milliseconds. Defaults to 2 seconds. */
 	pollIntervalMs?: number
@@ -327,13 +343,78 @@ export interface CallEventMap {
 	error: ErrorEvent
 }
 
-// ── Call result ───────────────────────────────────────────────────────
+// ── Call records ──────────────────────────────────────────────────────
 
 /** A single entry in the call transcript. */
 export interface TranscriptEntry {
 	role: 'agent' | 'caller'
 	content: string
 }
+
+/** A tool the agent used during the call, with what it sent and got back. */
+export interface ToolCallRecord {
+	name: string
+	input: unknown
+	output: unknown
+	success?: boolean
+}
+
+/** Where a call is in its life. `cancelled` is a call you ended with `cancel`. */
+export type CallStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+
+/**
+ * A call as the API records it: what {@link Mimic.calls} returns and what a
+ * webhook delivers. `data` holds the `extract` values once the call has ended.
+ */
+export interface Call {
+	id: string
+	status: CallStatus
+	channel: CallChannel
+	/** Number dialed (E.164); null for web calls. */
+	to: string | null
+	/** ISO 8601 timestamp of when the call was created. */
+	createdAt: string
+	/** Seconds on the call; null until it ends. */
+	duration: number | null
+	goalAchieved: boolean | null
+	goalAchievedReason: string | null
+	/** Extracted values; unknown ones are null. Null until the call ends. */
+	data: Record<string, unknown> | null
+	transcript: TranscriptEntry[]
+	toolCalls: ToolCallRecord[]
+	/** Why the call failed or was cancelled; null otherwise. */
+	error: string | null
+	/** Signed link to the recording, valid for one hour. Null when there is no recording (yet). */
+	recordingUrl: string | null
+}
+
+/** Options for {@link Mimic.calls.list}. */
+export interface ListCallsOptions {
+	/** Page size, 1–100. Defaults to 20. */
+	limit?: number
+	/** `nextCursor` from the previous page. */
+	cursor?: string
+	/** Only calls in this state. */
+	status?: CallStatus
+}
+
+/** One page of calls, newest first. */
+export interface CallPage {
+	calls: Call[]
+	/** Pass as `cursor` to get the next page; null on the last page. */
+	nextCursor: string | null
+}
+
+/**
+ * Webhook payload. Delivered once a call ends: `call.completed` when it ran to
+ * the end, `call.failed` when it failed or was cancelled (see `call.status`).
+ */
+export interface WebhookEvent {
+	event: 'call.completed' | 'call.failed'
+	call: Call
+}
+
+// ── Call result ───────────────────────────────────────────────────────
 
 /** Extracted values preserve unknown information as null, including required fields. */
 export type ExtractedData<T extends Record<string, unknown>> = {
@@ -344,7 +425,7 @@ export type ExtractedData<T extends Record<string, unknown>> = {
  * The final result of a completed call. Discriminated on `status` —
  * narrow with `if (result.status === 'completed')` to access typed data.
  *
- * @typeParam T - Shape of the extracted data. Inferred from `CallOptions<T>`.
+ * @typeParam T - Shape of the extracted data. Inferred from the `extract` schema.
  *
  * @example
  * ```typescript
@@ -364,7 +445,10 @@ export type CallResult<T extends Record<string, unknown> = Record<string, unknow
 			goalAchievedReason: string
 			data: ExtractedData<T>
 			transcript: TranscriptEntry[]
+			toolCalls: ToolCallRecord[]
 			duration: number
+			/** Signed link to the recording, valid for one hour; `mimic.calls.get(id)` issues a fresh one. */
+			recordingUrl: string | null
 	  }
 	| {
 			status: 'failed'
@@ -375,22 +459,9 @@ export type CallResult<T extends Record<string, unknown> = Record<string, unknow
 // ── API wire types ────────────────────────────────────────────────────
 
 /** @internal */
-export interface ApiCall {
-	id: string
-	status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
-	channel: CallChannel
-	transcript: TranscriptEntry[] | null
-	result: Record<string, unknown> | null
-	goalAchieved: boolean | null
-	goalAchievedReason: string | null
-	duration: number | null
-	errorMessage: string | null
-}
-
-/** @internal */
 export interface CreateCallResponse {
 	id: string
-	status: ApiCall['status']
+	status: CallStatus
 	/** Present for web calls that can still be joined. */
 	web?: WebJoin
 }
@@ -401,4 +472,4 @@ export type ServerMessage =
 	| { type: 'tool_call'; callbackId: string; toolName: string; toolArgs: Record<string, unknown> }
 	| { type: 'done'; goalAchieved: boolean; goalAchievedReason: string }
 	| { type: 'error'; message: string }
-	| { type: 'call_status'; status: ApiCall['status'] }
+	| { type: 'call_status'; status: CallStatus }

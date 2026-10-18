@@ -82,15 +82,20 @@ const agentResp = {
 const completedCall = {
 	id: 'call_1',
 	status: 'completed',
+	channel: 'phone',
+	to: '+15551234567',
+	createdAt: '2026-10-18T08:00:00.000Z',
 	transcript: [
 		{ role: 'agent', content: 'Hi!' },
 		{ role: 'caller', content: 'Hello.' },
 	],
-	result: { confirmed: true, notes: 'all good' },
+	toolCalls: [],
+	data: { confirmed: true, notes: 'all good' },
 	goalAchieved: true,
 	goalAchievedReason: 'confirmed',
 	duration: 42,
-	errorMessage: null,
+	error: null,
+	recordingUrl: 'https://bucket.example/call-recordings/call_1.ogg?signed',
 }
 
 function defaultFetch(): typeof fetch {
@@ -184,6 +189,7 @@ describe('Mimic.call', () => {
 			goal: 'Check in',
 			userTimezone: 'America/New_York',
 			webhook: 'https://example.com/hook',
+			webhookSecret: 'whsec_test',
 			pollIntervalMs: 1,
 		})
 		await call.result
@@ -191,6 +197,7 @@ describe('Mimic.call', () => {
 		const sent = createBody as Record<string, unknown> | null
 		assert.ok(sent)
 		assert.equal(sent.webhook, 'https://example.com/hook')
+		assert.equal(sent.webhookSecret, 'whsec_test')
 		assert.equal(sent.userTimezone, 'America/New_York')
 	})
 
@@ -431,13 +438,82 @@ describe('MimicCall.on()', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Call identity, timeout, and finished calls
+// ---------------------------------------------------------------------------
+
+describe('MimicCall.id', () => {
+	it('resolves with the id once the call is created', async () => {
+		const { mimic } = createTestMimic()
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello' })
+		assert.equal(await call.id, 'call_1')
+	})
+
+	it('rejects when the call could not be created', async () => {
+		const { mimic } = createTestMimic(async () => jsonResponse({ error: 'to (phone number) is required' }, 400))
+		const call = mimic.call({ goal: 'Say hello' })
+		await assert.rejects(call.id, /phone number/)
+		await assert.rejects(call.result)
+	})
+})
+
+describe('MimicCall timeout', () => {
+	it('cancels the call on the server when timeoutMs elapses', async () => {
+		const deletes: string[] = []
+		const fallback = defaultFetch()
+		const { mimic, ws } = createTestMimic(async (input, init) => {
+			if (init?.method === 'DELETE') {
+				deletes.push(String(input))
+				return jsonResponse({ id: 'call_1', status: 'cancelled' })
+			}
+			return fallback(input, init)
+		})
+		const call = mimic.call({ to: '+15551234567', goal: 'Say hello', timeoutMs: 20 })
+		await waitForSocket(ws)
+		await assert.rejects(call.result, { name: 'CallTimeoutError' })
+		await new Promise((r) => setImmediate(r))
+		assert.equal(deletes.length, 1)
+		assert.match(deletes[0]!, /\/api\/v1\/calls\/call_1$/)
+	})
+})
+
+describe('Mimic.calls', () => {
+	it('gets, lists, and cancels calls', async () => {
+		const requests: string[] = []
+		const { mimic } = createTestMimic(async (input, init) => {
+			const url = String(input)
+			requests.push(`${init?.method ?? 'GET'} ${url}`)
+			if (init?.method === 'DELETE') return jsonResponse({ id: 'call_1', status: 'cancelled' })
+			if (url.includes('/api/v1/calls?')) return jsonResponse({ calls: [completedCall], nextCursor: 'abc' })
+			return jsonResponse(completedCall)
+		})
+
+		const one = await mimic.calls.get('call_1')
+		assert.equal(one.data?.confirmed, true)
+		assert.equal(one.recordingUrl, completedCall.recordingUrl)
+
+		const page = await mimic.calls.list({ limit: 5, status: 'completed', cursor: 'prev' })
+		assert.equal(page.calls.length, 1)
+		assert.equal(page.nextCursor, 'abc')
+
+		const cancelled = await mimic.calls.cancel('call_1')
+		assert.equal(cancelled.status, 'cancelled')
+
+		assert.deepEqual(requests, [
+			'GET http://localhost:3000/api/v1/calls/call_1',
+			'GET http://localhost:3000/api/v1/calls?limit=5&cursor=prev&status=completed',
+			'DELETE http://localhost:3000/api/v1/calls/call_1',
+		])
+	})
+})
+
+// ---------------------------------------------------------------------------
 // Typed extract + discriminated result
 // ---------------------------------------------------------------------------
 
 describe('Typed extract and discriminated result', () => {
-	it('.result resolves with typed data on completed', async () => {
+	it('.result resolves with data typed from the extract schema', async () => {
 		const { mimic, ws } = createTestMimic()
-		const call = mimic.call<{ confirmed: boolean; notes: string }>({
+		const call = mimic.call({
 			to: '+15551234567',
 			goal: 'Confirm appointment',
 			extract: z.object({
@@ -452,19 +528,61 @@ describe('Typed extract and discriminated result', () => {
 		const result = await call.result
 		assert.equal(result.status, 'completed')
 		if (result.status === 'completed') {
+			const confirmed: boolean | null = result.data.confirmed
+			const notes: string | null = result.data.notes
 			assert.equal(result.goalAchieved, true)
-			assert.equal(result.data.confirmed, true)
-			assert.equal(result.data.notes, 'all good')
+			assert.equal(confirmed, true)
+			assert.equal(notes, 'all good')
 			assert.equal(result.duration, 42)
 			assert.equal(result.transcript.length, 2)
+			assert.deepEqual(result.toolCalls, [])
+			assert.equal(result.recordingUrl, completedCall.recordingUrl)
 		}
+	})
+
+	it('still accepts an explicit result type', async () => {
+		const { mimic, ws } = createTestMimic()
+		const call = mimic.call<{ confirmed: boolean }>({ to: '+15551234567', goal: 'Confirm appointment' })
+		await waitForSocket(ws)
+		ws.last.serverSend({ type: 'done', goalAchieved: true, goalAchievedReason: 'confirmed' })
+		const result = await call.result
+		if (result.status === 'completed') {
+			const confirmed: boolean | null = result.data.confirmed
+			assert.equal(confirmed, true)
+		}
+	})
+
+	it('sends enums and arrays so the agent and extractor know the allowed shape', async () => {
+		let body: Record<string, unknown> = {}
+		const fallback = defaultFetch()
+		const { mimic } = createTestMimic(async (input, init) => {
+			if (String(input).endsWith('/api/v1/calls') && init?.method === 'POST') {
+				body = JSON.parse(String(init.body)) as Record<string, unknown>
+			}
+			return fallback(input, init)
+		})
+		mimic.call({
+			to: '+15551234567',
+			goal: 'Record the outcome',
+			extract: z.object({
+				outcome: z.enum(['confirmed', 'rescheduled']).describe('what they decided'),
+				concerns: z.array(z.string()).describe('what worried them'),
+				callback: z.number().nullable().optional().describe('hour to call back'),
+			}),
+		})
+		await new Promise((r) => setImmediate(r))
+		assert.deepEqual(body.extract, {
+			outcome: { type: 'string', enum: ['confirmed', 'rescheduled'], description: 'what they decided' },
+			concerns: { type: 'array', items: 'string', description: 'what worried them' },
+			callback: { type: 'number', description: 'hour to call back', nullable: true, optional: true },
+		})
 	})
 
 	it('preserves unknown null, explicit false, and zero in completed results', async () => {
 		const fallback = defaultFetch()
 		const { mimic, ws } = createTestMimic(async (input, init) => {
 			if (String(input).includes('/api/v1/calls/call_1')) {
-				return jsonResponse({ ...completedCall, result: { confirmed: null, declined: false, count: 0 } })
+				return jsonResponse({ ...completedCall, data: { confirmed: null, declined: false, count: 0 } })
 			}
 			return fallback(input, init)
 		})
@@ -626,8 +744,9 @@ describe('MimicCall polling fallback', () => {
 					...completedCall,
 					status: 'in_progress',
 					goalAchieved: null,
-					result: null,
-					transcript: null,
+					data: null,
+					transcript: [],
+					recordingUrl: null,
 				})
 			}
 			return jsonResponse({ error: 'not found' }, 404)

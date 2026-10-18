@@ -15,9 +15,34 @@ Added
   browser instead of being dialed. `call.web` resolves with `{ url, token }`
   (a one-hour LiveKit token scoped to the call's room) as soon as the call is
   created, or `null` for phone calls. `to` is now optional in `CallOptions`
-  and required only for phone calls; `ApiCall` gains `channel`.
+  and required only for phone calls.
+- `mimic.calls.get(id)`, `mimic.calls.list({ limit, cursor, status })`, and
+  `mimic.calls.cancel(id)`: calls outlive the `MimicCall` object. `Call` is
+  the record (`status`, `channel`, `to`, `createdAt`, `duration`,
+  `goalAchieved`, `data`, `transcript`, `toolCalls`, `error`, `recordingUrl`).
+- `call.id` resolves with the call's id as soon as the API has created it.
+- `recordingUrl` on completed results and call records: a signed link to the
+  audio, valid for an hour. `toolCalls` on completed results.
+- `result.data` is typed from the `extract` schema; no generic needed.
+  `extract` fields may be enums (`z.enum`) and arrays of strings, numbers, or
+  booleans; the agent is told the allowed values and the extractor is held to
+  them.
+- `webhookSecret` signs webhook deliveries (`x-mimic-signature: t=...,v1=...`);
+  `verifyWebhook({ payload, signature, secret })` checks them. New type
+  `WebhookEvent`.
 
 Changed
+
+- Webhooks fire when a call fails or is cancelled too, not only when it
+  completes. The body is `{ event: 'call.completed' | 'call.failed', call }`
+  with `call` exactly as `mimic.calls.get()` returns it. Deliveries are
+  retried. Changing the webhook URL no longer creates a new agent.
+- `timeoutMs` defaults to 60 minutes (the server's maximum) instead of 5, and
+  cancels the call when it elapses rather than abandoning a call that keeps
+  running without its tools.
+- Server: `GET /calls/:id` returns `data`, `error`, `to`, `createdAt`,
+  `toolCalls`, and `recordingUrl` (replacing `result`, `errorMessage`, and
+  `recordingPath`); `GET /calls` lists calls.
 
 - `data` and `extract` no longer shape the compiled prompt. They are appended
   to it at runtime, so changing the fields you confirm or ask for never

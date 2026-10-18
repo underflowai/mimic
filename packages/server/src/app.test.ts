@@ -25,7 +25,7 @@ describe('app.onError', () => {
 
 // The auth middleware needs the database, so these exercise the request
 // validation through the route handler directly, as the middleware would.
-async function postCall(body: Record<string, unknown>) {
+async function callsRequest(path: string, init?: RequestInit) {
 	const { calls } = await import('./routes/calls.js')
 	const { Hono } = await import('hono')
 	const harness = new Hono()
@@ -34,14 +34,18 @@ async function postCall(body: Record<string, unknown>) {
 		await next()
 	})
 	harness.route('/calls', calls)
-	const res = await harness.request('/calls', {
+	const res = await harness.request(path, init)
+	const text = await res.text()
+	const parsed = res.headers.get('content-type')?.includes('json') ? (JSON.parse(text) as { error?: string }) : {}
+	return { status: res.status, body: parsed }
+}
+
+async function postCall(body: Record<string, unknown>) {
+	return callsRequest('/calls', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify(body),
 	})
-	const text = await res.text()
-	const parsed = res.headers.get('content-type')?.includes('json') ? (JSON.parse(text) as { error?: string }) : {}
-	return { status: res.status, body: parsed }
 }
 
 describe('POST /calls channel validation', () => {
@@ -91,5 +95,32 @@ describe('POST /calls channel validation', () => {
 		// environment does not have. Anything other than the `to` 400 proves the point.
 		const res = await postCall({ channel: 'web', goal: 'Say hi' })
 		assert.notEqual(res.status, 400)
+	})
+
+	it('only signs webhooks it can send', async () => {
+		const res = await postCall({ to: '+15551234567', goal: 'Say hi', webhookSecret: 'whsec_x' })
+		assert.equal(res.status, 400)
+		assert.match(res.body.error ?? '', /webhookSecret requires webhook/)
+	})
+})
+
+describe('GET /calls validation', () => {
+	it('rejects a bad limit, status, or cursor before touching the database', async () => {
+		for (const [query, pattern] of [
+			['limit=0', /limit must be an integer between 1 and 100/],
+			['limit=101', /limit must be/],
+			['limit=ten', /limit must be/],
+			['status=done', /status must be one of: pending, in_progress, completed, failed, cancelled/],
+			['cursor=not-a-cursor', /cursor is invalid/],
+		] as const) {
+			const res = await callsRequest(`/calls?${query}`)
+			assert.equal(res.status, 400, query)
+			assert.match(res.body.error ?? '', pattern)
+		}
+	})
+
+	it('treats a malformed id as a missing call', async () => {
+		const res = await callsRequest('/calls/not-a-uuid')
+		assert.equal(res.status, 404)
 	})
 })

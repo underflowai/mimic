@@ -57,6 +57,13 @@
       "when": 1792309283341,
       "tag": "0007_extract_lives_on_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792311154304,
+      "tag": "0008_calls_list_and_webhooks",
+      "breakpoints": true
     }
   ]
 }

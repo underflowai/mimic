@@ -1,10 +1,11 @@
 import { Hono } from 'hono'
-import { and, eq, or, sql } from 'drizzle-orm'
+import { and, desc, eq, or, sql } from 'drizzle-orm'
 import { RoomServiceClient } from 'livekit-server-sdk'
 
 import { config } from '@mimic/engine'
 
 import { publishCallEvent } from '../call-bus.js'
+import { notifyCallWebhook, toCallRecord } from '../call-record.js'
 import { inferCallerTimezone } from '../caller-timezone.js'
 import { getDb } from '../db/index.js'
 import { apiAgents, apiCalls, CALL_CHANNELS, type ApiCallRow, type CallChannel } from '../db/schema.js'
@@ -62,8 +63,10 @@ calls.post('/', async (c) => {
 		extract?: Record<string, unknown>
 		ambience?: boolean
 		idempotencyKey?: string
-		/** Optional completion webhook (event: call.completed) for this agent config. */
+		/** POSTed `{ event: 'call.completed' | 'call.failed', call }` when this call ends. */
 		webhook?: string
+		/** Signs each delivery (`x-mimic-signature: t=<unix seconds>,v1=<hmac-sha256 hex>` over `<t>.<body>`). */
+		webhookSecret?: string
 	}
 	try {
 		body = await c.req.json<typeof body>()
@@ -109,6 +112,9 @@ calls.post('/', async (c) => {
 	if (body.webhook && !/^https?:\/\//.test(body.webhook)) {
 		return c.json({ error: 'webhook must be an http(s) URL' }, 400)
 	}
+	if (body.webhookSecret && !body.webhook) {
+		return c.json({ error: 'webhookSecret requires webhook' }, 400)
+	}
 
 	const db = getDb()
 
@@ -136,7 +142,6 @@ calls.post('/', async (c) => {
 		aiDisclosure: body.aiDisclosure,
 		ambience,
 		...(ownedPrompt && { prompt: ownedPrompt }),
-		...(body.webhook && { webhook: body.webhook }),
 	})
 
 	// The compiled prompt is cached per config hash; every call with the same
@@ -174,7 +179,6 @@ calls.post('/', async (c) => {
 				turnControlBlock: ownedPrompt.turnControlBlock ?? null,
 				agentName: ownedPrompt.agentName ?? defaultAgentName,
 				ambience: ambience ?? true,
-				webhook: body.webhook ?? null,
 			})
 			.returning()
 		agentId = inserted.id
@@ -193,7 +197,6 @@ calls.post('/', async (c) => {
 				systemPrompt: '',
 				agentName: defaultAgentName,
 				ambience: ambience ?? true,
-				webhook: body.webhook ?? null,
 			})
 			.returning()
 		agentId = placeholder.id
@@ -220,6 +223,8 @@ calls.post('/', async (c) => {
 	// The compiled agent is shared by every call with the same data *shape*;
 	// the values belong to this call and are injected into its prompt at runtime.
 	const callData = body.data && Object.keys(body.data).length > 0 ? body.data : null
+	const webhookUrl = body.webhook ?? null
+	const webhookSecret = body.webhook ? (body.webhookSecret ?? null) : null
 
 	const [concurrencyRow] = await db
 		.select({ activeCalls: sql<number>`count(*)::int` })
@@ -244,6 +249,8 @@ calls.post('/', async (c) => {
 				callContext,
 				callData,
 				results,
+				webhookUrl,
+				webhookSecret,
 				idempotencyKey: body.idempotencyKey,
 			})
 			.onConflictDoNothing({ target: [apiCalls.apiKeyId, apiCalls.idempotencyKey] })
@@ -272,6 +279,8 @@ calls.post('/', async (c) => {
 				callContext,
 				callData,
 				results,
+				webhookUrl,
+				webhookSecret,
 				idempotencyKey: null,
 			})
 			.returning()
@@ -321,6 +330,59 @@ calls.post('/', async (c) => {
 	return c.json(await createdBody(call, body.recipient?.firstName), 201)
 })
 
+const CALL_STATUSES = ['pending', 'in_progress', 'completed', 'failed', 'cancelled'] as const
+const LIST_DEFAULT_LIMIT = 20
+const LIST_MAX_LIMIT = 100
+
+/** Keyset cursor: the last row's position in (created_at desc, id desc). */
+function encodeCursor(row: Pick<ApiCallRow, 'createdAt' | 'id'>) {
+	return Buffer.from(`${row.createdAt.toISOString()}|${row.id}`).toString('base64url')
+}
+
+function decodeCursor(cursor: string): { createdAt: Date; id: string } | null {
+	const [iso, id] = Buffer.from(cursor, 'base64url').toString().split('|')
+	if (!iso || !id || !isUuid(id)) return null
+	const createdAt = new Date(iso)
+	return Number.isNaN(createdAt.getTime()) ? null : { createdAt, id }
+}
+
+/** Newest first. `?limit=` (1–100, default 20), `?status=`, `?cursor=` from the previous page's `nextCursor`. */
+calls.get('/', async (c) => {
+	const apiKey = c.get('apiKey')
+	const query = c.req.query()
+
+	const limit = query.limit === undefined ? LIST_DEFAULT_LIMIT : Number(query.limit)
+	if (!Number.isInteger(limit) || limit < 1 || limit > LIST_MAX_LIMIT) {
+		return c.json({ error: `limit must be an integer between 1 and ${LIST_MAX_LIMIT}` }, 400)
+	}
+	const status = query.status as (typeof CALL_STATUSES)[number] | undefined
+	if (status !== undefined && !CALL_STATUSES.includes(status)) {
+		return c.json({ error: `status must be one of: ${CALL_STATUSES.join(', ')}` }, 400)
+	}
+	const cursor = query.cursor ? decodeCursor(query.cursor) : null
+	if (query.cursor && !cursor) return c.json({ error: 'cursor is invalid' }, 400)
+
+	const rows = await getDb()
+		.select()
+		.from(apiCalls)
+		.where(
+			and(
+				eq(apiCalls.apiKeyId, apiKey.id),
+				status && eq(apiCalls.status, status),
+				cursor ? sql`(${apiCalls.createdAt}, ${apiCalls.id}) < (${cursor.createdAt}, ${cursor.id}::uuid)` : undefined,
+			),
+		)
+		.orderBy(desc(apiCalls.createdAt), desc(apiCalls.id))
+		.limit(limit + 1)
+
+	const page = rows.slice(0, limit)
+	const last = page.at(-1)
+	return c.json({
+		calls: await Promise.all(page.map(toCallRecord)),
+		nextCursor: rows.length > limit && last ? encodeCursor(last) : null,
+	})
+})
+
 calls.get('/:id', async (c) => {
 	const apiKey = c.get('apiKey')
 	const callId = c.req.param('id')
@@ -335,18 +397,7 @@ calls.get('/:id', async (c) => {
 
 	if (!call) return c.json({ error: 'Call not found' }, 404)
 
-	return c.json({
-		id: call.id,
-		status: call.status,
-		channel: call.channel,
-		transcript: call.transcript,
-		result: call.result,
-		goalAchieved: call.goalAchieved,
-		goalAchievedReason: call.goalAchievedReason,
-		duration: call.duration,
-		errorMessage: call.errorMessage,
-		recordingPath: call.recordingPath,
-	})
+	return c.json(await toCallRecord(call))
 })
 
 calls.delete('/:id', async (c) => {
@@ -396,6 +447,8 @@ calls.delete('/:id', async (c) => {
 
 	publishCallEvent(callId, { type: 'call_status', status: 'cancelled' })
 	publishCallEvent(callId, { type: 'error', message: 'Call cancelled by client' })
+	// The worker skips its own writes once it sees the cancel, so the webhook is ours to send.
+	void notifyCallWebhook(callId)
 
 	return c.json({ id: call.id, status: 'cancelled' })
 })

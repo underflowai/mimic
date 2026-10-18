@@ -16,6 +16,7 @@ import {
 
 import { renderDataBlock, type CallData } from './call-data.js'
 import type { CallChannel } from './db/schema.js'
+import { describeFieldType } from './result-extractor.js'
 
 export type GoalVoice = 'female' | 'male'
 
@@ -113,10 +114,17 @@ export function renderWantedBlock(results: GoalResults | null | undefined): stri
 	const lines = entries.map(([key, item]) => {
 		if (typeof item === 'string') return `- ${key}: ${item}`
 		if (item && typeof item === 'object') {
-			const field = item as { type?: unknown; description?: unknown; optional?: unknown }
-			const qualifiers = [field.type, field.optional === true ? 'optional' : null].filter(
-				(part): part is string => typeof part === 'string',
-			)
+			const field = item as {
+				type?: unknown
+				description?: unknown
+				optional?: unknown
+				enum?: unknown
+				items?: unknown
+			}
+			const qualifiers = [
+				typeof field.type === 'string' ? describeFieldType(field as Parameters<typeof describeFieldType>[0]) : null,
+				field.optional === true ? 'optional' : null,
+			].filter((part): part is string => typeof part === 'string')
 			const description = typeof field.description === 'string' ? field.description : key
 			return `- ${key}${qualifiers.length > 0 ? ` (${qualifiers.join(', ')})` : ''}: ${description}`
 		}

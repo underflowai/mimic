@@ -64,7 +64,6 @@ export interface PromptConfig {
 	ambience?: boolean
 	/** When set, nothing is compiled: the agent is this prompt, keyed by its text. */
 	prompt?: OwnedPrompt
-	webhook?: string
 }
 
 export function hashPromptConfig(apiKeyId: string, config: PromptConfig, revision = compilerRevision): string {
@@ -78,7 +77,6 @@ export function hashPromptConfig(apiKeyId: string, config: PromptConfig, revisio
 		ambience: config.ambience,
 		...(config.channel === 'web' && { channel: config.channel }),
 		...(config.prompt ? { prompt: config.prompt } : { compilerRevision: revision }),
-		...(config.webhook && { webhook: config.webhook }),
 	})
 	return createHash('sha256').update(payload).digest('hex')
 }

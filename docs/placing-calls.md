@@ -166,9 +166,11 @@ const call = mimic.call({
 
 ## Extracting data
 
-Use a Zod schema to describe the values to extract from the call.
-Known booleans come back as `true` or `false`, not strings. Every field
-can also be `null` when the call did not establish its value, including
+Use a Zod schema to describe the values to extract from the call. Fields can
+be strings, numbers, booleans, enums, or arrays of those; the agent sees the
+allowed values and the extractor is held to them. `result.data` is typed from
+the schema. Known booleans come back as `true` or `false`, not strings. Every
+field can also be `null` when the call did not establish its value, including
 required or nonnullable schema fields. Unknown is different from false;
 optional fields are returned as null when missing.
 
@@ -179,17 +181,20 @@ const call = mimic.call({
 	to: '+15551234567',
 	goal: 'Confirm the appointment',
 	extract: z.object({
-		confirmed: z.boolean().describe('whether the appointment was confirmed'),
-		notes: z.string().nullable().describe('any notes from the conversation'),
+		outcome: z.enum(['confirmed', 'rescheduled', 'declined']).describe('what they decided'),
+		concerns: z.array(z.string()).describe('anything they were worried about'),
 		rescheduleDate: z.string().nullable().describe('new date if rescheduled'),
 	}),
 })
 
 const result = await call.result
 if (result.status === 'completed') {
-	result.data.confirmed // boolean | null
-	result.data.notes // string | null
+	result.data.outcome // 'confirmed' | 'rescheduled' | 'declined' | null
+	result.data.concerns // string[] | null
 	result.data.rescheduleDate // string | null
+	result.transcript // [{ role: 'agent' | 'caller', content }]
+	result.toolCalls // what the agent looked up or did
+	result.recordingUrl // signed link to the audio, valid for an hour
 }
 ```
 
@@ -289,8 +294,36 @@ How web calls differ from phone calls:
 - Replaying a request with the same `idempotencyKey` returns a fresh token
   for the same call while it can still be joined.
 
-`GET /api/v1/calls/:id` reports `channel` for every call so you can tell the
-two apart later.
+Every call record reports `channel`, so you can tell the two apart later.
+
+## Finished calls
+
+A call outlives the `MimicCall` object. Its id is available as soon as the
+API has created it:
+
+```typescript
+const call = mimic.call({ to: '...', goal: '...' })
+const id = await call.id
+```
+
+Use it to get the call back later, from any process:
+
+```typescript
+const finished = await mimic.calls.get(id)
+finished.status // 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
+finished.data // extracted values once the call has ended
+finished.transcript // [{ role, content }]
+finished.toolCalls // [{ name, input, output, success }]
+finished.recordingUrl // signed link, valid for an hour; fetch again for a fresh one
+finished.error // why it failed or was cancelled
+
+const page = await mimic.calls.list({ limit: 50, status: 'completed' })
+page.calls // newest first
+page.nextCursor // pass as `cursor` for the next page; null on the last
+```
+
+Over HTTP the same records come from `GET /api/v1/calls/:id` and
+`GET /api/v1/calls?limit=&status=&cursor=`.
 
 ## Cancelling a call
 
@@ -302,10 +335,15 @@ setTimeout(() => call.cancel(), 60_000)
 
 const result = await call.result
 // result will reject with MimicError('Call cancelled')
+
+// Or from anywhere, by id
+await mimic.calls.cancel(id)
 ```
 
 Cancellation propagates to the server — the call is marked as cancelled,
-queued jobs are removed, and any in-progress call is terminated.
+queued jobs are removed, and any in-progress call is terminated. `timeoutMs`
+(default and maximum 60 minutes) does the same when it elapses: the call ends
+and `.result` rejects with `CallTimeoutError`.
 
 ## Owning the prompt
 
@@ -338,13 +376,42 @@ a branded assistant with a maintained voice. `prompt.goal` is still used by
 the result extractor as its rubric for `goalAchieved`. `context` is not woven
 into an owned prompt, so put required background in `systemPrompt`.
 
-## Completion webhook
+## Webhooks
+
+When you would rather not hold a process open until the call ends, give the
+call a URL. It is POSTed once the call is over, whether it completed, failed,
+or was cancelled, and retried a few times if your endpoint is down:
 
 ```typescript
 mimic.call({
 	to: '+15551234567',
 	goal: '...',
-	webhook: 'https://example.com/mimic/completed', // receives a call.completed event
+	webhook: 'https://example.com/mimic',
+	webhookSecret: process.env.MIMIC_WEBHOOK_SECRET, // optional; signs each delivery
+})
+```
+
+The body is `{ event: 'call.completed' | 'call.failed', call }`, where `call`
+is exactly what `mimic.calls.get()` returns (the `WebhookEvent` type). A
+cancelled call arrives as `call.failed` with `call.status === 'cancelled'`.
+
+With a secret, each request carries `x-mimic-signature: t=<unix seconds>,v1=<hex>`,
+an HMAC-SHA256 of `<t>.<raw body>`. Check it against the raw body before
+parsing; deliveries older than five minutes are rejected by default:
+
+```typescript
+import { verifyWebhook, type WebhookEvent } from '@underflowai/mimic'
+
+app.post('/mimic', async (req, res) => {
+	const ok = await verifyWebhook({
+		payload: req.rawBody,
+		signature: req.headers['x-mimic-signature'],
+		secret: process.env.MIMIC_WEBHOOK_SECRET!,
+	})
+	if (!ok) return res.status(401).end()
+	const { event, call } = JSON.parse(req.rawBody) as WebhookEvent
+	// ...
+	res.status(200).end()
 })
 ```
 
@@ -381,11 +448,12 @@ mimic.call({
   // Audio
   ambience: true,               // Office background noise
 
-  // Completion webhook
-  webhook: 'https://example.com/mimic/completed',
+  // Told when the call ends (call.completed | call.failed)
+  webhook: 'https://example.com/mimic',
+  webhookSecret: 'whsec_...',   // Signs deliveries; check with verifyWebhook()
 
   // Timeouts
-  timeoutMs: 300_000,           // Max wait time (default 5 min)
+  timeoutMs: 3_600_000,         // Cancels the call when it elapses (default 60 min, the maximum)
   toolTimeoutMs: 30_000,        // Per-tool timeout (default 30s)
 
   // Deduplication

@@ -2,7 +2,7 @@ import { MimicClient } from './client.js'
 import { CallFailedError, CallTimeoutError, MimicError } from './errors.js'
 import { executeTool, introspectTools } from './tools.js'
 import type {
-	ApiCall,
+	Call,
 	CallEvent,
 	CallEventMap,
 	CallOptions,
@@ -14,7 +14,8 @@ import type {
 	WebSocketConstructor,
 } from './types.js'
 
-const DEFAULT_TIMEOUT_MS = 5 * 60_000
+/** The server ends any call at 60 minutes; waiting longer than that would wait on nothing. */
+const DEFAULT_TIMEOUT_MS = 60 * 60_000
 const DEFAULT_POLL_INTERVAL_MS = 2_000
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000
 const MAX_BUFFERED_EVENTS = 500
@@ -23,21 +24,23 @@ function sleep(ms: number) {
 	return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function toCallResult<T extends Record<string, unknown>>(call: ApiCall): CallResult<T> {
+function toCallResult<T extends Record<string, unknown>>(call: Call): CallResult<T> {
 	if (call.status === 'failed') {
-		return { status: 'failed', id: call.id, error: call.errorMessage ?? 'Call failed' }
+		return { status: 'failed', id: call.id, error: call.error ?? 'Call failed' }
 	}
 	if (call.status === 'cancelled') {
-		return { status: 'failed', id: call.id, error: call.errorMessage ?? 'Call cancelled' }
+		return { status: 'failed', id: call.id, error: call.error ?? 'Call cancelled' }
 	}
 	return {
 		status: 'completed',
 		id: call.id,
 		goalAchieved: call.goalAchieved ?? false,
 		goalAchievedReason: call.goalAchievedReason ?? '',
-		data: (call.result ?? {}) as ExtractedData<T>,
+		data: (call.data ?? {}) as ExtractedData<T>,
 		transcript: call.transcript ?? [],
+		toolCalls: call.toolCalls ?? [],
 		duration: call.duration ?? 0,
+		recordingUrl: call.recordingUrl ?? null,
 	}
 }
 
@@ -106,6 +109,13 @@ export class MimicCall<
 	readonly result: Promise<CallResult<T>>
 
 	/**
+	 * The call's id, as soon as the API has created it. Use it to find the
+	 * call again later (`mimic.calls.get(id)`), match a webhook, or cancel it
+	 * from another process. Rejects if the call could not be created.
+	 */
+	readonly id: Promise<string>
+
+	/**
 	 * For `channel: 'web'`, resolves with what the browser needs to join as
 	 * soon as the call is created. Resolves `null` for phone calls. Rejects
 	 * if the call could not be created.
@@ -131,6 +141,8 @@ export class MimicCall<
 	private settled = false
 	private resultResolve!: (result: CallResult<T>) => void
 	private resultReject!: (error: Error) => void
+	private idResolve!: (id: string) => void
+	private idReject!: (error: Error) => void
 	private webResolve!: (join: WebJoin | null) => void
 	private webReject!: (error: Error) => void
 	private streamTimeout: ReturnType<typeof setTimeout> | null = null
@@ -148,6 +160,12 @@ export class MimicCall<
 			this.resultReject = reject
 		})
 		this.result.catch(() => {})
+
+		this.id = new Promise<string>((resolve, reject) => {
+			this.idResolve = resolve
+			this.idReject = reject
+		})
+		this.id.catch(() => {})
 
 		this.web = new Promise<WebJoin | null>((resolve, reject) => {
 			this.webResolve = resolve
@@ -202,7 +220,10 @@ export class MimicCall<
 			await this.client.cancelCall(callId)
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err)
-			this.pushEvent({ type: 'error', message: `Cancel did not reach the server; the call may still be running: ${reason}` })
+			this.pushEvent({
+				type: 'error',
+				message: `Cancel did not reach the server; the call may still be running: ${reason}`,
+			})
 		}
 	}
 
@@ -235,10 +256,12 @@ export class MimicCall<
 				extract: this.options.extract,
 				ambience: this.options.ambience,
 				webhook: this.options.webhook,
+				webhookSecret: this.options.webhookSecret,
 				idempotencyKey: this.options.idempotencyKey,
 			})
 
 			this.callId = call.id
+			this.idResolve(call.id)
 			this.webResolve(call.web ?? null)
 
 			if (this.cancelled) {
@@ -272,7 +295,8 @@ export class MimicCall<
 			}
 		} catch (err) {
 			const error = err instanceof Error ? err : new MimicError(String(err))
-			// No-op once createCall has succeeded; only a failed creation leaves `web` pending.
+			// No-ops once createCall has succeeded; only a failed creation leaves `id` and `web` pending.
+			this.idReject(error)
 			this.webReject(error)
 			if (this.cancelled) return
 			this.pushEvent({ type: 'error', message: error.message })
@@ -301,10 +325,7 @@ export class MimicCall<
 
 		this.streamTimeout = setTimeout(() => {
 			ws.close()
-			const err = new CallTimeoutError(`Call timed out after ${timeoutMs}ms`, callId)
-			this.pushEvent({ type: 'error', message: err.message })
-			this.complete()
-			this.settle('reject', err)
+			this.timedOut(callId, timeoutMs)
 		}, timeoutMs)
 		this.streamTimeout.unref?.()
 
@@ -459,9 +480,9 @@ export class MimicCall<
 				}
 
 				if (call.status === 'cancelled') {
-					this.pushEvent({ type: 'error', message: call.errorMessage ?? 'Call cancelled' })
+					this.pushEvent({ type: 'error', message: call.error ?? 'Call cancelled' })
 					this.complete()
-					this.settle('reject', new CallFailedError(call.errorMessage ?? 'Call cancelled', callId, call))
+					this.settle('reject', new CallFailedError(call.error ?? 'Call cancelled', callId, call))
 					return
 				}
 			} catch {
@@ -471,6 +492,13 @@ export class MimicCall<
 			await sleep(pollIntervalMs)
 		}
 
+		this.timedOut(callId, timeoutMs)
+	}
+
+	/** `timeoutMs` is how long the call may take, not how long we watch it: once it is up the call ends. */
+	private timedOut(callId: string, timeoutMs: number) {
+		if (this.done) return
+		void this.cancelOnServer(callId)
 		const err = new CallTimeoutError(`Call timed out after ${timeoutMs}ms`, callId)
 		this.pushEvent({ type: 'error', message: err.message })
 		this.complete()
@@ -531,7 +559,7 @@ export class MimicCall<
 		})
 	}
 
-	private async fetchFinalCall(callId: string): Promise<ApiCall> {
+	private async fetchFinalCall(callId: string): Promise<Call> {
 		let lastError: Error | null = null
 		const retries = 8
 

@@ -1,32 +1,64 @@
 import { ApiError } from './errors.js'
 import { ZodObject, type ZodType } from 'zod'
 
-import type { ApiCall, CallChannel, CreateCallResponse, MimicOptions, Prompt, ToolSchema, Voice } from './types.js'
+import type {
+	Call,
+	CallChannel,
+	CallPage,
+	CallStatus,
+	CreateCallResponse,
+	ExtractSchema,
+	ListCallsOptions,
+	MimicOptions,
+	Prompt,
+	ToolSchema,
+	Voice,
+} from './types.js'
 
-function serializeExtractSchema(
-	schema?: ZodObject<Record<string, ZodType>>,
-): Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> | undefined {
+/** Wire form of one `extract` field. The server reads string, number, boolean, enum, and arrays of those. */
+interface ExtractField {
+	type: string
+	description: string
+	nullable?: boolean
+	optional?: boolean
+	enum?: string[]
+	items?: string
+}
+
+export function serializeExtractSchema(schema?: ExtractSchema): Record<string, ExtractField> | undefined {
 	if (!schema || !(schema instanceof ZodObject)) return undefined
 	const shape = schema.shape as Record<string, ZodType>
-	const result: Record<string, { type: string; description: string; nullable?: boolean; optional?: boolean }> = {}
+	const result: Record<string, ExtractField> = {}
 	for (const [key, field] of Object.entries(shape)) {
 		const description = field.description ?? key
 		const nullable = field.isNullable()
 		const optional = field.isOptional()
-		const typeName = getZodBaseType(field)
-		result[key] = { type: typeName, description, ...(nullable && { nullable }), ...(optional && { optional }) }
+		result[key] = {
+			...describeZodType(field),
+			description,
+			...(nullable && { nullable }),
+			...(optional && { optional }),
+		}
 	}
 	return result
 }
 
-function getZodBaseType(field: ZodType): string {
+type ZodDef = { typeName?: string; innerType?: ZodType; type?: ZodType; values?: string[] }
+
+function describeZodType(field: ZodType): Pick<ExtractField, 'type' | 'enum' | 'items'> {
 	// Walk through nullable/optional wrappers to find the base type
-	const def = (field as { _def?: { typeName?: string; innerType?: ZodType } })._def
-	if (!def) return 'string'
-	if (def.typeName === 'ZodNullable' && def.innerType) return getZodBaseType(def.innerType)
-	if (def.typeName === 'ZodOptional' && def.innerType) return getZodBaseType(def.innerType)
+	const def = (field as { _def?: ZodDef })._def
+	if (!def) return { type: 'string' }
+	if (
+		(def.typeName === 'ZodNullable' || def.typeName === 'ZodOptional' || def.typeName === 'ZodDefault') &&
+		def.innerType
+	) {
+		return describeZodType(def.innerType)
+	}
+	if (def.typeName === 'ZodEnum' && def.values) return { type: 'string', enum: def.values }
+	if (def.typeName === 'ZodArray' && def.type) return { type: 'array', items: describeZodType(def.type).type }
 	const name = def.typeName?.replace('Zod', '').toLowerCase()
-	return name ?? 'string'
+	return { type: name ?? 'string' }
 }
 
 import { SDK_VERSION } from './version.js'
@@ -102,9 +134,10 @@ export class MimicClient {
 		recipient?: { firstName: string; lastName?: string; email?: string }
 		aiDisclosure?: boolean
 		tools?: ToolSchema[]
-		extract?: ZodObject<Record<string, ZodType>>
+		extract?: ExtractSchema
 		ambience?: boolean
 		webhook?: string
+		webhookSecret?: string
 		idempotencyKey?: string
 	}): Promise<{ call: CreateCallResponse }> {
 		const call = await this.request<CreateCallResponse>('/api/v1/calls', {
@@ -124,6 +157,7 @@ export class MimicClient {
 				extract: serializeExtractSchema(params.extract),
 				ambience: params.ambience,
 				webhook: params.webhook,
+				webhookSecret: params.webhookSecret,
 				idempotencyKey: params.idempotencyKey,
 			}),
 		})
@@ -131,12 +165,21 @@ export class MimicClient {
 		return { call }
 	}
 
-	async getCall(id: string): Promise<ApiCall> {
-		return this.request<ApiCall>(`/api/v1/calls/${encodeURIComponent(id)}`)
+	async getCall(id: string): Promise<Call> {
+		return this.request<Call>(`/api/v1/calls/${encodeURIComponent(id)}`)
 	}
 
-	async cancelCall(id: string): Promise<void> {
-		await this.request<{ id: string; status: string }>(`/api/v1/calls/${encodeURIComponent(id)}`, {
+	async listCalls(options: ListCallsOptions = {}): Promise<CallPage> {
+		const query = new URLSearchParams()
+		if (options.limit !== undefined) query.set('limit', String(options.limit))
+		if (options.cursor) query.set('cursor', options.cursor)
+		if (options.status) query.set('status', options.status)
+		const suffix = query.size > 0 ? `?${query}` : ''
+		return this.request<CallPage>(`/api/v1/calls${suffix}`)
+	}
+
+	async cancelCall(id: string): Promise<{ id: string; status: CallStatus }> {
+		return this.request<{ id: string; status: CallStatus }>(`/api/v1/calls/${encodeURIComponent(id)}`, {
 			method: 'DELETE',
 		})
 	}

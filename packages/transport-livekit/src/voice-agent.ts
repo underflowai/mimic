@@ -204,6 +204,8 @@ export async function createVoiceAgent(agentConfig: VoiceAgentConfig): Promise<V
 			const roomService = new RoomServiceClient(livekitUrl, livekitApiKey, livekitApiSecret)
 			await roomService.deleteRoom(roomName)
 		} catch (err) {
+			// A cancel deletes the room from the API side first; finding it already gone is the outcome we wanted.
+			if ((err as { status?: number }).status === 404) return
 			console.error(`${prefix} failed to delete room ${roomName}:`, err)
 		}
 	}

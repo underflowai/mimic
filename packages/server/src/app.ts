@@ -1,7 +1,9 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { HTTPException } from 'hono/http-exception'
 import { logger } from 'hono/logger'
 
+import { childLogger } from './logger.js'
 import { authMiddleware } from './middleware/auth.js'
 import { rateLimitMiddleware } from './middleware/rate-limit.js'
 import { calls } from './routes/calls.js'
@@ -21,8 +23,12 @@ api.route('/calls', calls)
 app.route('/api/v1', api)
 
 app.onError((err, c) => {
-	console.error('[server] Unhandled error:', err)
-	return c.json({ error: err.message ?? 'Internal server error' }, 500)
+	// Deliberate HTTP errors keep their status and body.
+	if (err instanceof HTTPException) return err.getResponse()
+	// Anything else is a bug. The full error (and stack) goes to the log; the
+	// client gets a fixed body so query text and internals never leave the server.
+	childLogger({ method: c.req.method, path: c.req.path, err }).error('unhandled error')
+	return c.json({ error: 'Internal server error' }, 500)
 })
 
 export { app }

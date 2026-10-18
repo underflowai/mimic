@@ -9,13 +9,7 @@ export type { OutboundCallConfig, OutboundCallParams, OutboundCallResult } from 
 // ── Post-call ─────────────────────────────────────────────────────────
 
 export { extractCallResult } from './result-extractor.js'
-export type {
-	ExtractionInput,
-	ExtractionResult,
-	SuccessCondition,
-	ToolCallRecord,
-	TranscriptEntry,
-} from './result-extractor.js'
+export type { ExtractionInput, ExtractionResult, ToolCallRecord, TranscriptEntry } from './result-extractor.js'
 
 // ── Auth ──────────────────────────────────────────────────────────────
 

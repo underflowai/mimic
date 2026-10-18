@@ -15,11 +15,6 @@ export interface TranscriptEntry {
 	content: string
 }
 
-export type SuccessCondition =
-	| { type: 'llm_evaluated' }
-	| { type: 'tool_called'; toolName: string }
-	| { type: 'field_filled'; fieldName: string }
-
 export interface ToolCallRecord {
 	name: string
 	input: unknown
@@ -46,7 +41,6 @@ export interface ExtractionInput {
 	/** Typed schema for extraction. Each field has type + description + nullable/optional. */
 	results: Record<string, unknown> | Record<string, TypedField>
 	toolCalls?: ToolCallRecord[]
-	successCondition?: SuccessCondition
 }
 
 function normalizeToTypedSchema(results: Record<string, unknown>): Record<string, TypedField> {
@@ -128,29 +122,6 @@ function formatToolCalls(toolCalls: ToolCallRecord[]) {
 		.join('\n\n')
 }
 
-function deterministicSuccess(
-	condition: SuccessCondition | undefined,
-	result: Record<string, unknown>,
-	toolCalls: ToolCallRecord[],
-) {
-	if (!condition || condition.type === 'llm_evaluated') return null
-	if (condition.type === 'tool_called') {
-		const matched = toolCalls.some((t) => t.name === condition.toolName && t.success === true)
-		return {
-			value: matched,
-			reason: matched
-				? `Tool ${condition.toolName} was called successfully.`
-				: `Tool ${condition.toolName} was not called successfully.`,
-		}
-	}
-	const value = result[condition.fieldName]
-	const filled = value !== null && value !== undefined && String(value).trim().length > 0
-	return {
-		value: filled,
-		reason: filled ? `Field ${condition.fieldName} was filled.` : `Field ${condition.fieldName} was not filled.`,
-	}
-}
-
 let cachedSystemPrompt: Promise<string> | null = null
 function getSystemPrompt() {
 	cachedSystemPrompt ??= loadPrompt('instructions/result-extractor')
@@ -158,11 +129,6 @@ function getSystemPrompt() {
 }
 
 export async function extractCallResult(client: OpenAI, input: ExtractionInput): Promise<ExtractionResult> {
-	const deterministic =
-		input.successCondition?.type === 'tool_called'
-			? deterministicSuccess(input.successCondition, {}, input.toolCalls ?? [])
-			: null
-
 	const typedResults = normalizeToTypedSchema(input.results)
 	const userPrompt = [
 		'Goal:',
@@ -173,10 +139,6 @@ export async function extractCallResult(client: OpenAI, input: ExtractionInput):
 		'',
 		'Tool calls:',
 		formatToolCalls(input.toolCalls ?? []),
-		'',
-		deterministic
-			? `Deterministic goal decision: goalAchieved=${deterministic.value}, reason: ${deterministic.reason}`
-			: 'Deterministic goal decision: none (use your judgment)',
 		'',
 		'Transcript:',
 		formatTranscript(input.transcript),
@@ -239,14 +201,5 @@ export async function extractCallResult(client: OpenAI, input: ExtractionInput):
 		result[key] = typeof parsed[key] === expectedType ? parsed[key] : null
 	}
 
-	const fieldDecision =
-		input.successCondition?.type === 'field_filled'
-			? deterministicSuccess(input.successCondition, result, input.toolCalls ?? [])
-			: deterministic
-
-	return {
-		result,
-		goalAchieved: fieldDecision?.value ?? goalAchieved,
-		goalAchievedReason: fieldDecision?.reason ?? goalAchievedReason,
-	}
+	return { result, goalAchieved, goalAchievedReason }
 }

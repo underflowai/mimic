@@ -352,17 +352,6 @@ export interface ApiCall {
 }
 
 /** @internal */
-export interface ApiAgent {
-	id: string
-	name: string
-	goal: string
-	voice: Voice
-	context: Record<string, string>
-	tools: ToolSchema[]
-	results: Record<string, unknown>
-}
-
-/** @internal */
 export interface CreateCallResponse {
 	id: string
 	status: ApiCall['status']

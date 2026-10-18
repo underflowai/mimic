@@ -1,5 +1,12 @@
 # @underflowai/mimic
 
+## Unreleased
+
+Removed
+
+- API keys starting with `sk_` are no longer accepted. Every key the server
+  issues starts with `mk_`.
+
 ## 0.3.0
 
 Breaking changes

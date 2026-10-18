@@ -21,7 +21,6 @@ calls.post('/', async (c) => {
 	let body: {
 		to: string
 		goal: string
-		agentId?: string
 		voice?: 'female' | 'male'
 		userTimezone?: string
 		context?: string
@@ -74,106 +73,98 @@ calls.post('/', async (c) => {
 		if (existing) return c.json({ id: existing.id, status: existing.status })
 	}
 
+	if (!body.goal?.trim()) return c.json({ error: 'goal is required' }, 400)
+
+	const personaPrompt = body.persona?.systemPrompt?.trim() ?? ''
+	if (body.persona && !personaPrompt) {
+		return c.json({ error: 'persona.systemPrompt must not be empty' }, 400)
+	}
+	if (personaPrompt.length > 48_000) {
+		return c.json({ error: 'persona.systemPrompt exceeds 48000 characters' }, 400)
+	}
+	if (body.webhook && !/^https?:\/\//.test(body.webhook)) {
+		return c.json({ error: 'webhook must be an http(s) URL' }, 400)
+	}
+
+	const voice = body.voice ?? 'female'
+	const results = body.results ?? body.extract ?? {}
+
+	const configHash = hashPromptConfig(apiKey.id, {
+		goal: body.goal,
+		voice,
+		context: body.context,
+		data: body.data,
+		tools,
+		results,
+		aiDisclosure: body.aiDisclosure,
+		ambience: body.ambience,
+		...(personaPrompt && {
+			persona: { systemPrompt: personaPrompt, agentName: body.persona?.agentName },
+		}),
+		...(body.webhook && { webhook: body.webhook }),
+	})
+
+	// The compiled prompt is cached per config hash; every call with the same
+	// goal, tools, and data shape reuses one agent row.
+	const [cached] = await db
+		.select()
+		.from(apiAgents)
+		.where(
+			and(
+				eq(apiAgents.apiKeyId, apiKey.id),
+				eq(apiAgents.configHash, configHash),
+				sql`${apiAgents.systemPrompt} <> ''`,
+			),
+		)
+		.limit(1)
+
 	let agentId: string
 	let needsCompilation = false
 
-	if (body.agentId) {
-		const [existing] = await db
-			.select()
-			.from(apiAgents)
-			.where(and(eq(apiAgents.id, body.agentId), eq(apiAgents.apiKeyId, apiKey.id)))
-			.limit(1)
-		if (!existing) return c.json({ error: 'Agent not found' }, 404)
-		agentId = existing.id
+	if (cached) {
+		agentId = cached.id
+	} else if (personaPrompt) {
+		// Persona mode: the caller owns the prompt. Store it as-is, ready
+		// to dial — no compilation, no [AGENT_NAME] templating.
+		const [inserted] = await db
+			.insert(apiAgents)
+			.values({
+				apiKeyId: apiKey.id,
+				name: body.goal.slice(0, 80) || 'persona agent',
+				goal: body.goal,
+				voice,
+				context: body.context ?? '',
+				tools,
+				results,
+				configHash,
+				systemPrompt: personaPrompt,
+				agentName: body.persona?.agentName?.trim() || (voice === 'male' ? 'Arlo' : 'Aurora'),
+				ambience: body.ambience ?? true,
+				webhook: body.webhook ?? null,
+			})
+			.returning()
+		agentId = inserted.id
 	} else {
-		if (!body.goal?.trim()) return c.json({ error: 'goal is required' }, 400)
-
-		const personaPrompt = body.persona?.systemPrompt?.trim() ?? ''
-		if (body.persona && !personaPrompt) {
-			return c.json({ error: 'persona.systemPrompt must not be empty' }, 400)
-		}
-		if (personaPrompt.length > 48_000) {
-			return c.json({ error: 'persona.systemPrompt exceeds 48000 characters' }, 400)
-		}
-		if (body.webhook && !/^https?:\/\//.test(body.webhook)) {
-			return c.json({ error: 'webhook must be an http(s) URL' }, 400)
-		}
-
-		const voice = body.voice ?? 'female'
-		const results = body.results ?? body.extract ?? {}
-
-		const configHash = hashPromptConfig(apiKey.id, {
-			goal: body.goal,
-			voice,
-			context: body.context,
-			data: body.data,
-			tools,
-			results,
-			aiDisclosure: body.aiDisclosure,
-			ambience: body.ambience,
-			...(personaPrompt && {
-				persona: { systemPrompt: personaPrompt, agentName: body.persona?.agentName },
-			}),
-			...(body.webhook && { webhook: body.webhook }),
-		})
-
-		const [cached] = await db
-			.select()
-			.from(apiAgents)
-			.where(
-				and(
-					eq(apiAgents.apiKeyId, apiKey.id),
-					eq(apiAgents.configHash, configHash),
-					sql`${apiAgents.systemPrompt} <> ''`,
-				),
-			)
-			.limit(1)
-
-		if (cached) {
-			agentId = cached.id
-		} else if (personaPrompt) {
-			// Persona mode: the caller owns the prompt. Store it as-is, ready
-			// to dial — no compilation, no [AGENT_NAME] templating.
-			const [inserted] = await db
-				.insert(apiAgents)
-				.values({
-					apiKeyId: apiKey.id,
-					name: body.goal.slice(0, 80) || 'persona agent',
-					goal: body.goal,
-					voice,
-					context: body.context ?? '',
-					tools,
-					results,
-					configHash,
-					systemPrompt: personaPrompt,
-					agentName: body.persona?.agentName?.trim() || (voice === 'male' ? 'Arlo' : 'Aurora'),
-					ambience: body.ambience ?? true,
-					webhook: body.webhook ?? null,
-				})
-				.returning()
-			agentId = inserted.id
-		} else {
-			// Create a placeholder agent row — compile in background
-			const [placeholder] = await db
-				.insert(apiAgents)
-				.values({
-					apiKeyId: apiKey.id,
-					name: body.goal.slice(0, 80) || 'voice agent',
-					goal: body.goal,
-					voice,
-					context: body.context ?? '',
-					tools,
-					results,
-					configHash,
-					systemPrompt: '',
-					agentName: voice === 'male' ? 'Arlo' : 'Aurora',
-					ambience: body.ambience ?? true,
-					webhook: body.webhook ?? null,
-				})
-				.returning()
-			agentId = placeholder.id
-			needsCompilation = true
-		}
+		// Create a placeholder agent row — compile in background
+		const [placeholder] = await db
+			.insert(apiAgents)
+			.values({
+				apiKeyId: apiKey.id,
+				name: body.goal.slice(0, 80) || 'voice agent',
+				goal: body.goal,
+				voice,
+				context: body.context ?? '',
+				tools,
+				results,
+				configHash,
+				systemPrompt: '',
+				agentName: voice === 'male' ? 'Arlo' : 'Aurora',
+				ambience: body.ambience ?? true,
+				webhook: body.webhook ?? null,
+			})
+			.returning()
+		agentId = placeholder.id
+		needsCompilation = true
 	}
 
 	const callContext: Record<string, string> = {}
@@ -258,12 +249,12 @@ calls.post('/', async (c) => {
 		try {
 			if (needsCompilation) {
 				const compiled = await compileGoal({
-					goal: body.goal!,
-					voice: body.voice ?? 'female',
+					goal: body.goal,
+					voice,
 					context: body.context ?? '',
 					data: body.data,
 					tools,
-					results: body.results ?? body.extract ?? {},
+					results,
 					aiDisclosure: body.aiDisclosure,
 				})
 

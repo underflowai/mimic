@@ -52,35 +52,21 @@ describe('extractCallResult', () => {
 		assert.deepEqual(schema.properties.preferredDay.type, ['string', 'null'])
 	})
 
-	it('does not tell the model that a field is unfilled before extraction', async () => {
+	it('reports tool execution success to the model, including when it is unknown', async () => {
 		const mock = createClient(
-			JSON.stringify({ wantsFollowUp: false, goalAchieved: false, goalAchievedReason: 'Caller declined.' }),
+			JSON.stringify({ wantsFollowUp: null, goalAchieved: false, goalAchievedReason: 'Unverified.' }),
 		)
-		const extraction = await extractCallResult(mock.client, {
+		await extractCallResult(mock.client, {
 			...input,
-			successCondition: { type: 'field_filled', fieldName: 'wantsFollowUp' },
+			toolCalls: [
+				{ name: 'sendFollowUp', input: {}, output: {}, success: undefined },
+				{ name: 'lookup', input: {}, output: {}, success: true },
+			],
 		})
-		const message = mock.getRequest().messages.find((m) => m.role === 'user')
-		assert.ok(!String(message?.content).includes('goalAchieved=false'))
-		assert.equal(extraction.result.wantsFollowUp, false)
-		assert.equal(extraction.goalAchieved, true, 'An explicit false is a filled boolean; unknown is null')
+		const content = String(mock.getRequest().messages[1].content)
+		assert.ok(content.includes('Tool: sendFollowUp\nExecution success: unknown'))
+		assert.ok(content.includes('Tool: lookup\nExecution success: true'))
 	})
-
-	for (const success of [undefined, false, true]) {
-		it(`requires explicit tool execution success for tool_called (${success})`, async () => {
-			const mock = createClient(
-				JSON.stringify({ wantsFollowUp: null, goalAchieved: true, goalAchievedReason: 'Assistant said done.' }),
-			)
-			const extraction = await extractCallResult(mock.client, {
-				...input,
-				toolCalls: [{ name: 'sendFollowUp', input: {}, output: {}, success }],
-				successCondition: { type: 'tool_called', toolName: 'sendFollowUp' },
-			})
-			assert.equal(extraction.goalAchieved, success === true)
-			if (success === undefined)
-				assert.ok(String(mock.getRequest().messages[1].content).includes('Execution success: unknown'))
-		})
-	}
 
 	for (const [label, content, extra] of [
 		['malformed', '{"wantsFollowUp":', {}],
@@ -101,10 +87,7 @@ describe('extractCallResult', () => {
 		const mock = createClient(
 			JSON.stringify({ wantsFollowUp: 'false', goalAchieved: false, goalAchievedReason: 'Unknown.' }),
 		)
-		const extraction = await extractCallResult(mock.client, {
-			...input,
-			successCondition: { type: 'field_filled', fieldName: 'wantsFollowUp' },
-		})
+		const extraction = await extractCallResult(mock.client, input)
 		assert.equal(extraction.result.wantsFollowUp, null)
 		assert.equal(extraction.goalAchieved, false)
 	})

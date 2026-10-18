@@ -59,7 +59,7 @@ export class Mimic {
 		if (!opts.apiKey || typeof opts.apiKey !== 'string') {
 			throw new MimicError('API key is required. Pass a string starting with "mk_".')
 		}
-		if (!opts.apiKey.startsWith('mk_') && !opts.apiKey.startsWith('sk_')) {
+		if (!opts.apiKey.startsWith('mk_')) {
 			throw new MimicError(
 				`Invalid API key format: "${opts.apiKey.slice(0, 8)}...". Expected a key starting with "mk_".`,
 			)

@@ -214,7 +214,6 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 					transcript: extractionTranscript,
 					results: agent.results as Record<string, unknown>,
 					toolCalls: toolCallRecords,
-					successCondition: agent.successCondition as Parameters<typeof extractCallResult>[1]['successCondition'],
 				})
 
 				await updateCall(callId, {

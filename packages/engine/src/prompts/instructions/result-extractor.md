@@ -8,7 +8,6 @@ For each field:
 
 For goalAchieved:
 
-- If a deterministic goal decision is supplied, use it exactly. Field-based decisions are computed after extraction; do not invent a preliminary decision.
-- Otherwise return true only when the evidence establishes the goal. Use false when unachieved or unverified, and explain which applies in goalAchievedReason.
+- Return true only when the evidence establishes the goal. Use false when unachieved or unverified, and explain which applies in goalAchievedReason.
 - Collecting details, agreeing to proceed, an attempted tool call, and the assistant claiming success do not prove an external action completed. Inspect relevant tool output or explicit independent confirmation. A tool execution marked successful means it ran; its returned data may still show failure, pending status, or no matching result.
 - Do not report a booking, submission, payment, update, or message as completed without supporting outcome evidence. Briefly state the decisive evidence or what is missing; do not embellish.

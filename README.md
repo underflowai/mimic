@@ -317,7 +317,7 @@ RECORDING_S3_REGION=us-east-1
 pnpm install
 cd packages/server
 pnpm db:migrate
-npx tsx src/scripts/create-key.ts
+npx tsx src/scripts/create-key.ts my-app   # prints the key once; one per app
 pnpm start
 ```
 

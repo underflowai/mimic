@@ -73,9 +73,13 @@ const page = /* html */ `<!doctype html>
       status.textContent = 'Connecting…'
       await room.connect(url, token)
       await room.startAudio() // allowed: we are inside a click handler
-      await room.localParticipant.setMicrophoneEnabled(true)
-      status.textContent = 'Connected. Say hello.'
       stop.disabled = false
+      try {
+        await room.localParticipant.setMicrophoneEnabled(true)
+        status.textContent = 'Connected. Say hello.'
+      } catch (err) {
+        status.textContent = 'Connected, but the microphone is off: ' + (err?.message ?? err)
+      }
 
       events = new EventSource('/events/' + sessionId)
       events.onmessage = (e) => {

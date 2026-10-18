@@ -207,8 +207,8 @@ export async function runCall(call: ApiCallRow, agent: ApiAgentRow) {
 				// the completion write.
 				const eventLogPath = await persistEventLog(callId, result.events ?? [])
 				const statusBeforeFinalize = await getCallStatus(callId)
-				if (statusBeforeFinalize === 'cancelled') {
-					childLogger({ callId }).info('skipping completion write because call was cancelled')
+				if (statusBeforeFinalize === 'cancelled' || statusBeforeFinalize === 'failed') {
+					childLogger({ callId, status: statusBeforeFinalize }).info('skipping completion write; call already ended')
 					if (eventLogPath) await updateCall(callId, { eventLogPath })
 					return
 				}

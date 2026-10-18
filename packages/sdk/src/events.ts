@@ -7,12 +7,15 @@ import type { CallEvent, ServerMessage, WebSocketConstructor } from './types.js'
  * `status`, `error`, and `done` events and returns once the call has ended;
  * a call that ended before you connected yields its final status and returns.
  * Listening only: the connection that made the call keeps running its tools.
+ * Aborting `signal` ends the iteration quietly, even while it is waiting.
  */
 export async function* streamCallEvents(
 	client: MimicClient,
 	callId: string,
 	WebSocketImpl: WebSocketConstructor,
+	signal?: AbortSignal,
 ): AsyncGenerator<CallEvent> {
+	if (signal?.aborted) return
 	const ws = new WebSocketImpl(client.streamUrl(callId))
 	const queue: Array<CallEvent | Error | null> = []
 	let wake: (() => void) | null = null
@@ -25,6 +28,8 @@ export async function* streamCallEvents(
 		wake?.()
 		wake = null
 	}
+	const stop = () => push(null)
+	signal?.addEventListener('abort', stop, { once: true })
 
 	ws.addEventListener('open', () => {
 		try {
@@ -70,6 +75,7 @@ export async function* streamCallEvents(
 		}
 	} finally {
 		ended = true
+		signal?.removeEventListener('abort', stop)
 		ws.close()
 	}
 }

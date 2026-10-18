@@ -349,9 +349,10 @@ for await (const event of mimic.calls.events(id)) {
 
 `calls.create` takes the same options as `mimic.call()` except `tools`:
 nothing stays connected to run them. Any number of processes can iterate
-`calls.events(id)` at once, and a stream that stops before the call has
-ended throws a `MimicError`. In Node 22+ and browsers the stream uses the
-global `WebSocket`; elsewhere pass one in the `Mimic` options.
+`calls.events(id)` at once; pass `{ signal }` to stop when the client goes
+away, and a stream that drops before the call has ended throws a
+`MimicError`. In Node 22+ and browsers the stream uses the global
+`WebSocket`; elsewhere pass one in the `Mimic` options.
 
 ## Cancelling a call
 

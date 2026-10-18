@@ -33,9 +33,10 @@ Added
 - `mimic.calls.create(options)` creates a call without attaching to it and
   returns `{ id, status, web }` (`CreatedCall`), for request handlers that
   cannot stay connected. It takes everything `mimic.call()` takes except
-  `tools`. `mimic.calls.events(id)` then streams the call's events
-  (`status`, `speech`, `done`, `error`) as an async iterable that ends with
-  the call; any number of watchers can follow one call.
+  `tools`. `mimic.calls.events(id, { signal })` then streams the call's
+  events (`status`, `speech`, `done`, `error`) as an async iterable that
+  ends with the call or the signal; any number of watchers can follow one
+  call.
 - `status` event (`{ status }`) whenever the call changes state, on
   `MimicCall` and `calls.events()`.
 - Zod 4 schemas work for `extract` and tool `parameters` alongside Zod 3.

@@ -86,10 +86,10 @@ export class Mimic {
 		cancel: (id: string) => Promise<{ id: string; status: CallStatus }>
 		/**
 		 * Watch a call's `speech`, `status`, `error`, and `done` events as they
-		 * happen; the iteration ends with the call. Listening only, so it works
-		 * beside whatever created the call.
+		 * happen; the iteration ends with the call, or when `signal` aborts.
+		 * Listening only, so it works beside whatever created the call.
 		 */
-		events: (id: string) => AsyncIterable<CallEvent>
+		events: (id: string, options?: { signal?: AbortSignal }) => AsyncIterable<CallEvent>
 	}
 
 	/**
@@ -128,10 +128,10 @@ export class Mimic {
 			get: (id) => this.client.getCall(id),
 			list: (listOptions) => this.client.listCalls(listOptions),
 			cancel: (id) => this.client.cancelCall(id),
-			events: (id) => {
+			events: (id, options) => {
 				const WebSocketImpl = this.wsOption === null ? undefined : (this.wsOption ?? globalThis.WebSocket)
 				if (!WebSocketImpl) throw new MimicError('calls.events() needs a WebSocket; pass one in the Mimic options')
-				return streamCallEvents(this.client, id, WebSocketImpl)
+				return streamCallEvents(this.client, id, WebSocketImpl, options?.signal)
 			},
 		}
 	}

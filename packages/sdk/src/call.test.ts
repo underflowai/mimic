@@ -592,6 +592,19 @@ describe('Mimic.calls', () => {
 		ws.last.open()
 		ws.last.close()
 		await assert.rejects(dropped, /closed before the call ended/)
+
+		// An aborted signal ends the iteration quietly while it is still waiting.
+		const controller = new AbortController()
+		const aborted = (async () => {
+			let count = 0
+			for await (const _event of mimic.calls.events('call_1', { signal: controller.signal })) count++
+			return count
+		})()
+		await new Promise((r) => setImmediate(r))
+		ws.last.open()
+		controller.abort()
+		assert.equal(await aborted, 0)
+		assert.equal(ws.last.readyState, 3)
 	})
 })
 
